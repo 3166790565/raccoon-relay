@@ -10,10 +10,10 @@ import (
 	"sync"
 	"time"
 
-	"raccoon-relay/internal/config"
-	"raccoon-relay/internal/raccoon"
-	"raccoon-relay/internal/relay"
-	"raccoon-relay/internal/store"
+	"github.com/3166790565/raccoon-relay/internal/config"
+	"github.com/3166790565/raccoon-relay/internal/raccoon"
+	"github.com/3166790565/raccoon-relay/internal/relay"
+	"github.com/3166790565/raccoon-relay/internal/store"
 )
 
 // Scheduler 负责每日自动签到。

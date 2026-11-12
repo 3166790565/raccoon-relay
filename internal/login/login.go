@@ -6,8 +6,8 @@ import (
 	"net/url"
 	"strings"
 
-	"raccoon-relay/internal/raccoon"
-	"raccoon-relay/internal/store"
+	"github.com/3166790565/raccoon-relay/internal/raccoon"
+	"github.com/3166790565/raccoon-relay/internal/store"
 )
 
 // Manager 处理容器内的登录：授权码兑换 + 手填令牌。

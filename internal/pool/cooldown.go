@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"raccoon-relay/internal/store"
+	"github.com/3166790565/raccoon-relay/internal/store"
 )
 
 // 冷却分级与桌面号池一致：

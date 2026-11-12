@@ -14,14 +14,14 @@ import (
 	"strings"
 	"time"
 
-	"raccoon-relay/internal/config"
-	"raccoon-relay/internal/creds"
-	"raccoon-relay/internal/login"
-	"raccoon-relay/internal/pool"
-	"raccoon-relay/internal/raccoon"
-	"raccoon-relay/internal/relay"
-	"raccoon-relay/internal/scheduler"
-	"raccoon-relay/internal/store"
+	"github.com/3166790565/raccoon-relay/internal/config"
+	"github.com/3166790565/raccoon-relay/internal/creds"
+	"github.com/3166790565/raccoon-relay/internal/login"
+	"github.com/3166790565/raccoon-relay/internal/pool"
+	"github.com/3166790565/raccoon-relay/internal/raccoon"
+	"github.com/3166790565/raccoon-relay/internal/relay"
+	"github.com/3166790565/raccoon-relay/internal/scheduler"
+	"github.com/3166790565/raccoon-relay/internal/store"
 )
 
 // Panel 是管理面：REST API + 单页面板。与数据面同端口，路径前缀 /api 与 /admin。

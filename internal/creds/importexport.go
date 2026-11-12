@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"raccoon-relay/internal/raccoon"
-	"raccoon-relay/internal/store"
+	"github.com/3166790565/raccoon-relay/internal/raccoon"
+	"github.com/3166790565/raccoon-relay/internal/store"
 )
 
 // File 是桌面版导出的凭据包。字段顺序与样例保持一致，导出后可直接回灌桌面版。

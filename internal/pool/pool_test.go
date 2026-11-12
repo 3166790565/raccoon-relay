@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"raccoon-relay/internal/store"
+	"github.com/3166790565/raccoon-relay/internal/store"
 )
 
 func newStore(t *testing.T) *store.Store {

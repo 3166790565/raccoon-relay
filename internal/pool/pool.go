@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"raccoon-relay/internal/store"
+	"github.com/3166790565/raccoon-relay/internal/store"
 )
 
 type Pool struct {

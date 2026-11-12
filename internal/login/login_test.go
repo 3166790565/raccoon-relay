@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"raccoon-relay/internal/raccoon"
-	"raccoon-relay/internal/store"
+	"github.com/3166790565/raccoon-relay/internal/raccoon"
+	"github.com/3166790565/raccoon-relay/internal/store"
 )
 
 // ExtractCode 必须吃三种形态：完整深链、裸 code、含 code 的任意地址。

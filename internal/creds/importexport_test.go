@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"raccoon-relay/internal/store"
+	"github.com/3166790565/raccoon-relay/internal/store"
 )
 
 func newTestStore(t *testing.T) *store.Store {
