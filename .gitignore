@@ -1,0 +1,21 @@
+# 运行数据与凭据
+data/
+*.db
+*.db-shm
+*.db-wal
+*.log
+.env
+*cp.txt
+testkey.txt
+run*.log
+cj.txt
+
+# 本地测试样例（含真实 token，绝不能提交）
+internal/creds/testdata/
+*credentials*.json
+
+# 构建产物
+relay
+relay.exe
+bin/
+dist/

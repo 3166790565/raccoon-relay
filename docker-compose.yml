@@ -1,0 +1,48 @@
+services:
+  relay:
+    # 直接拉预构建镜像；本地改代码要自己构建时用 docker-compose.build.yml 覆盖
+    image: bxacc123/raccoon-relay:${IMAGE_TAG:-latest}
+    container_name: raccoon-relay
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATA_DIR: /data
+      # 容器内监听全部地址，宿主机端口映射决定对外暴露面
+      LISTEN_ADDR: 0.0.0.0:8080
+      TZ: ${TZ:-Asia/Shanghai}
+    ports:
+      # 数据面与管理面同端口，全部对外开放
+      - "8080:8080"
+    volumes:
+      # 数据目录必须持久化：账号凭据、冷却状态、签到台账都在 relay.db 里
+      - ./data:/data
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+  # ===== 可选：HTTPS 反代 =====
+  # 裸 HTTP 上线意味着 API Key 和管理口令在网络上明文传输。
+  # 有域名的话强烈建议启用这段，并把上面的 ports 改成 "127.0.0.1:8080:8080"。
+  #
+  # caddy:
+  #   image: caddy:2-alpine
+  #   container_name: raccoon-caddy
+  #   restart: unless-stopped
+  #   ports:
+  #     - "80:80"
+  #     - "443:443"
+  #   volumes:
+  #     - ./Caddyfile:/etc/caddy/Caddyfile:ro
+  #     - caddy_data:/data
+  #     - caddy_config:/config
+  #   depends_on:
+  #     - relay
+  #
+  # volumes:
+  #   caddy_data:
+  #   caddy_config:

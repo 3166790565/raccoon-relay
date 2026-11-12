@@ -1,0 +1,26 @@
+# 运行数据与凭据绝不进镜像
+data/
+dockertest/
+*.db
+*.db-shm
+*.db-wal
+*.log
+.env
+*credentials*.json
+internal/creds/testdata/
+
+# 构建产物
+relay
+relay.exe
+bin/
+dist/
+
+# 版本控制与文档
+.git/
+.gitignore
+*.md
+
+# 容器编排文件本身不需要进构建上下文
+docker-compose*.yml
+Dockerfile
+.dockerignore

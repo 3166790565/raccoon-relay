@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>小浣熊反代 · 控制台</title>
+<link rel="stylesheet" href="/admin/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">🦝 小浣熊反代</div>
+  <div class="status-chips" id="chips"></div>
+  <button class="ghost" id="logoutBtn" hidden>退出</button>
+</header>
+
+<main>
+  <!-- 登录 -->
+  <section class="card" id="loginCard">
+    <h2>管理口令</h2>
+    <p class="hint">首次启动时容器日志里会打印一次 ADMIN_TOKEN。</p>
+    <div class="row">
+      <input type="password" id="adminToken" placeholder="ADMIN_TOKEN" autocomplete="current-password">
+      <button class="primary" id="loginBtn">进入</button>
+    </div>
+    <p class="err" id="loginErr"></p>
+  </section>
+
+  <div id="app" hidden>
+    <!-- 概览 -->
+    <section class="card">
+      <h2>概览</h2>
+      <div class="grid" id="overview"></div>
+    </section>
+
+    <!-- 登录 / 添加账号 -->
+    <section class="card">
+      <h2>添加账号</h2>
+      <div class="tabs">
+        <button class="tab active" data-tab="paste">粘贴授权码</button>
+        <button class="tab" data-tab="manual">手填令牌</button>
+        <button class="tab" data-tab="import">导入 JSON</button>
+      </div>
+
+      <div class="tabpane active" id="pane-paste">
+        <ol class="steps">
+          <li>点下面按钮打开官方登录页（新窗口）。</li>
+          <li>完成登录后浏览器会跳到 <code>office-raccoon://auth/callback?code=…</code>：
+            若提示"没有可用应用"，直接整段复制地址栏内容；若装了桌面客户端，请用无痕窗口操作。</li>
+          <li>把整段链接粘到下面，点「兑换并添加」。</li>
+        </ol>
+        <div class="row">
+          <button class="primary" id="openAuthBtn">打开小浣熊登录页</button>
+          <span class="hint" id="redirectHint"></span>
+        </div>
+        <div class="row">
+          <input type="text" id="pasteInput" placeholder="office-raccoon://auth/callback?code=... 或直接粘贴授权码">
+          <button class="primary" id="exchangeBtn">兑换并添加</button>
+        </div>
+        <p class="msg" id="exchangeMsg"></p>
+      </div>
+
+      <div class="tabpane" id="pane-manual">
+        <p class="hint">适用于从桌面客户端 <code>~/.box-agent/config/auth.json</code> 里拷贝凭据。</p>
+        <div class="field"><label>access_token</label><textarea id="mToken" rows="3" placeholder="eyJhbGciOi..."></textarea></div>
+        <div class="field"><label>refresh_token</label><textarea id="mRefresh" rows="2" placeholder="可留空"></textarea></div>
+        <div class="field"><label>office_identity</label><input id="mOffice" placeholder="可留空；个人版为空"></div>
+        <div class="field"><label>备注名</label><input id="mName" placeholder="可留空"></div>
+        <button class="primary" id="manualBtn">添加账号</button>
+        <p class="msg" id="manualMsg"></p>
+      </div>
+
+      <div class="tabpane" id="pane-import">
+        <p class="hint">支持 agenthub-credentials 格式（桌面版导出的那份 JSON），也接受单个账号对象或数组。</p>
+        <textarea id="importText" rows="8" placeholder='{"format":"agenthub-credentials","channel":"raccoon","accounts":[...]}'></textarea>
+        <div class="row">
+          <input type="file" id="importFile" accept=".json,application/json">
+          <button class="primary" id="importBtn">导入</button>
+        </div>
+        <p class="msg" id="importMsg"></p>
+        <pre class="out" id="importOut"></pre>
+      </div>
+    </section>
+
+    <!-- 账号表 -->
+    <section class="card">
+      <div class="cardhead">
+        <h2>号池</h2>
+        <div class="row">
+          <button class="ghost" id="refreshListBtn">刷新</button>
+          <button class="primary" id="checkinAllBtn">全部签到</button>
+          <button class="ghost" id="exportBtn">导出 JSON</button>
+        </div>
+      </div>
+      <div class="tablewrap">
+        <table id="accTable">
+          <thead><tr>
+            <th>名称</th><th>uid</th><th>状态</th><th>积分</th><th>冷却/原因</th><th>今日签到</th><th>操作</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p class="msg" id="tableMsg"></p>
+    </section>
+
+    <!-- API Keys -->
+    <section class="card">
+      <div class="cardhead">
+        <h2>API Keys</h2>
+        <div class="row">
+          <input id="keyName" placeholder="名称，如 laptop">
+          <button class="primary" id="createKeyBtn">新建</button>
+        </div>
+      </div>
+      <p class="hint">明文只在创建时显示一次。</p>
+      <pre class="out" id="newKeyOut"></pre>
+      <div class="tablewrap">
+        <table id="keyTable">
+          <thead><tr><th>名称</th><th>前缀</th><th>创建</th><th>最近使用</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 设置 -->
+    <section class="card">
+      <h2>设置</h2>
+      <div class="grid2">
+        <div class="field"><label>选号策略</label>
+          <select id="setStrategy">
+            <option value="optimal">optimal · 免费优先</option>
+            <option value="credit_first">credit_first · 积分多优先</option>
+            <option value="round_robin">round_robin · 轮询</option>
+            <option value="expire_first">expire_first · 先到期先</option>
+            <option value="manual">manual · 手动优先级</option>
+          </select>
+        </div>
+        <div class="field"><label>自动签到</label>
+          <select id="setCheckinEnable"><option value="true">开启</option><option value="false">关闭</option></select>
+        </div>
+        <div class="field"><label>签到小时</label><input type="number" id="setHour" min="0" max="23"></div>
+        <div class="field"><label>签到分钟</label><input type="number" id="setMinute" min="0" max="59"></div>
+        <div class="field"><label>抖动上限（分钟）</label><input type="number" id="setJitter" min="0" max="180"></div>
+      </div>
+      <button class="primary" id="saveSettingsBtn">保存</button>
+      <p class="msg" id="settingsMsg"></p>
+    </section>
+
+    <!-- 日志 -->
+    <section class="card">
+      <div class="cardhead">
+        <h2>最近调用</h2>
+        <button class="ghost" id="loadLogsBtn">刷新</button>
+      </div>
+      <div class="tablewrap">
+        <table id="logTable">
+          <thead><tr><th>时间</th><th>API</th><th>模型</th><th>状态</th><th>tokens</th><th>耗时</th><th>错误</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+</main>
+
+<script src="/admin/app.js"></script>
+</body>
+</html>
