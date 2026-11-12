@@ -14,8 +14,8 @@ cj.txt
 internal/creds/testdata/
 *credentials*.json
 
-# 构建产物
-relay
-relay.exe
+# 构建产物（只匹配仓库根目录，别误伤 internal/relay/）
+/relay
+/relay.exe
 bin/
 dist/
