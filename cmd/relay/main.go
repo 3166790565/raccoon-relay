@@ -12,6 +12,7 @@ import (
 
 	"github.com/3166790565/raccoon-relay/internal/admin"
 	"github.com/3166790565/raccoon-relay/internal/config"
+	"github.com/3166790565/raccoon-relay/internal/creditsync"
 	"github.com/3166790565/raccoon-relay/internal/creds"
 	"github.com/3166790565/raccoon-relay/internal/login"
 	"github.com/3166790565/raccoon-relay/internal/pool"
@@ -53,10 +54,13 @@ func main() {
 
 	lm := login.New(st, client, cfg.UpstreamBase, "办公小浣熊客户端", cfg.OAuthRedirectBase)
 
-	// 调度器始终构造：自动循环由 CheckinEnable 决定是否跑，但手动「全部签到」任何时候都要能用。
-	sch := scheduler.New(cfg, st, client, refresher)
+	// 余额同步是三个位置共用的：新号初始化、自动签到、手动签到
+	balancer := &creditsync.Balancer{ST: st, Client: client, Auth: refresher}
 
-	panel := admin.New(cfg, st, client, refresher, po, cool, lm, sch, webFS)
+	// 调度器始终构造：自动循环由 CheckinEnable 决定是否跑，但手动「全部签到」任何时候都要能用。
+	sch := scheduler.New(cfg, st, client, refresher, balancer)
+
+	panel := admin.New(cfg, st, client, refresher, po, cool, lm, sch, balancer, webFS)
 
 	// 首次启动自动生成一把 API Key，避免开机后无从调用
 	bootstrapKeys(context.Background(), st)

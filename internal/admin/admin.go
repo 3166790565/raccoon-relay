@@ -9,12 +9,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/3166790565/raccoon-relay/internal/config"
+	"github.com/3166790565/raccoon-relay/internal/creditsync"
 	"github.com/3166790565/raccoon-relay/internal/creds"
 	"github.com/3166790565/raccoon-relay/internal/login"
 	"github.com/3166790565/raccoon-relay/internal/pool"
@@ -34,15 +36,16 @@ type Panel struct {
 	cool     *pool.CooldownBook
 	loginMgr *login.Manager
 	sched    *scheduler.Scheduler
+	balancer *creditsync.Balancer
 	webFS    func(name string) ([]byte, error)
 }
 
 func New(cfg *config.Config, st *store.Store, client *raccoon.Client, refresh *relay.Refresher,
 	po *pool.Pool, cool *pool.CooldownBook, lm *login.Manager, sch *scheduler.Scheduler,
-	webFS func(string) ([]byte, error)) *Panel {
+	balancer *creditsync.Balancer, webFS func(string) ([]byte, error)) *Panel {
 	return &Panel{
 		cfg: cfg, st: st, client: client, refresh: refresh,
-		po: po, cool: cool, loginMgr: lm, sched: sch, webFS: webFS,
+		po: po, cool: cool, loginMgr: lm, sched: sch, balancer: balancer, webFS: webFS,
 	}
 }
 
@@ -174,6 +177,17 @@ func (p *Panel) handleListAccounts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"ok": true, "accounts": out})
 }
 
+// onboard 是「新号落地后立刻做的事」：签到一次 + 同步余额。
+// 同步执行，失败只记日志——凭据已经入库，用户不该因为签到被风控就看不到这个号。
+func (p *Panel) onboard(ctx context.Context, accountID string) {
+	if p.sched == nil || accountID == "" {
+		return
+	}
+	if _, err := p.sched.Onboard(ctx, accountID); err != nil {
+		log.Printf("[onboard] 账号 %s 初始化失败: %v", accountID, err)
+	}
+}
+
 func (p *Panel) handleImport(w http.ResponseWriter, r *http.Request) {
 	raw, err := io.ReadAll(io.LimitReader(r.Body, 32<<20))
 	if err != nil {
@@ -189,8 +203,13 @@ func (p *Panel) handleImport(w http.ResponseWriter, r *http.Request) {
 	results := im.Import(r.Context(), list)
 	okCount := 0
 	for _, res := range results {
-		if res.OK {
-			okCount++
+		if !res.OK {
+			continue
+		}
+		okCount++
+		// 新号立刻签到 + 同步余额；已经存在的号跳过，避免每次重导入都打一次上游
+		if !res.Updated {
+			p.onboard(r.Context(), res.ID)
 		}
 	}
 	writeJSON(w, 200, map[string]any{
@@ -280,18 +299,11 @@ func (p *Panel) handlePatchAccount(w http.ResponseWriter, r *http.Request, acc *
 }
 
 func (p *Panel) actionBalance(w http.ResponseWriter, r *http.Request, acc *store.Account) {
-	token, err := p.refresh.EnsureFresh(r.Context(), acc)
+	credits, err := p.balancer.Refresh(r.Context(), acc)
 	if err != nil {
 		writeJSON(w, 400, map[string]any{"ok": false, "message": err.Error()})
 		return
 	}
-	credits, err := p.client.Balance(r.Context(), token, identityOf(acc))
-	if err != nil {
-		writeJSON(w, 400, map[string]any{"ok": false, "message": err.Error()})
-		return
-	}
-	at := time.Now().UnixMilli()
-	_ = p.st.UpdateAccount(r.Context(), acc.ID, store.AccountPatch{Credits: &credits, CreditsAt: &at})
 	writeJSON(w, 200, map[string]any{"ok": true, "credits": credits})
 }
 
@@ -323,7 +335,16 @@ func (p *Panel) actionCheckin(w http.ResponseWriter, r *http.Request, acc *store
 		AccountID: acc.ID, Day: today, Action: "checkin", OK: res.OK,
 		Already: res.Already, Message: res.Message,
 	})
-	writeJSON(w, 200, map[string]any{"ok": res.OK, "claimed": res.Claimed, "already": res.Already, "message": res.Message})
+	// 签到完顺手同步余额：领到的积分要立刻反映到面板上。
+	// 失败不影响签到结果，只把当前已知余额带回去。
+	credits := acc.Credits
+	if c, err := p.balancer.Refresh(r.Context(), acc); err == nil {
+		credits = c
+	}
+	writeJSON(w, 200, map[string]any{
+		"ok": res.OK, "claimed": res.Claimed, "already": res.Already,
+		"message": res.Message, "credits": credits,
+	})
 }
 
 func (p *Panel) handleCheckinAll(w http.ResponseWriter, r *http.Request) {
@@ -358,9 +379,14 @@ func (p *Panel) handleExchange(w http.ResponseWriter, r *http.Request) {
 		input = body.Code
 	}
 	res := p.loginMgr.Exchange(r.Context(), input)
-	writeJSON(w, 200, map[string]any{
+	out := map[string]any{
 		"ok": res.OK, "id": res.ID, "uid": res.UID, "updated": res.Updated, "message": res.Message,
-	})
+	}
+	if res.OK && !res.Updated {
+		p.onboard(r.Context(), res.ID)
+		out["onboarded"] = true
+	}
+	writeJSON(w, 200, out)
 }
 
 func (p *Panel) handleManual(w http.ResponseWriter, r *http.Request) {
@@ -378,9 +404,14 @@ func (p *Panel) handleManual(w http.ResponseWriter, r *http.Request) {
 		Name: body.Name, Token: body.Token, RefreshToken: body.RefreshToken,
 		OfficeIdentity: body.OfficeIdentity,
 	})
-	writeJSON(w, 200, map[string]any{
+	out := map[string]any{
 		"ok": res.OK, "id": res.ID, "uid": res.UID, "updated": res.Updated, "message": res.Message,
-	})
+	}
+	if res.OK && !res.Updated {
+		p.onboard(r.Context(), res.ID)
+		out["onboarded"] = true
+	}
+	writeJSON(w, 200, out)
 }
 
 // handleOAuthCallback 是可选的回环回调路径，只在配置了 RedirectBase 时生效。

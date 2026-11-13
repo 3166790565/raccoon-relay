@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/3166790565/raccoon-relay/internal/config"
+	"github.com/3166790565/raccoon-relay/internal/creditsync"
 	"github.com/3166790565/raccoon-relay/internal/raccoon"
 	"github.com/3166790565/raccoon-relay/internal/relay"
 	"github.com/3166790565/raccoon-relay/internal/store"
@@ -31,10 +32,11 @@ const (
 )
 
 type Scheduler struct {
-	cfg     *config.Config
-	st      *store.Store
-	client  *raccoon.Client
-	refresh *relay.Refresher
+	cfg      *config.Config
+	st       *store.Store
+	client   *raccoon.Client
+	refresh  *relay.Refresher
+	balancer *creditsync.Balancer
 
 	mu         sync.Mutex
 	lastTick   time.Time
@@ -45,9 +47,10 @@ type Scheduler struct {
 	lastCount  int
 }
 
-func New(cfg *config.Config, st *store.Store, client *raccoon.Client, refresh *relay.Refresher) *Scheduler {
+func New(cfg *config.Config, st *store.Store, client *raccoon.Client, refresh *relay.Refresher,
+	balancer *creditsync.Balancer) *Scheduler {
 	return &Scheduler{
-		cfg: cfg, st: st, client: client, refresh: refresh,
+		cfg: cfg, st: st, client: client, refresh: refresh, balancer: balancer,
 		lastRun: map[string]string{},
 	}
 }
@@ -219,20 +222,16 @@ func (s *Scheduler) checkinOne(ctx context.Context, a *store.Account, today stri
 	})
 
 	// 顺带刷一次余额
-	s.refreshCredits(ctx, a, token, idn)
+	s.refreshCredits(ctx, a)
 
 	log.Printf("[签到] %s：%s", a.Name, res.Message)
 	_ = loc
 	return true
 }
 
-func (s *Scheduler) refreshCredits(ctx context.Context, a *store.Account, token string, idn raccoon.Identity) {
-	credits, err := s.client.Balance(ctx, token, idn)
-	if err != nil {
-		return
-	}
-	at := time.Now().UnixMilli()
-	_ = s.st.UpdateAccount(ctx, a.ID, store.AccountPatch{Credits: &credits, CreditsAt: &at})
+func (s *Scheduler) refreshCredits(ctx context.Context, a *store.Account) {
+	// 失败静默：余额是辅助信息，不该让签到流程因为查不到余额而失败
+	_, _ = s.balancer.Refresh(ctx, a)
 }
 
 func (s *Scheduler) fail(ctx context.Context, a *store.Account, today, msg string) {
@@ -282,6 +281,38 @@ func mergeLedger(meta map[string]any, settled map[string]int64) {
 		cur[k] = v
 	}
 	meta["onboardingGrants"] = cur
+}
+
+// Onboard 是账号刚加入时的立刻初始化：签到一次 + 同步余额。
+//
+// 为什么不做成异步后台任务：用户刚在面板上点完「兑换并添加」，最想看到的就是
+// 这个号有多少积分、今天领没领。异步跑完再去拉列表，中间会有一段时间面板显示
+// 「积分 -」，反而让人以为导入失败了。这里同步跑完再返回，代价是一次上游往返。
+//
+// 失败不阻断入库：凭据已经存好了，签到失败（比如刚好被风控）不影响它以后被选中。
+func (s *Scheduler) Onboard(ctx context.Context, accountID string) (map[string]any, error) {
+	acc, err := s.st.GetAccount(ctx, accountID)
+	if err != nil {
+		return nil, err
+	}
+	if acc == nil {
+		return nil, fmt.Errorf("账号不存在: %s", accountID)
+	}
+	loc := s.cfg.Location()
+	today := time.Now().In(loc).Format("2006-01-02")
+
+	// 签到（内部会顺带刷余额）
+	s.checkinOne(ctx, acc, today, loc)
+
+	// 再单独刷一次余额兜底：签到可能因为「今日已领」跳过部分流程，
+	// 而新号最需要的是把余额拉下来。
+	if c, err := s.balancer.Refresh(ctx, acc); err == nil {
+		acc.Credits = c
+	}
+	return map[string]any{
+		"checkinDay": acc.LastCheckinDay,
+		"credits":    acc.Credits,
+	}, nil
 }
 
 // RunAll 供管理面「全部签到」手动触发：不检查计划时刻，逐号串行。

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/3166790565/raccoon-relay/internal/config"
+	"github.com/3166790565/raccoon-relay/internal/creditsync"
 	"github.com/3166790565/raccoon-relay/internal/raccoon"
 	"github.com/3166790565/raccoon-relay/internal/relay"
 	"github.com/3166790565/raccoon-relay/internal/store"
@@ -85,7 +86,8 @@ func TestSweepCheckinsDueAccounts(t *testing.T) {
 	}
 	client := raccoon.NewClient(up.URL, 5*time.Second)
 	refresher := relay.NewRefresher(st, client, 5*time.Minute)
-	sch := New(cfg, st, client, refresher)
+	bal := &creditsync.Balancer{ST: st, Client: client, Auth: refresher}
+	sch := New(cfg, st, client, refresher, bal)
 
 	sch.sweep(ctx)
 
@@ -143,7 +145,8 @@ func TestSweepIsIdempotentPerDay(t *testing.T) {
 		RefreshWindowSec: 300,
 	}
 	client := raccoon.NewClient(up.URL, 5*time.Second)
-	sch := New(cfg, st, client, relay.NewRefresher(st, client, 5*time.Minute))
+	bal := &creditsync.Balancer{ST: st, Client: client, Auth: relay.NewRefresher(st, client, 5*time.Minute)}
+	sch := New(cfg, st, client, relay.NewRefresher(st, client, 5*time.Minute), bal)
 
 	sch.sweep(ctx)
 	sch.sweep(ctx) // 第二次应无事可做
@@ -178,7 +181,8 @@ func TestSweep401MarksRelogin(t *testing.T) {
 		CheckinEnable: true, CheckinHour: 0, CheckinMinute: 0, Timezone: "UTC", RefreshWindowSec: 300,
 	}
 	client := raccoon.NewClient(up.URL, 5*time.Second)
-	sch := New(cfg, st, client, relay.NewRefresher(st, client, 5*time.Minute))
+	bal := &creditsync.Balancer{ST: st, Client: client, Auth: relay.NewRefresher(st, client, 5*time.Minute)}
+	sch := New(cfg, st, client, relay.NewRefresher(st, client, 5*time.Minute), bal)
 	sch.sweep(ctx)
 
 	got, _ := st.GetAccount(ctx, acc.ID)
@@ -187,5 +191,90 @@ func TestSweep401MarksRelogin(t *testing.T) {
 	}
 	if got.LastCheckinDay != "" {
 		t.Fatal("401 不应写入 last_checkin_day（否则当日被误判为已签）")
+	}
+}
+
+// Onboard 是新号落地时的初始化：签到一次 + 同步余额。
+func TestOnboardCheckinsAndSyncsBalance(t *testing.T) {
+	var mu sync.Mutex
+	var paths []string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.URL.Path)
+		mu.Unlock()
+		switch r.URL.Path {
+		case raccoon.PathSetting:
+			fmt.Fprint(w, `{"code":0,"data":{}}`)
+		case raccoon.PathGrant:
+			fmt.Fprint(w, `{"code":0,"data":{"granted":true,"popup":{"points":300}}}`)
+		case raccoon.PathMobileGrant:
+			fmt.Fprint(w, `{"code":0,"data":{"granted":false}}`)
+		case raccoon.PathBalance:
+			fmt.Fprint(w, `{"code":0,"data":{"available_points":8888}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer up.Close()
+
+	st, _ := store.Open(t.TempDir(), "k", false)
+	defer st.Close()
+	ctx := context.Background()
+
+	acc := &store.Account{
+		UID: "pu-new", Name: "新号", Token: "tok", Status: store.StatusOnline,
+		Credits: -1, Enabled: true, Meta: map[string]any{},
+	}
+	if err := st.CreateAccount(ctx, acc); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{
+		CheckinEnable: true, CheckinHour: 0, CheckinMinute: 0, Timezone: "UTC", RefreshWindowSec: 300,
+	}
+	client := raccoon.NewClient(up.URL, 5*time.Second)
+	refresher := relay.NewRefresher(st, client, 5*time.Minute)
+	bal := &creditsync.Balancer{ST: st, Client: client, Auth: refresher}
+	sch := New(cfg, st, client, refresher, bal)
+
+	out, err := sch.Onboard(ctx, acc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, _ := st.GetAccount(ctx, acc.ID)
+	if got.Credits != 8888 {
+		t.Fatalf("新号应同步余额为 8888，实际 %d", got.Credits)
+	}
+	if got.LastCheckinDay == "" {
+		t.Fatal("新号应完成当日签到")
+	}
+	if out["credits"] != int64(8888) {
+		t.Fatalf("返回值余额不对: %v", out["credits"])
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	seen := map[string]bool{}
+	for _, p := range paths {
+		seen[p] = true
+	}
+	if !seen[raccoon.PathBalance] {
+		t.Fatalf("应调用余额接口，实际路径 %v", paths)
+	}
+	if !seen[raccoon.PathGrant] {
+		t.Fatalf("应调用签到接口，实际路径 %v", paths)
+	}
+}
+
+// Onboard 对不存在的账号应报错而不是静默成功。
+func TestOnboardMissingAccount(t *testing.T) {
+	st, _ := store.Open(t.TempDir(), "k", false)
+	defer st.Close()
+	cfg := &config.Config{CheckinEnable: true, Timezone: "UTC"}
+	client := raccoon.NewClient("http://127.0.0.1:1", time.Second)
+	sch := New(cfg, st, client, relay.NewRefresher(st, client, time.Minute), nil)
+	if _, err := sch.Onboard(context.Background(), "acc-nope"); err == nil {
+		t.Fatal("不存在的账号应报错")
 	}
 }
