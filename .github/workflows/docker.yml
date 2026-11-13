@@ -11,6 +11,14 @@ on:
 env:
   IMAGE: bxacc123/raccoon-relay
 
+# 同一时间只允许一个镜像构建，避免「推 master + 推 tag」并发互相覆盖 latest。
+# 注意用固定 group（不能带 github.ref）：master 和 tag 是不同的 ref，
+# 按 ref 分组等于没锁，两次构建照样同时跑。
+# cancel-in-progress 关闭：正在推镜像时被取消会留下不完整的 tag。
+concurrency:
+  group: docker-image-push
+  cancel-in-progress: false
+
 jobs:
   test:
     name: 测试
@@ -60,12 +68,13 @@ jobs:
         with:
           images: ${{ env.IMAGE }}
           tags: |
-            # 推 master → latest
+            # 推 master 或推 tag 都更新 latest——tag 就是从默认分支打出来的正式版
             type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest,enable=${{ github.ref_type == 'tag' }}
             # 推 tag v1.2.3 → 1.2.3 与 1.2
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            # 每次构建都带一个日期-短 SHA 标签，便于回滚到具体提交
+            # 默认分支的每次构建额外带一个日期-短 SHA 标签，便于回滚到具体提交
             type=raw,value={{date 'YYYYMMDD'}}-{{sha}},enable={{is_default_branch}}
 
       - name: 构建并推送（amd64 + arm64）
