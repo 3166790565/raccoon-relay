@@ -17,12 +17,12 @@ import (
 // ExtractCode 必须吃三种形态：完整深链、裸 code、含 code 的任意地址。
 func TestExtractCode(t *testing.T) {
 	cases := map[string]string{
-		"office-raccoon://auth/callback?code=abc123":       "abc123",
-		"office-raccoon://auth/callback?authCode=xyz":      "xyz",
-		"https://example.com/cb?code=deep&state=1":         "deep",
-		"随便什么 code=rawvalue 前后有字":                  "rawvalue",
-		"barecode123":                                      "barecode123",
-		"https://example.com/cb?authorization_code=zz-99":  "zz-99",
+		"office-raccoon://auth/callback?code=abc123":  "abc123",
+		"office-raccoon://auth/callback?authCode=xyz": "xyz",
+		"https://example.com/cb?code=deep&state=1":    "deep",
+		"随便什么 code=rawvalue 前后有字":                     "rawvalue",
+		"barecode123": "barecode123",
+		"https://example.com/cb?authorization_code=zz-99": "zz-99",
 	}
 	for input, want := range cases {
 		if got := ExtractCode(input); got != want {

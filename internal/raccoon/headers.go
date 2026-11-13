@@ -23,19 +23,19 @@ const (
 // chatHeaders 是小浣熊对话端点的头集。title 取首条用户消息前 20 字，非 ASCII percent-encode。
 func chatHeaders(token string, idn Identity, sessionID, turnID, title string) map[string]string {
 	h := map[string]string{
-		"content-type":          "application/json",
-		"accept":                "application/json, text/event-stream",
-		"authorization":         "Bearer " + token,
-		"x-client-name":         ClientName,
-		"x-client-platform":     idn.Platform,
-		"x-client-version":      ClientVersion,
-		"x-client-os-version":   idn.OSVersion,
-		"x-client-channel":      idn.ClientChannel,
-		"x-client-device-id":    idn.DeviceID,
-		"X-RACCOON-Session-ID":  sessionID,
-		"X-RACCOON-Turn-ID":     turnID,
-		"X-RACCOON-Title":       latinTitle(title),
-		"X-RACCOON-Call-Kind":   "chat",
+		"content-type":         "application/json",
+		"accept":               "application/json, text/event-stream",
+		"authorization":        "Bearer " + token,
+		"x-client-name":        ClientName,
+		"x-client-platform":    idn.Platform,
+		"x-client-version":     ClientVersion,
+		"x-client-os-version":  idn.OSVersion,
+		"x-client-channel":     idn.ClientChannel,
+		"x-client-device-id":   idn.DeviceID,
+		"X-RACCOON-Session-ID": sessionID,
+		"X-RACCOON-Turn-ID":    turnID,
+		"X-RACCOON-Title":      latinTitle(title),
+		"X-RACCOON-Call-Kind":  "chat",
 	}
 	if isTeam(idn.OfficeIdentity) {
 		h["X-Org-Code"] = idn.OfficeIdentity
@@ -49,12 +49,12 @@ func webHeaders(token string, idn Identity, platform string) map[string]string {
 		platform = idn.PlatformNoArch
 	}
 	h := map[string]string{
-		"content-type":        "application/json",
-		"accept":              "application/json",
-		"X-Client-Platform":   platform,
-		"X-Client-Version":    WebClientVersion,
-		"X-Client-Device-ID":  idn.DeviceID,
-		"X-Raccoon-Language":  idn.Language,
+		"content-type":       "application/json",
+		"accept":             "application/json",
+		"X-Client-Platform":  platform,
+		"X-Client-Version":   WebClientVersion,
+		"X-Client-Device-ID": idn.DeviceID,
+		"X-Raccoon-Language": idn.Language,
 	}
 	if token != "" {
 		h["authorization"] = "Bearer " + token
@@ -83,11 +83,11 @@ func refreshHeaders(idn Identity) map[string]string {
 // mobileHeaders 是手机端首登奖端点专用形态。
 func mobileHeaders(token string, idn Identity) map[string]string {
 	h := map[string]string{
-		"content-type":       "application/json",
-		"accept":             "application/json",
-		"authorization":      "Bearer " + token,
-		"X-Client-Platform":  MobilePlatform,
-		"X-Client-Version":   MobileClientVers,
+		"content-type":      "application/json",
+		"accept":            "application/json",
+		"authorization":     "Bearer " + token,
+		"X-Client-Platform": MobilePlatform,
+		"X-Client-Version":  MobileClientVers,
 	}
 	if isTeam(idn.OfficeIdentity) {
 		h["X-Org-Code"] = idn.OfficeIdentity

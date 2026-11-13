@@ -13,15 +13,15 @@ import (
 // anthropicSSE 把上游增量翻译成 Anthropic SSE 事件序列。
 // 事件顺序：message_start → (content_block_start/delta/stop)* → message_delta → message_stop
 type anthropicSSE struct {
-	w        http.ResponseWriter
-	flusher  http.Flusher
-	model    string
-	id       string
+	w       http.ResponseWriter
+	flusher http.Flusher
+	model   string
+	id      string
 
-	started   bool
-	finished  bool
-	seq       int64
-	usage     raccoon.Usage
+	started  bool
+	finished bool
+	seq      int64
+	usage    raccoon.Usage
 
 	// 当前打开的块
 	blockOpen bool
@@ -207,7 +207,7 @@ func (a *anthropicSSE) Complete() {
 	}
 	stop := mapAnthropicStop(a.stopReason, len(a.toolOrder) > 0)
 	_ = a.emit("message_delta", map[string]any{
-		"type": "message_delta",
+		"type":  "message_delta",
 		"delta": map[string]any{"stop_reason": stop, "stop_sequence": nil},
 		"usage": map[string]any{"output_tokens": a.usage.CompletionTokens},
 	})

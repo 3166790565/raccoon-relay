@@ -210,19 +210,19 @@ func parseCatalog(raw json.RawMessage) []Model {
 		return nil
 	}
 	type item struct {
-		Name            string `json:"name"`
-		ID              string `json:"id"`
-		Model           string `json:"model"`
-		ModelName       string `json:"model_name"`
-		DisplayName     string `json:"display_name"`
-		Description     string `json:"description"`
-		Visible         *bool  `json:"visible"`
-		ContextWindow   int    `json:"context_window"`
-		MaxTokens       int    `json:"max_tokens"`
-		SupportsImages  *bool  `json:"supports_images"`
-		SupportImage    *bool  `json:"supportImage"`
-		SupportsReason  *bool  `json:"supports_reasoning"`
-		Params          struct {
+		Name           string `json:"name"`
+		ID             string `json:"id"`
+		Model          string `json:"model"`
+		ModelName      string `json:"model_name"`
+		DisplayName    string `json:"display_name"`
+		Description    string `json:"description"`
+		Visible        *bool  `json:"visible"`
+		ContextWindow  int    `json:"context_window"`
+		MaxTokens      int    `json:"max_tokens"`
+		SupportsImages *bool  `json:"supports_images"`
+		SupportImage   *bool  `json:"supportImage"`
+		SupportsReason *bool  `json:"supports_reasoning"`
+		Params         struct {
 			ContextWindow int `json:"context_window"`
 			MaxTokens     int `json:"max_tokens"`
 		} `json:"params"`

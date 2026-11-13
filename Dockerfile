@@ -14,11 +14,13 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
 
 # ===== 运行阶段 =====
 FROM alpine:3.20
-RUN apk add --no-cache ca-certificates tzdata && \
+RUN apk add --no-cache ca-certificates tzdata su-exec && \
     adduser -D -H -u 10001 relay
 
 WORKDIR /app
 COPY --from=build /out/relay /app/relay
+COPY docker-entrypoint.sh /app/docker-entrypoint.sh
+RUN chmod +x /app/docker-entrypoint.sh
 
 # 数据卷：sqlite 与运行状态
 RUN mkdir -p /data && chown -R relay:relay /data
@@ -28,10 +30,12 @@ ENV DATA_DIR=/data \
     LISTEN_ADDR=0.0.0.0:8080 \
     TZ=Asia/Shanghai
 
-USER relay
 EXPOSE 8080
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD wget -qO- http://127.0.0.1:8080/health >/dev/null || exit 1
 
-ENTRYPOINT ["/app/relay"]
+# 入口以 root 起，先修正 bind mount 带来的属主问题，再降权到 relay 执行。
+# 若 compose 里显式指定了 user:，脚本检测到非 root 会直接 exec，不做 chown。
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
+CMD ["/app/relay"]

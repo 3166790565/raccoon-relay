@@ -12,9 +12,9 @@ import (
 
 // 移植自 AgentHub 自测 T1-T6：签到两步顺序、granted 语义、失败不阻断、头集。
 type checkinHarness struct {
-	mu       sync.Mutex
-	calls    []string
-	headers  []http.Header
+	mu        sync.Mutex
+	calls     []string
+	headers   []http.Header
 	settingSt int
 	grantBody string
 	grantSt   int

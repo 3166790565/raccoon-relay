@@ -28,12 +28,12 @@ type fakeUpstream struct {
 }
 
 type chatResult struct {
-	status   int
-	frames   []string // SSE data 行
-	usage    string
-	finish   string
-	errCode  int
-	errMsg   string
+	status  int
+	frames  []string // SSE data 行
+	usage   string
+	finish  string
+	errCode int
+	errMsg  string
 }
 
 func (f *fakeUpstream) handler() http.Handler {

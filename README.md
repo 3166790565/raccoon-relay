@@ -202,6 +202,21 @@ DATA_DIR=./data SECRET_KEY=dev ADMIN_TOKEN=dev ./relay
 检查 `ADMIN_TOKEN` 是否填了；没填时它在启动日志里随机生成。端口默认只绑 `127.0.0.1`，
 要从外网访问就改 `docker-compose.yml` 的端口映射，并在前面挂一层 HTTPS 反代。
 
+**`数据库初始化失败: 建表失败: unable to open database file (14)`**
+数据目录写不进去。容器以 uid 10001（`relay`）运行，而 bind mount 的宿主目录通常属于
+`root` 或你自己的账号，写权限对不上。
+
+v1.0.1 起镜像内置入口脚本，启动时会自动修正 `/data` 的属主，正常情况下不用管。
+如果仍然报错（宿主文件系统不支持改属主，比如某些 NFS 卷），在宿主机执行：
+
+```bash
+sudo chown -R 10001:10001 ./data
+# 或者文件系统不支持改属主时：
+sudo chmod -R 777 ./data
+```
+
+v1.0.0 及更早的镜像没有入口脚本，必须先用上面的命令手工修权限。
+
 ---
 
 ## 开发

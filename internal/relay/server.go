@@ -17,10 +17,10 @@ import (
 
 // Catalog 缓存上游模型目录，避免每次 /v1/models 都打上游。
 type Catalog struct {
-	ST        *store.Store
-	Client    *raccoon.Client
-	Default   string
-	TTL       time.Duration
+	ST      *store.Store
+	Client  *raccoon.Client
+	Default string
+	TTL     time.Duration
 
 	mu     sync.Mutex
 	models []raccoon.Model

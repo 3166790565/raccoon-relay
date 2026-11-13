@@ -18,33 +18,33 @@ const (
 
 // Account 是对外的完整账号视图。Token 字段在 List/Get 时会解密好返回。
 type Account struct {
-	ID              string
-	UID             string
-	Name            string
-	Note            string
-	Token           string
-	RefreshToken    string
-	TokenExp        int64
-	Credits         int64
-	CreditsAt       int64
-	Status          string
-	CoolUntil       int64
-	CoolReason      string
-	ExpiresAt       int64
-	DeviceID        string
-	DeviceName      string
-	OSVersion       string
-	OfficeIdentity  string
-	Platform        string
-	ClientChannel   string
-	Language        string
-	Meta            map[string]any
-	Priority        int64
-	Enabled         bool
-	LastCheckinDay  string
-	CreatedAt       int64
-	UpdatedAt       int64
-	LastUsed        int64
+	ID             string
+	UID            string
+	Name           string
+	Note           string
+	Token          string
+	RefreshToken   string
+	TokenExp       int64
+	Credits        int64
+	CreditsAt      int64
+	Status         string
+	CoolUntil      int64
+	CoolReason     string
+	ExpiresAt      int64
+	DeviceID       string
+	DeviceName     string
+	OSVersion      string
+	OfficeIdentity string
+	Platform       string
+	ClientChannel  string
+	Language       string
+	Meta           map[string]any
+	Priority       int64
+	Enabled        bool
+	LastCheckinDay string
+	CreatedAt      int64
+	UpdatedAt      int64
+	LastUsed       int64
 }
 
 const accountCols = `id, uid, name, note, token, refresh_token, token_exp, credits, credits_at,
@@ -54,29 +54,29 @@ const accountCols = `id, uid, name, note, token, refresh_token, token_exp, credi
 
 // 写入用的字段补丁：nil 表示不改。
 type AccountPatch struct {
-	Name            *string
-	Note            *string
-	Token           *string
-	RefreshToken    *string
-	TokenExp        *int64
-	Credits         *int64
-	CreditsAt       *int64
-	Status          *string
-	CoolUntil       *int64
-	CoolReason      *string
-	ExpiresAt       *int64
-	DeviceID        *string
-	DeviceName      *string
-	OSVersion       *string
-	OfficeIdentity  *string
-	Platform        *string
-	ClientChannel   *string
-	Language        *string
-	Meta            map[string]any
-	Priority        *int64
-	Enabled         *bool
-	LastCheckinDay  *string
-	LastUsed        *int64
+	Name           *string
+	Note           *string
+	Token          *string
+	RefreshToken   *string
+	TokenExp       *int64
+	Credits        *int64
+	CreditsAt      *int64
+	Status         *string
+	CoolUntil      *int64
+	CoolReason     *string
+	ExpiresAt      *int64
+	DeviceID       *string
+	DeviceName     *string
+	OSVersion      *string
+	OfficeIdentity *string
+	Platform       *string
+	ClientChannel  *string
+	Language       *string
+	Meta           map[string]any
+	Priority       *int64
+	Enabled        *bool
+	LastCheckinDay *string
+	LastUsed       *int64
 }
 
 func (s *Store) scanAccount(sc interface{ Scan(...any) error }) (*Account, error) {

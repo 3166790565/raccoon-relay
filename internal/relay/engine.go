@@ -15,12 +15,12 @@ import (
 
 // Engine 把「选号 → 刷新 → 上游请求 → 失败换号」串起来，三条协议共用。
 type Engine struct {
-	ST        *store.Store
-	Pool      *pool.Pool
-	Cool      *pool.CooldownBook
-	Client    *raccoon.Client
-	Refresher *Refresher
-	MaxRetry  int
+	ST           *store.Store
+	Pool         *pool.Pool
+	Cool         *pool.CooldownBook
+	Client       *raccoon.Client
+	Refresher    *Refresher
+	MaxRetry     int
 	DefaultModel string
 }
 

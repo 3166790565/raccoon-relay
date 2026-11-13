@@ -205,8 +205,8 @@ func (s *ChatStream) Next() (*ChatEvent, error) {
 				Code    int    `json:"code"`
 				Message string `json:"message"`
 			} `json:"error"`
-			Code    int             `json:"code"`
-			Message string          `json:"message"`
+			Code    int    `json:"code"`
+			Message string `json:"message"`
 			Choices []struct {
 				Delta        map[string]any `json:"delta"`
 				Message      map[string]any `json:"message"`

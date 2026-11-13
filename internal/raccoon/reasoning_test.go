@@ -13,9 +13,9 @@ func TestNormalizeReasoning(t *testing.T) {
 		absent string // 期望被删掉的字段
 	}{
 		{
-			name: "glm off + thinking.disabled 归一成 low 并摘掉 thinking",
+			name:  "glm off + thinking.disabled 归一成 low 并摘掉 thinking",
 			model: "sn-glm-5-3-flash",
-			in:   map[string]any{"reasoning_effort": "off", "thinking": map[string]any{"type": "disabled"}},
+			in:    map[string]any{"reasoning_effort": "off", "thinking": map[string]any{"type": "disabled"}},
 			field: "reasoning_effort", want: "low", absent: "thinking",
 		},
 		{
@@ -35,13 +35,13 @@ func TestNormalizeReasoning(t *testing.T) {
 			in: map[string]any{"reasoning_effort": "minimal"}, field: "reasoning_effort", want: "low",
 		},
 		{
-			name: "deepseek off → thinking.disabled",
+			name:  "deepseek off → thinking.disabled",
 			model: "sn-deepseek-v4",
 			in:    map[string]any{"reasoning_effort": "off"},
 			field: "thinking", want: map[string]any{"type": "disabled"}, absent: "reasoning_effort",
 		},
 		{
-			name: "deepseek 正向档 → thinking.enabled",
+			name:  "deepseek 正向档 → thinking.enabled",
 			model: "deepseek-v4",
 			in:    map[string]any{"reasoning_effort": "high"},
 			field: "thinking", want: map[string]any{"type": "enabled"}, absent: "reasoning_effort",

@@ -106,12 +106,12 @@ func (m *Manager) Exchange(ctx context.Context, rawInput string) ExchangeResult 
 	_ = m.Client.BindDevice(ctx, ex.Token, deviceID)
 
 	return m.upsert(ctx, AccountInput{
-		UID:           uid,
-		Token:         ex.Token,
-		RefreshToken:  ex.RefreshToken,
+		UID:            uid,
+		Token:          ex.Token,
+		RefreshToken:   ex.RefreshToken,
 		OfficeIdentity: ex.OfficeID,
-		DeviceID:      deviceID,
-		Source:        "oauth",
+		DeviceID:       deviceID,
+		Source:         "oauth",
 	})
 }
 

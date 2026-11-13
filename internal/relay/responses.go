@@ -272,7 +272,7 @@ func (r *responsesSSE) Delta(d raccoon.Delta) error {
 }
 
 func (r *responsesSSE) Usage(u raccoon.Usage) { r.usage = u }
-func (r *responsesSSE) Finish(reason string) {}
+func (r *responsesSSE) Finish(reason string)  {}
 func (r *responsesSSE) Complete() {
 	text := r.output.String()
 	_ = r.emit("response.output_text.done", map[string]any{
@@ -351,8 +351,8 @@ func (a *responsesAgg) Delta(d raccoon.Delta) error {
 	return nil
 }
 func (a *responsesAgg) Usage(u raccoon.Usage) { a.usage = u }
-func (a *responsesAgg) Finish(string)        {}
-func (a *responsesAgg) Complete()            {}
+func (a *responsesAgg) Finish(string)         {}
+func (a *responsesAgg) Complete()             {}
 
 func (a *responsesAgg) Message() map[string]any {
 	var output []any

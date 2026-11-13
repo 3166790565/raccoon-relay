@@ -36,13 +36,13 @@ type Scheduler struct {
 	client  *raccoon.Client
 	refresh *relay.Refresher
 
-	mu        sync.Mutex
-	lastTick  time.Time
-	lastRun   map[string]string // accountID → 当日已执行的动作标记
-	running   bool
-	lastSweep time.Time
+	mu         sync.Mutex
+	lastTick   time.Time
+	lastRun    map[string]string // accountID → 当日已执行的动作标记
+	running    bool
+	lastSweep  time.Time
 	lastResult string
-	lastCount int
+	lastCount  int
 }
 
 func New(cfg *config.Config, st *store.Store, client *raccoon.Client, refresh *relay.Refresher) *Scheduler {
@@ -146,7 +146,7 @@ func (s *Scheduler) sweep(ctx context.Context) {
 		// 账号间随机间隔，防风控
 		gap := s.cfg.CheckinGapMinMS
 		if s.cfg.CheckinGapMaxMS > gap {
-			gap += rand.Intn(s.cfg.CheckinGapMaxMS-gap+1)
+			gap += rand.Intn(s.cfg.CheckinGapMaxMS - gap + 1)
 		}
 		select {
 		case <-ctx.Done():

@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 
@@ -18,6 +19,11 @@ type Store struct {
 func Open(dir, secret string, allowPlaintext bool) (*Store, error) {
 	c, err := NewCipher(secret, allowPlaintext)
 	if err != nil {
+		return nil, err
+	}
+	// 开库前先自检：SQLite 的 "unable to open database file (14)" 只表明写不了，
+	// 不说明是谁写不了、该怎么修。在容器里这几乎总是 bind mount 属主问题。
+	if err := checkWritable(dir); err != nil {
 		return nil, err
 	}
 	path := filepath.Join(dir, "relay.db")
@@ -36,6 +42,28 @@ func Open(dir, secret string, allowPlaintext bool) (*Store, error) {
 }
 
 func (s *Store) Close() error { return s.db.Close() }
+
+// checkWritable 实测数据目录能否创建文件，失败时给出可直接照做的修复命令。
+// 只做探测，不留下任何文件。
+func checkWritable(dir string) error {
+	f, err := os.CreateTemp(dir, ".writecheck-*")
+	if err == nil {
+		name := f.Name()
+		f.Close()
+		os.Remove(name)
+		return nil
+	}
+	return fmt.Errorf(`数据目录 %s 不可写：%v
+
+容器里出现这个错误，几乎都是 bind mount 的属主问题：
+镜像里的 chown 在构建时就完成了，挂载宿主目录会覆盖掉它，
+容器内的进程（uid 10001 relay）拿不到写权限。
+
+修复（宿主机上执行）：
+  sudo chown -R 10001:10001 <你的数据目录>
+
+或者用最新镜像，入口脚本会在启动时自动修正属主。`, dir, err)
+}
 
 func (s *Store) migrate() error {
 	for _, stmt := range schema {

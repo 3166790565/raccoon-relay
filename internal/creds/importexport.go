@@ -170,15 +170,15 @@ func (im *Importer) importOne(ctx context.Context, a Account) ImportResult {
 	if existing != nil {
 		merged := mergeMeta(existing.Meta, meta)
 		p := store.AccountPatch{
-			Token:           &token,
-			RefreshToken:    &a.RefreshToken,
-			TokenExp:        &tokenExp,
-			Credits:         &a.Credits,
-			Status:          &status,
-			ExpiresAt:       &a.ExpiresAt,
-			OfficeIdentity:  &officeIdentity,
-			DeviceID:        &deviceID,
-			Meta:            merged,
+			Token:          &token,
+			RefreshToken:   &a.RefreshToken,
+			TokenExp:       &tokenExp,
+			Credits:        &a.Credits,
+			Status:         &status,
+			ExpiresAt:      &a.ExpiresAt,
+			OfficeIdentity: &officeIdentity,
+			DeviceID:       &deviceID,
+			Meta:           merged,
 		}
 		if name != "" {
 			p.Name = &name

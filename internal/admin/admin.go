@@ -168,7 +168,7 @@ func (p *Panel) handleListAccounts(w http.ResponseWriter, r *http.Request) {
 			"priority": a.Priority, "lastUsed": a.LastUsed,
 			"deviceId": a.DeviceID, "officeIdentity": a.OfficeIdentity,
 			"hasRefresh": a.RefreshToken != "",
-			"createdAt": a.CreatedAt, "updatedAt": a.UpdatedAt,
+			"createdAt":  a.CreatedAt, "updatedAt": a.UpdatedAt,
 		})
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "accounts": out})
@@ -478,7 +478,7 @@ func (p *Panel) handleStatus(w http.ResponseWriter, r *http.Request) {
 			"total": len(accounts), "online": online, "cooling": cooling,
 			"relogin": relogin, "exhausted": exhausted,
 		},
-		"checkin": map[string]any{"due": due, "today": today},
+		"checkin":  map[string]any{"due": due, "today": today},
 		"strategy": p.po.Strategy(),
 	}
 	if p.sched != nil {
@@ -501,11 +501,11 @@ func (p *Panel) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 
 func (p *Panel) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Strategy        *string `json:"strategy"`
-		CheckinEnable   *bool   `json:"checkinEnable"`
-		CheckinHour     *int    `json:"checkinHour"`
-		CheckinMinute   *int    `json:"checkinMinute"`
-		CheckinJitter   *int    `json:"checkinJitterMinutes"`
+		Strategy      *string `json:"strategy"`
+		CheckinEnable *bool   `json:"checkinEnable"`
+		CheckinHour   *int    `json:"checkinHour"`
+		CheckinMinute *int    `json:"checkinMinute"`
+		CheckinJitter *int    `json:"checkinJitterMinutes"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, 400, map[string]any{"ok": false, "message": err.Error()})
