@@ -3,6 +3,8 @@
 把商汤小浣熊（xiaohuanxiong.com）的对话能力包成一个自托管的 OpenAI / Anthropic 兼容网关。
 单二进制、单端口、纯 Go、无 cgo，只做三件事：**反代对话、号池轮换、自动签到**。
 
+> 友链：[LINUX DO](https://linux.do/) —— 本项目在 LINUX DO 社区推广
+
 ---
 
 ## 快速开始
