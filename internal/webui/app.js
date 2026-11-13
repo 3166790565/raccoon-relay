@@ -39,6 +39,18 @@ function shortUID(uid) {
   return s.length > 10 ? s.slice(0, 6) + '…' + s.slice(-4) : s;
 }
 
+// 积分显示：一万以下用阿拉伯数字，一万及以上用「万」，保留一位小数（去掉多余的 .0）。
+//   9600 → 9600 ，15000 → 1.5万 ，20000 → 2万
+// 负数（未知余额）按 0 处理，不显示 -1。
+function fmtCredits(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v) || v < 0) return '-';
+  if (v < 10000) return String(v);
+  const w = v / 10000;
+  // 四舍五入到一位小数；10000 以下不进位，避免 9999 显示成 1万
+  return w.toFixed(1).replace(/\.0$/, '') + '万';
+}
+
 const STATUS_LABEL = { online: '在线', cooling: '冷却', exhausted: '积分耗尽', relogin: '需重登' };
 
 // ---------- 登录 ----------
@@ -86,11 +98,21 @@ async function loadStatus() {
       `<span class="chip bad">需重登 ${a.relogin || 0}</span>`,
     ];
     $('chips').innerHTML = chips.join('');
+
+    // 积分总和：只要有一部分账号余额未知，就在括号里标注是按多少个号统计的，
+    // 免得用户把「已知部分的和」误当成全池总额。
+    const credTotal = a.creditsTotal || 0;
+    const credKnown = a.creditsKnown || 0;
+    const credText = credKnown === (a.total || 0)
+      ? fmtCredits(credTotal)
+      : `${fmtCredits(credTotal)}（${credKnown}/${a.total || 0} 个号有数据）`;
+
     $('overview').innerHTML = [
       ['总账号', a.total || 0],
       ['在线', a.online || 0],
       ['冷却/耗尽', (a.cooling || 0) + (a.exhausted || 0)],
       ['需重登', a.relogin || 0],
+      ['积分总和', credText],
       ['今日待签到', (s.checkin || {}).due ?? 0],
       ['选号策略', s.strategy || '-'],
       ['自动签到', sched.enabled ? '开启' : '关闭'],
@@ -129,7 +151,7 @@ function renderAccounts() {
       <td>${esc(a.name)}${a.enabled ? '' : ' <span class="tag">停用</span>'}</td>
       <td title="${esc(a.uid)}">${esc(shortUID(a.uid))}</td>
       <td><span class="dot ${st}"></span>${STATUS_LABEL[st] || esc(st)}</td>
-      <td>${a.credits < 0 ? '-' : a.credits}</td>
+      <td title="${a.credits >= 0 ? a.credits : ''}">${fmtCredits(a.credits)}</td>
       <td class="small">${cool}</td>
       <td class="small">${esc(checked)}</td>
       <td class="ops">

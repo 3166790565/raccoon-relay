@@ -467,9 +467,16 @@ func (p *Panel) handleStatus(w http.ResponseWriter, r *http.Request) {
 	loc := p.cfg.Location()
 	today := time.Now().In(loc).Format("2006-01-02")
 	due := 0
+	// 积分总和：只累计已知余额（Credits >= 0），未知的 -1 不算进去，否则总和会被拉低
+	var credTotal int64
+	var credKnown int
 	for _, a := range accounts {
 		if a.Enabled && a.LastCheckinDay != today {
 			due++
+		}
+		if a.Credits >= 0 {
+			credTotal += a.Credits
+			credKnown++
 		}
 	}
 	resp := map[string]any{
@@ -477,6 +484,7 @@ func (p *Panel) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"accounts": map[string]any{
 			"total": len(accounts), "online": online, "cooling": cooling,
 			"relogin": relogin, "exhausted": exhausted,
+			"creditsTotal": credTotal, "creditsKnown": credKnown,
 		},
 		"checkin":  map[string]any{"due": due, "today": today},
 		"strategy": p.po.Strategy(),
