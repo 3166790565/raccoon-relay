@@ -15,15 +15,15 @@ const (
 
 // 事件来源（scope）。一个 scope 对应一条业务链路，面板用来快速缩圈。
 const (
-	ScopeRelay     = "relay"     // 请求转发：上游错误、换号、超时
-	ScopePool      = "pool"      // 号池：冷却、恢复、积分
-	ScopeCheckin   = "checkin"   // 自动签到
-	ScopeRenew     = "renew"     // 凭证续期
-	ScopeUpdate    = "update"    // 版本更新
-	ScopeLog       = "logs"      // 日志管理自身
-	ScopeAccount   = "account"   // 账号增删、导入导出
-	ScopeSystem    = "system"    // 启动、配置、其它
-	EventMaxDetail = 8 << 10     // detail 上限 8KB，防止把整段响应体写进库
+	ScopeRelay     = "relay"   // 请求转发：上游错误、换号、超时
+	ScopePool      = "pool"    // 号池：冷却、恢复、积分
+	ScopeCheckin   = "checkin" // 自动签到
+	ScopeRenew     = "renew"   // 凭证续期
+	ScopeUpdate    = "update"  // 版本更新
+	ScopeLog       = "logs"    // 日志管理自身
+	ScopeAccount   = "account" // 账号增删、导入导出
+	ScopeSystem    = "system"  // 启动、配置、其它
+	EventMaxDetail = 8 << 10   // detail 上限 8KB，防止把整段响应体写进库
 )
 
 // NormalizeLevel 把随手写的级别收敛到 info/warn/error。
@@ -175,6 +175,51 @@ func (s *Store) QueryEvents(ctx context.Context, f EventFilter) ([]RuntimeEvent,
 	return out, sum, nil
 }
 
+// LatestEvents 返回某个账号最近的几条指定来源的事件，供面板「错误详情」直接展示。
+// 按「发生时间」倒序：合并过的旧事件 ts 不变、last_ts 会往后推，用 last_ts 才能把
+// 「一直重复到现在的那条」排在最前。
+func (s *Store) LatestEvents(ctx context.Context, accountID string, scopes []string, limit int) ([]RuntimeEvent, error) {
+	if limit <= 0 {
+		limit = 1
+	}
+	q := `SELECT e.id, e.ts, e.level, e.scope, e.component, e.account_id,
+		COALESCE(a.name, ''), COALESCE(a.uid, ''), e.message, e.detail, e.count, e.last_ts
+		FROM runtime_events e LEFT JOIN accounts a ON a.id = e.account_id
+		WHERE e.account_id = ?`
+	args := []any{accountID}
+	if len(scopes) > 0 {
+		ph := make([]string, 0, len(scopes))
+		for _, sc := range scopes {
+			if sc = strings.TrimSpace(sc); sc != "" {
+				ph = append(ph, "?")
+				args = append(args, sc)
+			}
+		}
+		if len(ph) > 0 {
+			q += ` AND e.scope IN (` + strings.Join(ph, ",") + `)`
+		}
+	}
+	// last_ts 为 0 的是老数据（该列引入前写的），回落到 ts，免得它们永远排在最后。
+	q += ` ORDER BY CASE WHEN e.last_ts > 0 THEN e.last_ts ELSE e.ts END DESC, e.id DESC LIMIT ?`
+	args = append(args, limit)
+
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]RuntimeEvent, 0, limit)
+	for rows.Next() {
+		var e RuntimeEvent
+		if err := rows.Scan(&e.ID, &e.TS, &e.Level, &e.Scope, &e.Component, &e.AccountID,
+			&e.AccountName, &e.AccountUID, &e.Message, &e.Detail, &e.Count, &e.LastTS); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
 // EventFacets 返回时间窗内出现过的来源清单，用于筛选下拉。
 func (s *Store) EventFacets(ctx context.Context, sinceMS int64) ([]string, error) {
 	q := `SELECT DISTINCT scope FROM runtime_events WHERE scope <> ''`
@@ -215,6 +260,9 @@ func (s *Store) AddEvent(ctx context.Context, e RuntimeEvent) error {
 	if e.Count <= 0 {
 		e.Count = 1
 	}
+	if e.LastTS == 0 {
+		e.LastTS = e.TS
+	}
 	e.Level = NormalizeLevel(e.Level)
 	if e.Scope == "" {
 		e.Scope = ScopeSystem
@@ -223,6 +271,8 @@ func (s *Store) AddEvent(ctx context.Context, e RuntimeEvent) error {
 	if e.Message == "" {
 		return nil
 	}
+	// 按字符（rune）截断，不是字节：事件详情以中文为主，按字节切会把汉字切成
+	// 半个字符，面板上直接显示成乱码。
 	if len(e.Message) > 2000 {
 		e.Message = string([]rune(e.Message)[:2000])
 	}
@@ -250,7 +300,7 @@ func (s *Store) AddEvent(ctx context.Context, e RuntimeEvent) error {
 	_, err = s.db.ExecContext(ctx,
 		`INSERT INTO runtime_events (ts, level, scope, component, account_id, message, detail, count, last_ts)
 		 VALUES (?,?,?,?,?,?,?,?,?)`,
-		e.TS, e.Level, e.Scope, e.Component, e.AccountID, e.Message, e.Detail, e.Count, e.TS)
+		e.TS, e.Level, e.Scope, e.Component, e.AccountID, e.Message, e.Detail, e.Count, e.LastTS)
 	return err
 }
 

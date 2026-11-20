@@ -139,6 +139,23 @@ type ChatRequest struct {
 	Session string
 }
 
+// summary 是排障用的请求侧摘要：模型与客户端指纹，不含任何凭据。
+// 上游的 403 很多是设备指纹/渠道被判异常，光看响应体分不清是哪一次请求。
+func (r ChatRequest) summary(turnID string) string {
+	model, _ := r.Body["model"].(string)
+	var b strings.Builder
+	fmt.Fprintf(&b, "模型：%s\n", model)
+	fmt.Fprintf(&b, "turn：%s\n", turnID)
+	fmt.Fprintf(&b, "客户端：%s / %s / %s\n", ClientName, ClientVersion, r.IDN.ClientChannel)
+	fmt.Fprintf(&b, "平台：%s\n", r.IDN.Platform)
+	fmt.Fprintf(&b, "设备：%s\n", r.IDN.DeviceID)
+	fmt.Fprintf(&b, "会话：%s\n", r.Session)
+	if isTeam(r.IDN.OfficeIdentity) {
+		fmt.Fprintf(&b, "组织：%s\n", r.IDN.OfficeIdentity)
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
 // OpenChat 发起上游请求，返回可迭代的事件通道。
 // 调用方负责在拿到首帧前失败时换号；一旦从这里读到事件就说明已经写出过内容。
 func (c *Client) OpenChat(ctx context.Context, req ChatRequest) (*ChatStream, error) {
@@ -149,7 +166,8 @@ func (c *Client) OpenChat(ctx context.Context, req ChatRequest) (*ChatStream, er
 	// 流式响应用「无数据空闲超时」管：每秒都可能来帧，但整条流可能跑几十分钟。
 	// 这里只负责在空闲超期时取消请求，计时由 ChatStream 在每次读到数据后重置。
 	streamCtx, cancel := context.WithCancel(ctx)
-	h := chatHeaders(req.Token, req.IDN, req.Session, NewTurnID(), titleTrim(req.Title))
+	turnID := NewTurnID()
+	h := chatHeaders(req.Token, req.IDN, req.Session, turnID, titleTrim(req.Title))
 	httpReq, err := http.NewRequestWithContext(streamCtx, http.MethodPost, c.url(PathChat), bytes.NewReader(raw))
 	if err != nil {
 		cancel()
@@ -161,13 +179,17 @@ func (c *Client) OpenChat(ctx context.Context, req ChatRequest) (*ChatStream, er
 	resp, err := c.HTTP.Do(httpReq)
 	if err != nil {
 		cancel()
-		return nil, &UpstreamError{Status: 0, Message: "上游连接失败: " + err.Error()}
+		return nil, &UpstreamError{Status: 0, Message: "上游连接失败: " + err.Error(),
+			Endpoint: PathChat, TurnID: turnID}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 		resp.Body.Close()
 		cancel()
-		return nil, &UpstreamError{Status: resp.StatusCode, Message: upstreamErrText(resp.StatusCode, body)}
+		ue := &UpstreamError{Status: resp.StatusCode, Message: upstreamErrText(resp.StatusCode, body),
+			Endpoint: PathChat, TurnID: turnID, RequestSummary: req.summary(turnID)}
+		ue.attachDiagnostics(resp.Header, body)
+		return nil, ue
 	}
 	sc := bufio.NewScanner(resp.Body)
 	// 单帧上限 4MB：图片/长工具参数偶尔会撑到几百 KB

@@ -511,6 +511,11 @@ func (p *Panel) handleAccountAction(w http.ResponseWriter, r *http.Request) {
 	}
 
 	action := parts[1]
+	// 错误详情是只读查询，用 GET；其余动作都是 POST。
+	if action == "errors" && r.Method == http.MethodGet {
+		p.handleAccountErrors(w, r, acc)
+		return
+	}
 	if r.Method != http.MethodPost {
 		writeJSON(w, 405, map[string]any{"ok": false, "message": "方法不支持"})
 		return
@@ -606,6 +611,32 @@ func (p *Panel) actionUncool(w http.ResponseWriter, r *http.Request, acc *store.
 		}
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "message": "已解除账号冷却"})
+}
+
+// handleAccountErrors 返回这个号最近的失败现场，供面板「限流」列点开查看。
+//
+// 号池页上能看到的只是「HTTP 403 + 恢复时间」，排查时真正需要的是上游那次
+// 请求的响应头与原始响应体（网关拦截页、风控命中码、权限提示都在里面）。
+// 这里从运行事件里取最近几条 relay 事件，连同账号当前冷却状态一起返回。
+func (p *Panel) handleAccountErrors(w http.ResponseWriter, r *http.Request, acc *store.Account) {
+	events, err := p.st.LatestEvents(r.Context(), acc.ID, []string{store.ScopeRelay}, 5)
+	if err != nil {
+		writeJSON(w, 500, map[string]any{"ok": false, "message": err.Error()})
+		return
+	}
+	modelCools := []pool.ModelCoolInfo{}
+	if p.cool != nil {
+		modelCools = p.cool.ModelCooldownsOf(acc.ID)
+	}
+	writeJSON(w, 200, map[string]any{
+		"ok":     true,
+		"events": events,
+		"account": map[string]any{
+			"id": acc.ID, "name": acc.Name, "uid": acc.UID,
+			"status": acc.Status, "coolUntil": acc.CoolUntil, "coolReason": acc.CoolReason,
+			"modelCools": modelCools,
+		},
+	})
 }
 
 func (p *Panel) actionCheckin(w http.ResponseWriter, r *http.Request, acc *store.Account) {

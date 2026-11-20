@@ -107,8 +107,16 @@ func (e *Engine) RunOpenAI(ctx context.Context, req *ChatContext, sink OpenAISin
 		if kind == pool.FailRelogin || !switchable {
 			level = store.LevelError
 		}
-		detail := fmt.Sprintf("模型：%s\n返回码：%d\n上游错误：%s\n尝试序号：%d",
-			req.Model, code, strings.TrimSpace(leaseErr.Error()), attemptNo+1)
+		detail := fmt.Sprintf("模型：%s\n上游返回码：%d\n尝试序号：%d\n原因：%s",
+			req.Model, code, attemptNo+1, strings.TrimSpace(leaseErr.Error()))
+		// 把上游的原始现场接在原因后面：403 的真实理由通常只在响应头/响应体里，
+		// 面板「错误详情」要能直接看到，否则只剩一句 HTTP 403 没法排查。
+		var ue *raccoon.UpstreamError
+		if errors.As(leaseErr, &ue) {
+			if block := diagnosticBlock(ue); block != "" {
+				detail += "\n" + block
+			}
+		}
 		// 429 只罚「这个号 × 这个模型」，不把整个号停掉：同一个号换个模型往往还是好的。
 		// 只有模型级冷却被关闭时才退化为整号短冷却。
 		if isModelScoped(leaseErr) || (kind == pool.FailRate && e.Cool.ModelEnabled()) {

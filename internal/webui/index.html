@@ -440,6 +440,23 @@
       </div>
     </div>
 
+    <!-- 账号错误详情弹层：号池页「限流」列点开后展示上游原始现场 -->
+    <div class="modal-scrim" id="errDetailModal" hidden>
+      <div class="modal wide">
+        <div class="modal-head">
+          <h3>错误详情</h3>
+          <button class="ghost tiny" id="errDetailClose">关闭</button>
+        </div>
+        <div class="modal-body" id="errDetailBody"></div>
+        <div class="modal-foot">
+          <button class="ghost tiny" id="errDetailCopy">复制全部</button>
+          <button class="ghost tiny" id="errDetailLogs">在运行日志中查看</button>
+          <span class="grow"></span>
+          <span class="hint" id="errDetailMeta"></span>
+        </div>
+      </div>
+    </div>
+
     <!-- 版本更新 -->
     <section class="page" id="page-update">
       <section class="card">

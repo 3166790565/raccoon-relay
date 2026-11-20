@@ -555,6 +555,73 @@ type UpstreamError struct {
 	Code    int
 	Auth    bool
 	Message string
+
+	// 以下字段只用于面板的「错误详情」排查，不参与分类、冷却与对外文案。
+	// 403 的真实原因几乎都在响应头或响应体里（风控命中、权限不足、网关拦截），
+	// 只留一句「HTTP 403」用户无从判断，所以把现场完整带出来。
+	Endpoint       string            // 上游路径
+	TurnID         string            // 本次请求的 Turn-ID，便于和上游日志对齐
+	RequestID      string            // 上游返回的请求 ID（有的话）
+	RequestSummary string            // 请求侧摘要：模型、客户端指纹头
+	Headers        map[string]string // 脱敏后的响应头
+	Raw            string            // 原始响应体（截断）
+}
+
+// attachDiagnostics 把一次非 2xx 响应的现场挂在错误上，供运行事件与面板展示。
+func (e *UpstreamError) attachDiagnostics(h http.Header, raw []byte) {
+	e.Headers = diagnosticHeaders(h)
+	e.Raw = truncateRaw(raw)
+	e.RequestID = requestIDOf(e.Headers)
+}
+
+// secretRespHeaders 是不能出现在面板上的响应头（可能携带凭据）。
+var secretRespHeaders = map[string]bool{
+	"set-cookie": true, "cookie": true, "authorization": true, "proxy-authorization": true,
+}
+
+func diagnosticHeaders(h http.Header) map[string]string {
+	if len(h) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(h))
+	for k, vs := range h {
+		lk := strings.ToLower(k)
+		if secretRespHeaders[lk] {
+			continue
+		}
+		out[lk] = strings.Join(vs, ", ")
+	}
+	return out
+}
+
+// truncateRaw 把原始响应体转成可放进事件详情的文本。按字符截断，
+// 避免把多字节汉字切坏；上限 3000 字符足够看清网关拦截页或错误 JSON。
+func truncateRaw(raw []byte) string {
+	s := strings.TrimSpace(string(raw))
+	if s == "" {
+		return ""
+	}
+	const max = 3000
+	r := []rune(s)
+	if len(r) > max {
+		return string(r[:max]) + "\n…（已截断，原始响应体更长）"
+	}
+	return s
+}
+
+// requestIDHeaders 是各家网关常用的请求 ID 头，命中哪个就展示哪个。
+var requestIDHeaders = []string{
+	"x-request-id", "x-trace-id", "x-tt-logid", "x-tt-request-id",
+	"request-id", "x-amzn-requestid", "traceparent", "cf-ray",
+}
+
+func requestIDOf(h map[string]string) string {
+	for _, k := range requestIDHeaders {
+		if v := h[k]; v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func (e *UpstreamError) Error() string {

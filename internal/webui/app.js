@@ -286,11 +286,13 @@ function renderAccounts() {
     const checked = POOL.sel.has(a.id);
 
     // 限流列：账号级冷却显示原因 + 剩余时间；只有模型级罚单时显示「N 个模型」。
+    // 只要有错误现场（冷却中/需重登/已限流）就做成可点的「错误详情」入口，
+    // 单元格本身只放摘要，点开才看到响应头与原始响应体。
     let coolCell;
     if (st === 'cooling' || (st === 'exhausted' && a.coolUntil)) {
-      coolCell = `<div class="coolbox warn">
+      coolCell = `<div class="coolbox warn clickable" title="点击查看错误详情">
         <span class="cb-main">${esc(a.coolReason || '限流中')}</span>
-        <span class="cb-sub">${esc(fmtLeft(a.coolUntil || 0))}</span>
+        <span class="cb-sub">${esc(fmtLeft(a.coolUntil || 0))} · 详情</span>
       </div>`;
     } else if (lowCredit) {
       coolCell = `<div class="coolbox bad">
@@ -298,7 +300,9 @@ function renderAccounts() {
         <span class="cb-sub">待余额恢复</span>
       </div>`;
     } else if (st === 'relogin') {
-      coolCell = `<div class="coolbox bad"><span class="cb-main">凭证失效</span><span class="cb-sub">需重新登录</span></div>`;
+      coolCell = `<div class="coolbox bad clickable" title="点击查看错误详情">
+        <span class="cb-main">凭证失效</span><span class="cb-sub">需重新登录 · 详情</span>
+      </div>`;
     } else if (cools.length) {
       coolCell = `<div class="coolbox info" title="点击查看限流明细">
         <span class="cb-main">${cools.length} 个模型</span>
@@ -378,10 +382,11 @@ function bindRowEvents(tbody) {
       });
     });
 
-    const coolBox = tr.querySelector('.coolbox.info');
-    if (coolBox) {
-      coolBox.addEventListener('click', () => openCoolDetail(coolBox, id));
-    }
+    // 两种限流框：有模型级罚单的开限流明细；冷却/需重登的开错误现场。
+    const infoBox = tr.querySelector('.coolbox.info');
+    if (infoBox) infoBox.addEventListener('click', () => openCoolDetail(infoBox, id));
+    const errBox = tr.querySelector('.coolbox.clickable');
+    if (errBox) errBox.addEventListener('click', () => openAccountErrors(id));
   });
 }
 
@@ -561,6 +566,91 @@ function openCoolDetail(anchor, id) {
   });
 }
 
+// 错误详情：号池页「限流」列点开的内容。
+// 后端从运行事件里取这个号最近几条转发失败，detail 里已经是拼好的上游现场
+// （状态码/响应头/原始响应体），这里只负责排版，不做二次解析。
+let errDetailAccount = null;
+
+async function openAccountErrors(id) {
+  const acc = STATE.accounts.find((a) => a.id === id);
+  errDetailAccount = acc || { id };
+  $('errDetailBody').innerHTML = '<p class="hint">正在读取错误现场…</p>';
+  // 接口地址里是账号的内部 id，直接显示出来对用户没有意义，优先显示名称/UID。
+  $('errDetailMeta').textContent = acc ? (acc.name || shortUID(acc.uid)) : shortUID(id);
+  openEvModal('errDetailModal');
+  try {
+    const r = await api(`/api/accounts/${encodeURIComponent(id)}/errors`);
+    errDetailAccount = r.account || errDetailAccount;
+    renderAccountErrors(r);
+  } catch (e) {
+    $('errDetailBody').innerHTML = `<p class="err">${esc(e.message)}</p>`;
+  }
+}
+
+function renderAccountErrors(r) {
+  const a = r.account || errDetailAccount || {};
+  const events = Array.isArray(r.events) ? r.events : [];
+  const cools = modelCoolsOf(a).filter((m) => m.until > Date.now());
+
+  const kv = (k, v) => `<div class="ld-row"><span class="ld-k">${esc(k)}</span><span class="ld-v">${v}</span></div>`;
+  const st = a.status || 'online';
+  const stLabel = STATUS_LABEL[st] || st;
+  const coolLine = a.coolUntil && a.coolUntil > Date.now()
+    ? `${esc(a.coolReason || '限流中')} · ${esc(fmtLeft(a.coolUntil))}`
+    : (a.coolReason ? esc(a.coolReason) : '-');
+
+  const head = `<div class="ev-detail-head">
+      <span class="pill ${esc(st)}"><i class="dot"></i>${esc(stLabel)}</span>
+      <span class="ev-detail-msg">${esc(a.name || shortUID(a.uid || ''))}</span>
+    </div>
+    <div class="ev-detail-time">uid：${esc(a.uid || '-')}</div>
+    <div class="pop-body ev-detail-kv">
+      ${kv('账号状态', `<span class="pill ${esc(st)}"><i class="dot"></i>${esc(stLabel)}</span>`)}
+      ${kv('冷却原因', coolLine)}
+      ${kv('模型限流', cools.length
+        ? cools.map((m) => `${esc(m.model)} · ${esc(fmtLeft(m.until))}`).join('<br>')
+        : '<span class="dim">无</span>')}
+    </div>`;
+
+  const blocks = events.map((e) => `
+    <div class="ev-detail-block">
+      <div class="ev-detail-label">
+        <span class="tag">${esc(fmtClock(e.ts))}</span>
+        <span class="tag">${esc(e.level || '')}</span>
+        ${esc(e.message || '')}${e.count > 1 ? ` <span class="hint">· 合并 ${e.count} 次，最近 ${esc(fmtClock(e.lastTs))}</span>` : ''}
+      </div>
+      <pre class="ld-err ev-pre">${esc(e.detail || '（这条事件没有附加详情）')}</pre>
+    </div>`).join('');
+
+  const empty = `<p class="hint">这个号最近没有记录到转发失败事件。
+    如果冷却原因是「HTTP 403」，说明失败发生在运行事件表启用之前——等下一次请求失败后再点这里查看。</p>`;
+
+  $('errDetailBody').innerHTML = head + (blocks || empty);
+}
+
+$('errDetailClose').addEventListener('click', () => closeEvModal('errDetailModal'));
+$('errDetailCopy').addEventListener('click', async () => {
+  const text = $('errDetailBody').innerText;
+  try {
+    await navigator.clipboard.writeText(text);
+    $('errDetailCopy').textContent = '已复制';
+    setTimeout(() => { $('errDetailCopy').textContent = '复制全部'; }, 1500);
+  } catch {
+    $('errDetailCopy').textContent = '复制失败';
+  }
+});
+$('errDetailLogs').addEventListener('click', () => {
+  // 跳到运行日志，按「这个号 + 失败来源」筛：只按号筛会把签到之类无关事件一起带出来，
+  // 用户想看的是这个号到底因为什么被拦。时间范围不设限，早先的失败也能翻到。
+  const id = (errDetailAccount && errDetailAccount.id) || '';
+  closeEvModal('errDetailModal');
+  EV.account = id;
+  EV.scopes = ['relay', 'pool'];
+  EV.range = 'all';
+  syncEvFilterUI();
+  switchPage('syslogs', { force: true });
+});
+
 function openRowMenu(anchor, id) {
   const acc = STATE.accounts.find((a) => a.id === id);
   if (!acc) return;
@@ -569,6 +659,7 @@ function openRowMenu(anchor, id) {
       <button data-m="balance">查余额</button>
       <button data-m="refresh">刷新凭据</button>
       <button data-m="checkin">签到</button>
+      <button data-m="errors">错误详情</button>
       <button data-m="uncool">解除冷却</button>
       <button data-m="toggle">${acc.enabled ? '停用账号' : '启用账号'}</button>
       <div class="sep"></div>
@@ -576,7 +667,11 @@ function openRowMenu(anchor, id) {
     </div>`, { width: 160 });
 
   el.querySelectorAll('[data-m]').forEach((b) => {
-    b.addEventListener('click', () => { closePop(); accountAction(b.dataset.m, id); });
+    b.addEventListener('click', () => {
+      closePop();
+      if (b.dataset.m === 'errors') openAccountErrors(id);
+      else accountAction(b.dataset.m, id);
+    });
   });
 }
 
@@ -1569,12 +1664,20 @@ function syncEvFilterUI() {
   $('evProblem').checked = EV.problem;
   $('evSearch').value = EV.q;
   $('evFilterCount').textContent = EV.scopes.length ? String(EV.scopes.length) : '';
-  // 已被选中的来源做成可点掉的标签条，收起时也知道当前筛了什么
+
+  // 当前生效的筛选项统一做成可点掉的标签条：来源和账号筛选都藏在弹层里，
+  // 不显示出来用户会以为列表「怎么只剩下几条」。点 × 即解除该项。
+  const chips = EV.scopes.map((s) =>
+    `<button class="ev-chip" data-kind="scope" data-v="${esc(s)}">${esc(evScopeLabel(s))}<i>×</i></button>`);
+  if (EV.account) {
+    const acc = (STATE.accounts || []).find((a) => a.id === EV.account);
+    const label = acc ? (acc.name || shortUID(acc.uid)) : shortUID(EV.account);
+    chips.push(`<button class="ev-chip ev-chip-acc" data-kind="account" data-v="${esc(EV.account)}">账号：${esc(label)}<i>×</i></button>`);
+  }
   const bar = $('evChipBar');
-  if (!EV.scopes.length) { bar.hidden = true; bar.innerHTML = ''; return; }
+  if (!chips.length) { bar.hidden = true; bar.innerHTML = ''; return; }
   bar.hidden = false;
-  bar.innerHTML = EV.scopes.map((s) =>
-    `<button class="ev-chip" data-scope="${esc(s)}">${esc(evScopeLabel(s))}<i>×</i></button>`).join('');
+  bar.innerHTML = chips.join('');
 }
 
 document.querySelectorAll('#evLevel button').forEach((b) => {
@@ -1592,7 +1695,14 @@ $('evJump').addEventListener('change', () => gotoEvPage(Number($('evJump').value
 $('evChipBar').addEventListener('click', (e) => {
   const chip = e.target.closest('.ev-chip');
   if (!chip) return;
-  EV.scopes = EV.scopes.filter((s) => s !== chip.dataset.scope);
+  if (chip.dataset.kind === 'account') {
+    // 账号筛选存的是 id，而输入框里可以填 id、UID 或名称。清掉框里的值，
+    // 否则下次点「筛选」会把刚点掉的账号又加回来。
+    EV.account = '';
+    if ($('evAccountInput')) $('evAccountInput').value = '';
+  } else {
+    EV.scopes = EV.scopes.filter((s) => s !== chip.dataset.v);
+  }
   syncEvFilterUI();
   applyEvFilter();
 });
@@ -1651,6 +1761,11 @@ $('evModalApply').addEventListener('click', () => {
 $('evModalReset').addEventListener('click', () => {
   $('evScopeChecks').querySelectorAll('input').forEach((x) => { x.checked = false; });
   if ($('evAccountInput')) $('evAccountInput').value = '';
+  // 重置要真的清掉生效中的筛选，否则点完「重置」列表还是按旧账号/来源筛着。
+  EV.account = '';
+  EV.scopes = [];
+  syncEvFilterUI();
+  applyEvFilter();
 });
 $('evModalClose').addEventListener('click', () => closeEvModal('evModal'));
 

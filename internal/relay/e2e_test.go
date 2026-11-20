@@ -36,6 +36,8 @@ type chatResult struct {
 	finish  string
 	errCode int
 	errMsg  string
+	errBody string            // 原样写出的响应体（用于还原网关拦截页）
+	headers map[string]string // 额外的响应头
 }
 
 func (f *fakeUpstream) handler() http.Handler {
@@ -54,8 +56,13 @@ func (f *fakeUpstream) handler() http.Handler {
 		f.mu.Unlock()
 
 		if res.status != 0 && res.status != 200 {
+			for k, v := range res.headers {
+				w.Header().Set(k, v)
+			}
 			w.WriteHeader(res.status)
-			if res.errMsg != "" {
+			if res.errBody != "" {
+				_, _ = w.Write([]byte(res.errBody))
+			} else if res.errMsg != "" {
 				_ = json.NewEncoder(w).Encode(map[string]any{"code": res.errCode, "message": res.errMsg})
 			}
 			return
@@ -356,6 +363,54 @@ func TestUnauthorizedRefreshesInsteadOfRelogin(t *testing.T) {
 	acc, _ := h.st.GetByUID(context.Background(), "pu-1")
 	if acc.Status != store.StatusOnline {
 		t.Fatalf("刷新可用时不应把号打成 %s", acc.Status)
+	}
+}
+
+// 403 的原始现场必须进运行事件：面板「错误详情」要能直接看到响应头与响应体，
+// 否则号池页只剩一句「HTTP 403」，排查时无从下手。
+func TestForbiddenDiagnosticsReachEventDetail(t *testing.T) {
+	h := newHarness(t, []chatResult{{
+		status:  403,
+		errBody: `{"code":403,"message":"device fingerprint blocked"}`,
+		headers: map[string]string{"X-TT-System-Error": "3"},
+	}})
+	h.addAccount(t, "pu-1", 100)
+
+	// 收集引擎抛出的事件；生产环境由 eventlog 落库，这里直接断言内容。
+	var mu sync.Mutex
+	var got []store.RuntimeEvent
+	h.engine.Event = func(ev store.RuntimeEvent) {
+		mu.Lock()
+		got = append(got, ev)
+		mu.Unlock()
+	}
+
+	_ = h.do(t, "POST", "/v1/chat/completions",
+		`{"model":"sn-test-model","messages":[{"role":"user","content":"hi"}]}`)
+
+	mu.Lock()
+	defer mu.Unlock()
+	var fail *store.RuntimeEvent
+	for i := range got {
+		if strings.Contains(got[i].Message, "上游失败") {
+			fail = &got[i]
+		}
+	}
+	if fail == nil {
+		t.Fatalf("应记录一条上游失败事件，实际 %d 条", len(got))
+	}
+	for _, want := range []string{
+		"上游返回码：403",
+		"接口：" + raccoon.PathChat,
+		"响应头：",
+		"x-tt-system-error: 3",
+		"响应体：",
+		"device fingerprint blocked",
+		"处置：",
+	} {
+		if !strings.Contains(fail.Detail, want) {
+			t.Fatalf("事件详情缺少 %q:\n%s", want, fail.Detail)
+		}
 	}
 }
 

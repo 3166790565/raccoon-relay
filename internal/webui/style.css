@@ -250,6 +250,11 @@ button.tiny { padding: 4px 9px; font-size: 12px; }
 .coolbox.info { border-color: #3a3320; background: #1e1b14; cursor: pointer; }
 .coolbox.info:hover { border-color: var(--warn); }
 .coolbox.info .cb-main { color: #e3b64f; }
+/* 冷却 / 需重登的格子可以点开「错误详情」，给出明确的可点提示 */
+.coolbox.clickable { cursor: pointer; }
+.coolbox.clickable:hover { border-color: var(--warn); filter: brightness(1.15); }
+.coolbox.clickable .cb-sub { color: var(--warn); }
+.ev-detail-label .tag { margin-right: 4px; }
 
 /* 额度列 */
 .quota { display: flex; flex-direction: column; gap: 5px; }

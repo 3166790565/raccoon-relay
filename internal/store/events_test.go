@@ -2,8 +2,10 @@ package store
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func newEventStore(t *testing.T) *Store {
@@ -89,6 +91,63 @@ func TestQueryEventsLevelAndProblem(t *testing.T) {
 	}
 }
 
+// 错误详情按「最近发生」排：合并过的老事件（ts 早、last_ts 新）要排在前面，
+// 否则面板点开看到的是一条早已不相关的旧错误。
+func TestLatestEventsOrdersByLastSeen(t *testing.T) {
+	ctx := context.Background()
+	st := newEventStore(t)
+	now := time.Now().UnixMilli()
+	if _, err := st.db.Exec(
+		`INSERT INTO runtime_events (ts, level, scope, component, account_id, message, detail, count, last_ts)
+		 VALUES (?,?,?,?,?,?,?,?,?), (?,?,?,?,?,?,?,?,?)`,
+		now-3600_000, LevelWarn, ScopeRelay, "engine", "acc1", "反复失败", "repeated", 9, now,
+		now-60_000, LevelInfo, ScopeRelay, "engine", "acc1", "一次性", "once", 1, now-60_000,
+	); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := st.LatestEvents(ctx, "acc1", []string{ScopeRelay}, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 || rows[0].Message != "反复失败" {
+		t.Fatalf("应按最后发生时间倒序，实际 %+v", rows)
+	}
+	// 老数据（last_ts=0）回落到 ts，不能因为缺失列值被排到最后。
+	if _, err := st.db.Exec(
+		`INSERT INTO runtime_events (ts, level, scope, component, account_id, message, detail, count, last_ts)
+		 VALUES (?,?,?,?,?,?,?,?,?)`,
+		now-10_000, LevelWarn, ScopeRelay, "engine", "acc1", "老数据", "legacy", 1, 0,
+	); err != nil {
+		t.Fatal(err)
+	}
+	rows, _ = st.LatestEvents(ctx, "acc1", nil, 5)
+	if len(rows) != 3 || rows[1].Message != "老数据" {
+		t.Fatalf("last_ts=0 应回落到 ts 排序（排在 1 小时前的旧事件之前），实际 %+v", rows)
+	}
+}
+
+// 只取指定来源：号池冷却事件不该混进「转发失败」现场列表。
+func TestLatestEventsFiltersScope(t *testing.T) {
+	ctx := context.Background()
+	st := newEventStore(t)
+	now := time.Now().UnixMilli()
+	for _, e := range []RuntimeEvent{
+		{TS: now, Level: LevelWarn, Scope: ScopePool, Component: "cooldown", AccountID: "acc1", Message: "停用账号（冷却）"},
+		{TS: now, Level: LevelWarn, Scope: ScopeRelay, Component: "engine", AccountID: "acc1", Message: "上游失败：HTTP 403"},
+	} {
+		if err := st.AddEvent(ctx, e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := st.LatestEvents(ctx, "acc1", []string{ScopeRelay}, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Scope != ScopeRelay {
+		t.Fatalf("应只返回 relay 事件，实际 %+v", rows)
+	}
+}
+
 func TestPurgeEventsBefore(t *testing.T) {
 	ctx := context.Background()
 	st := newEventStore(t)
@@ -108,5 +167,33 @@ func TestPurgeEventsBefore(t *testing.T) {
 	}
 	if count, _, _ := st.EventStats(ctx); count != 1 {
 		t.Fatalf("应剩 1 条，实际 %d", count)
+	}
+}
+
+// detail 的超限截断要按字符算：中文事件详情很容易超过 8K 字符，
+// 误当字节截会把汉字从中间切开，面板上显示成乱码。
+func TestAddEventTruncatesDetailByRunes(t *testing.T) {
+	ctx := context.Background()
+	st := newEventStore(t)
+	detail := strings.Repeat("上游风控拦截原因", 2000) // 中文，字节数远超 8K
+	if err := st.AddEvent(ctx, RuntimeEvent{
+		Level: LevelWarn, Scope: ScopeRelay, Component: "engine", AccountID: "acc1",
+		Message: "上游失败：HTTP 403", Detail: detail,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := st.LatestEvents(ctx, "acc1", []string{ScopeRelay}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("应写入一条事件，实际 %d", len(rows))
+	}
+	got := []rune(rows[0].Detail)
+	if len(got) > EventMaxDetail {
+		t.Fatalf("detail 应按字符截断到 %d，实际 %d 个字符", EventMaxDetail, len(got))
+	}
+	if !utf8.ValidString(rows[0].Detail) {
+		t.Fatal("截断后的 detail 必须是合法 UTF-8，不能把汉字切坏")
 	}
 }

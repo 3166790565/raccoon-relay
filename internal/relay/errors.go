@@ -2,7 +2,9 @@ package relay
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -150,4 +152,46 @@ func cleanMessage(s string) string {
 		return string([]rune(s)[:300])
 	}
 	return s
+}
+
+// diagnosticBlock 把一次上游失败的现场整理成多行文本，写进运行事件。
+// 面板上的「为什么 403」靠的就是这段：状态码、上游响应头、原始响应体，
+// 三者缺一不可——网关拦截常常只体现在响应头上，响应体是空的。
+func diagnosticBlock(ue *raccoon.UpstreamError) string {
+	if ue == nil {
+		return ""
+	}
+	var b strings.Builder
+	if ue.Endpoint != "" {
+		fmt.Fprintf(&b, "接口：%s\n", ue.Endpoint)
+	}
+	if ue.TurnID != "" {
+		fmt.Fprintf(&b, "turn：%s\n", ue.TurnID)
+	}
+	if ue.RequestID != "" {
+		fmt.Fprintf(&b, "上游请求ID：%s\n", ue.RequestID)
+	}
+	if ue.RequestSummary != "" {
+		b.WriteString("请求摘要：\n")
+		for _, line := range strings.Split(ue.RequestSummary, "\n") {
+			b.WriteString("  " + line + "\n")
+		}
+	}
+	if len(ue.Headers) > 0 {
+		keys := make([]string, 0, len(ue.Headers))
+		for k := range ue.Headers {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		b.WriteString("响应头：\n")
+		for _, k := range keys {
+			fmt.Fprintf(&b, "  %s: %s\n", k, ue.Headers[k])
+		}
+	}
+	if ue.Raw != "" {
+		b.WriteString("响应体：\n")
+		b.WriteString(ue.Raw)
+		b.WriteString("\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
