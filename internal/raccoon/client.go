@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -91,7 +92,7 @@ func (c *Client) doJSON(ctx context.Context, method, path string, headers map[st
 const (
 	PathChat        = "/api/web/llm/v2/chat/completions"
 	PathCatalog     = "/api/web/llm/v2/model_catalog"
-	PathBalance     = "/api/web/points/v1/balance"
+	PathBalance     = "/api/web/points/v1/balance" // 已下线：上游对任何凭证都回 403，仅保留给旧号定位
 	PathSetting     = "/api/web/office/v3/setting_info"
 	PathSettingOrg  = "/api/web/org/user/office/v1/setting_info"
 	PathGrant       = "/api/web/desktop/v1/login/points/grant"
@@ -133,7 +134,8 @@ func (c *Client) Refresh(ctx context.Context, idn Identity, refreshToken string)
 		return nil, err
 	}
 	if status == http.StatusUnauthorized {
-		return nil, &UpstreamError{Status: status, Code: codeOf(env), Message: "刷新被拒（401）"}
+		// 刷新端点回 401 = refresh_token 本身不可用，这才是真正需要重新登录的信号。
+		return nil, &UpstreamError{Status: status, Code: codeOf(env), Auth: true, Message: "刷新被拒（401），refresh_token 已失效"}
 	}
 	if status == http.StatusBadRequest && codeOf(env) == 200822 {
 		return nil, &UpstreamError{Status: status, Code: 200822, Message: "refresh_token 已被并发刷新替换"}
@@ -159,8 +161,47 @@ func (c *Client) Refresh(ctx context.Context, idn Identity, refreshToken string)
 	return nil, &UpstreamError{Status: status, Code: codeOf(env), Message: errText(env, status)}
 }
 
+// Balance 查账号可用积分。
+//
+// 2026-11 上游下线了 /points/v1/balance：该路径对任何凭证、任何头都直接回
+// 403（响应头 X-TT-System-Error: 3），网页端自己也不再调它。网页版头部那个
+// 积分数字取自 setting_info 的 available_points，这里跟它保持一致，顺便复用
+// 个人号/团队号两条 setting_info 路径。
+//
+// 失败时逐级回退：团队号 setting_info 不认就退到个人号路径，再不行才试一次旧
+// 端点——旧端点即便已下线，个别还在刷新的部署可能仍可用，能拿到就别浪费。
 func (c *Client) Balance(ctx context.Context, token string, idn Identity) (int64, error) {
-	status, env, err := c.doJSON(ctx, http.MethodGet, PathBalance, webHeaders(token, idn, ""), nil)
+	var lastErr error
+	paths := []string{PathSetting}
+	if isTeam(idn.OfficeIdentity) {
+		paths = []string{PathSettingOrg, PathSetting}
+	}
+	for i, path := range paths {
+		// 退到个人路径时要摘掉 X-Org-Code，否则读到的仍是组织口径的积分
+		personal := i > 0
+		points, err := c.balanceFromSetting(ctx, token, idn, path, personal)
+		if err == nil {
+			return points, nil
+		}
+		lastErr = err
+		if isAuthErr(err) {
+			// 凭证本身不认，换路径也没用，别让别人以为是在试错
+			return 0, err
+		}
+	}
+	if points, err := c.balanceFromLegacy(ctx, token, idn); err == nil {
+		return points, nil
+	}
+	return 0, lastErr
+}
+
+// balanceFromSetting 从 setting_info 的 available_points 取积分。
+func (c *Client) balanceFromSetting(ctx context.Context, token string, idn Identity, path string, personal bool) (int64, error) {
+	headers := webHeaders(token, idn, "web")
+	if personal {
+		delete(headers, "X-Org-Code")
+	}
+	status, env, err := c.doJSON(ctx, http.MethodGet, path, headers, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -185,7 +226,36 @@ func (c *Client) Balance(ctx context.Context, token string, idn Identity) (int64
 	if d.AvailablePoints2 != nil {
 		return *d.AvailablePoints2, nil
 	}
-	return 0, nil
+	// 字段缺失按「查不到」处理而不是 0：写库会把旧余额覆盖成 0，面板看起来像没钱了
+	return 0, errors.New("setting_info 未返回 available_points")
+}
+
+// balanceFromLegacy 是旧余额端点的最后兜底，失败结果不向上暴露具体原因。
+func (c *Client) balanceFromLegacy(ctx context.Context, token string, idn Identity) (int64, error) {
+	status, env, err := c.doJSON(ctx, http.MethodGet, PathBalance, webHeaders(token, idn, ""), nil)
+	if err != nil {
+		return 0, err
+	}
+	if status < 200 || status >= 300 || env == nil || !env.OK() {
+		return 0, &UpstreamError{Status: status, Code: codeOf(env), Message: errText(env, status)}
+	}
+	var d struct {
+		AvailablePoints  *int64 `json:"available_points"`
+		AvailablePoints2 *int64 `json:"availablePoints"`
+	}
+	_ = json.Unmarshal(rawData(env), &d)
+	if d.AvailablePoints != nil {
+		return *d.AvailablePoints, nil
+	}
+	if d.AvailablePoints2 != nil {
+		return *d.AvailablePoints2, nil
+	}
+	return 0, errors.New("旧余额端点未返回积分")
+}
+
+func isAuthErr(err error) bool {
+	var ue *UpstreamError
+	return errors.As(err, &ue) && ue.Auth
 }
 
 // Catalog 拉官方模型目录。
@@ -194,8 +264,10 @@ func (c *Client) Catalog(ctx context.Context, token string, idn Identity) ([]Mod
 	if err != nil {
 		return nil, err
 	}
-	if status == http.StatusUnauthorized {
-		return nil, &UpstreamError{Status: status, Auth: true, Message: "登录态已过期（HTTP 401）"}
+	// 上游有时回 401、有时回 403。这里只是拉目录，失败就换下一个号，
+	// 不打 Auth 标记——那个标记会被上层解读成「账号要重新登录」。
+	if status == http.StatusUnauthorized || status == http.StatusForbidden {
+		return nil, &UpstreamError{Status: status, Message: fmt.Sprintf("模型目录鉴权失败（HTTP %d）", status)}
 	}
 	if status < 200 || status >= 300 {
 		return nil, &UpstreamError{Status: status, Message: fmt.Sprintf("目录拉取失败（HTTP %d）", status)}

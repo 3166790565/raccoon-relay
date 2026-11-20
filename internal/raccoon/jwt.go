@@ -37,6 +37,10 @@ func DecodeJWT(token string) (*Claims, error) {
 	return &c, nil
 }
 
+// Issuer 是小浣熊 IAM 的签发方常量。它不参与 uid 计算，但可以用来判别
+// 一份多供应商导出里哪些账号的 token 真属于小浣熊。
+const Issuer = "xiaohuanxiong.com/iam"
+
 // AccountUID 按 sub → uid → id → iss 的顺序取，与桌面版口径一致。
 func (c *Claims) AccountUID() string {
 	for _, v := range []string{c.Sub, c.UID, c.ID, c.ISS} {

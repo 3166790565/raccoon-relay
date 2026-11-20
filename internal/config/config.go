@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -12,26 +13,55 @@ import (
 
 // Config 是服务的全部运行参数，只从环境变量读。
 type Config struct {
-	ListenAddr        string
-	DataDir           string
-	AdminToken        string
-	SecretKey         string
-	AllowPlaintext    bool
-	PoolStrategy      string
-	MaxRetries        int
-	CheckinEnable     bool
-	CheckinHour       int
-	CheckinMinute     int
-	CheckinJitterMin  int
-	CheckinGapMinMS   int
-	CheckinGapMaxMS   int
-	RefreshWindowSec  int
+	ListenAddr     string
+	DataDir        string
+	AdminToken     string
+	SecretKey      string
+	AllowPlaintext bool
+	PoolStrategy   string
+	MaxRetries     int
+	// RetryUntilExhausted 为 true 时，遇到可换号的错误会按序试完整个号池
+	// （直到没有可用账号），而不是提前被 MaxRetries 截断。
+	RetryUntilExhausted bool
+	CheckinEnable       bool
+	CheckinHour         int
+	CheckinMinute       int
+	CheckinJitterMin    int
+	CheckinGapMinMS     int
+	CheckinGapMaxMS     int
+	RefreshWindowSec    int
+	// 主动续期：token 30 天有效，后台提前 RenewWindowSec 秒统一刷新，
+	// 避免冷门号因长期不被选中而静默过期。RenewIntervalM 是扫描间隔。
+	RenewWindowSec    int
+	RenewIntervalM    int
+	RenewGapMS        int
 	StreamIdleTimeout time.Duration
 	MaxBodyMB         int
 	ModelCooldown     bool
+	// 积分阈值：低于 StopBelow 暂停该号，回升到 ResumeAbove 解除。
+	CreditStopEnable  bool
+	CreditStopBelow   int64
+	CreditResumeAbove int64
 	OAuthRedirectBase string
 	Timezone          string
 	UpstreamBase      string
+
+	// 日志管理：文件落盘/轮转/过期清理。面板里可覆盖并持久化到 settings 表。
+	LogFileEnable     bool
+	LogDir            string
+	LogMaxSizeMB      int
+	LogMaxFiles       int
+	LogFileRetainDays int
+	LogDBRetainDays   int
+	LogCleanEnable    bool
+	LogCleanIntervalM int
+
+	// 一键更新：默认从本项目 GitHub Release 拉取构建产物。
+	UpdateRepo         string
+	GitHubToken        string
+	UpdateAPIBase      string
+	UpdateDownloadBase string
+	UpdateTarget       string
 }
 
 func env(key, def string) string {
@@ -47,6 +77,18 @@ func envInt(key string, def int) int {
 		return def
 	}
 	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return def
+	}
+	return n
+}
+
+func envInt64(key string, def int64) int64 {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return def
+	}
+	n, err := strconv.ParseInt(raw, 10, 64)
 	if err != nil {
 		return def
 	}
@@ -76,26 +118,50 @@ func RandomToken() string {
 // Load 解析环境变量。返回的 Config 已校验完毕，非法组合返回错误而不是静默降级。
 func Load() (*Config, error) {
 	c := &Config{
-		ListenAddr:        env("LISTEN_ADDR", "0.0.0.0:8080"),
-		DataDir:           env("DATA_DIR", "/data"),
-		AdminToken:        env("ADMIN_TOKEN", ""),
-		SecretKey:         env("SECRET_KEY", ""),
-		AllowPlaintext:    envBool("ALLOW_PLAINTEXT", false),
-		PoolStrategy:      env("POOL_STRATEGY", "optimal"),
-		MaxRetries:        envInt("MAX_RETRIES", 3),
-		CheckinEnable:     envBool("CHECKIN_ENABLE", true),
-		CheckinHour:       envInt("CHECKIN_HOUR", 0),
-		CheckinMinute:     envInt("CHECKIN_MINUTE", 10),
-		CheckinJitterMin:  envInt("CHECKIN_JITTER_MINUTES", 30),
-		CheckinGapMinMS:   envInt("CHECKIN_GAP_MIN_MS", 800),
-		CheckinGapMaxMS:   envInt("CHECKIN_GAP_MAX_MS", 2000),
-		RefreshWindowSec:  envInt("REFRESH_WINDOW_SEC", 300),
+		ListenAddr:          env("LISTEN_ADDR", "0.0.0.0:8080"),
+		DataDir:             env("DATA_DIR", "/data"),
+		AdminToken:          env("ADMIN_TOKEN", ""),
+		SecretKey:           env("SECRET_KEY", ""),
+		AllowPlaintext:      envBool("ALLOW_PLAINTEXT", false),
+		PoolStrategy:        env("POOL_STRATEGY", "load_balance"),
+		MaxRetries:          envInt("MAX_RETRIES", 3),
+		RetryUntilExhausted: envBool("RETRY_UNTIL_EXHAUSTED", false),
+		CheckinEnable:       envBool("CHECKIN_ENABLE", true),
+		CheckinHour:         envInt("CHECKIN_HOUR", 0),
+		CheckinMinute:       envInt("CHECKIN_MINUTE", 10),
+		CheckinJitterMin:    envInt("CHECKIN_JITTER_MINUTES", 30),
+		CheckinGapMinMS:     envInt("CHECKIN_GAP_MIN_MS", 800),
+		CheckinGapMaxMS:     envInt("CHECKIN_GAP_MAX_MS", 2000),
+		RefreshWindowSec:    envInt("REFRESH_WINDOW_SEC", 300),
+		// 默认提前 3 天续期、每 6 小时扫一次、账号间隔 1 秒：避开了「提前太久轮换凭据」
+		// 的坑，也给长时间停机留够余量。
+		RenewWindowSec:    envInt("RENEW_WINDOW_SEC", 3*24*3600),
+		RenewIntervalM:    envInt("RENEW_INTERVAL_MIN", 360),
+		RenewGapMS:        envInt("RENEW_GAP_MS", 1000),
 		StreamIdleTimeout: time.Duration(envInt("STREAM_IDLE_TIMEOUT_SEC", 120)) * time.Second,
 		MaxBodyMB:         envInt("MAX_BODY_MB", 32),
 		ModelCooldown:     envBool("MODEL_COOLDOWN_ENABLE", true),
+		CreditStopEnable:  envBool("CREDIT_STOP_ENABLE", false),
+		CreditStopBelow:   envInt64("CREDIT_STOP_BELOW", 0),
+		CreditResumeAbove: envInt64("CREDIT_RESUME_ABOVE", 0),
 		OAuthRedirectBase: strings.TrimRight(env("OAUTH_REDIRECT_BASE", ""), "/"),
 		Timezone:          env("TZ", "Asia/Shanghai"),
 		UpstreamBase:      strings.TrimRight(env("UPSTREAM_BASE", "https://xiaohuanxiong.com"), "/"),
+
+		LogFileEnable:     envBool("LOG_FILE_ENABLE", true),
+		LogDir:            env("LOG_DIR", filepath.Join(env("DATA_DIR", "/data"), "logs")),
+		LogMaxSizeMB:      envInt("LOG_MAX_SIZE_MB", 32),
+		LogMaxFiles:       envInt("LOG_MAX_FILES", 10),
+		LogFileRetainDays: envInt("LOG_FILE_RETAIN_DAYS", 7),
+		LogDBRetainDays:   envInt("LOG_DB_RETAIN_DAYS", 30),
+		LogCleanEnable:    envBool("LOG_CLEAN_ENABLE", true),
+		LogCleanIntervalM: envInt("LOG_CLEAN_INTERVAL_MINUTES", 60),
+
+		UpdateRepo:         env("UPDATE_REPO", "3166790565/raccoon-relay"),
+		GitHubToken:        env("GITHUB_TOKEN", ""),
+		UpdateAPIBase:      strings.TrimRight(env("UPDATE_API_BASE", "https://api.github.com"), "/"),
+		UpdateDownloadBase: strings.TrimRight(env("UPDATE_DOWNLOAD_BASE", ""), "/"),
+		UpdateTarget:       env("UPDATE_TARGET", ""),
 	}
 	if c.AdminToken == "" {
 		c.AdminToken = RandomToken()
@@ -115,20 +181,61 @@ func Load() (*Config, error) {
 	if c.CheckinGapMinMS < 0 || c.CheckinGapMaxMS < c.CheckinGapMinMS {
 		c.CheckinGapMinMS, c.CheckinGapMaxMS = 800, 2000
 	}
-	switch c.PoolStrategy {
-	case "optimal", "round_robin", "credit_first", "manual", "expire_first":
-	default:
-		return nil, fmt.Errorf("POOL_STRATEGY 非法: %s", c.PoolStrategy)
+	// 旧策略名统一折叠到「负载均衡 / 轮询」两种，非法值退回默认而不是拒绝启动。
+	if s, ok := normalizeStrategy(c.PoolStrategy); ok {
+		c.PoolStrategy = s
+	} else {
+		c.PoolStrategy = "load_balance"
+	}
+	if c.CreditStopBelow < 0 {
+		c.CreditStopBelow = 0
+	}
+	if c.CreditResumeAbove < c.CreditStopBelow {
+		c.CreditResumeAbove = c.CreditStopBelow
 	}
 	loc, err := time.LoadLocation(c.Timezone)
 	if err != nil {
 		return nil, fmt.Errorf("TZ 非法: %s", c.Timezone)
 	}
 	_ = loc
+
+	// 日志参数收敛：越界值不算致命错误，退回安全默认，避免一个笔误让整个服务起不来。
+	if c.LogDir == "" {
+		c.LogDir = filepath.Join(c.DataDir, "logs")
+	} else if !filepath.IsAbs(c.LogDir) {
+		// 相对路径按 DATA_DIR 解析，容器里不会莫名其妙写到工作目录
+		c.LogDir = filepath.Join(c.DataDir, c.LogDir)
+	}
+	if c.LogMaxSizeMB <= 0 {
+		c.LogMaxSizeMB = 32
+	}
+	if c.LogMaxFiles <= 0 {
+		c.LogMaxFiles = 10
+	}
+	if c.LogFileRetainDays < 0 {
+		c.LogFileRetainDays = 0
+	}
+	if c.LogDBRetainDays < 0 {
+		c.LogDBRetainDays = 0
+	}
+	if c.LogCleanIntervalM <= 0 {
+		c.LogCleanIntervalM = 60
+	}
 	if err := os.MkdirAll(c.DataDir, 0o750); err != nil {
 		return nil, fmt.Errorf("创建 DATA_DIR 失败: %w", err)
 	}
 	return c, nil
+}
+
+// normalizeStrategy 收敛选号策略名。历史策略名（optimal 等）按负载均衡处理。
+func normalizeStrategy(s string) (string, bool) {
+	switch strings.TrimSpace(s) {
+	case "round_robin":
+		return "round_robin", true
+	case "load_balance", "optimal", "credit_first", "manual", "expire_first":
+		return "load_balance", true
+	}
+	return "", false
 }
 
 // Location 返回配置时区，失败回落本地。

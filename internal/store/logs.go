@@ -94,6 +94,51 @@ func (s *Store) RecentUsage(ctx context.Context, limit int) ([]UsageLog, error) 
 	return out, rows.Err()
 }
 
+// PurgeUsageBefore 删除 ts 早于 cutoffMS 的调用流水。
+//
+// 分批删除（每次最多 limit 条）而不是一条 DELETE 全清：
+// SQLite 单连接写，一次性删除几十万行会长时间占住写锁，把正在服务的请求卡住。
+func (s *Store) PurgeUsageBefore(ctx context.Context, cutoffMS int64, limit int) (int64, error) {
+	if limit <= 0 {
+		limit = 1000
+	}
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM usage_logs WHERE id IN (
+			SELECT id FROM usage_logs WHERE ts < ? ORDER BY id LIMIT ?)`, cutoffMS, limit)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// PurgeCheckinBefore 删除 at 早于 cutoffMS 的签到记录。
+func (s *Store) PurgeCheckinBefore(ctx context.Context, cutoffMS int64, limit int) (int64, error) {
+	if limit <= 0 {
+		limit = 1000
+	}
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM checkin_history WHERE id IN (
+			SELECT id FROM checkin_history WHERE at < ? ORDER BY id LIMIT ?)`, cutoffMS, limit)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// UsageStats 返回调用流水的条数与最早一条的时间戳（空表时 earliest 为 0）。
+func (s *Store) UsageStats(ctx context.Context) (count, earliest int64, err error) {
+	err = s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*), COALESCE(MIN(ts), 0) FROM usage_logs`).Scan(&count, &earliest)
+	return count, earliest, err
+}
+
+// CheckinStats 返回签到记录的条数与最早一条的时间戳。
+func (s *Store) CheckinStats(ctx context.Context) (count, earliest int64, err error) {
+	err = s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*), COALESCE(MIN(at), 0) FROM checkin_history`).Scan(&count, &earliest)
+	return count, earliest, err
+}
+
 func (s *Store) GetSetting(ctx context.Context, key, def string) string {
 	var v string
 	if err := s.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, key).Scan(&v); err != nil {

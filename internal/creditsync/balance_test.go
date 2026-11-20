@@ -45,10 +45,12 @@ func newAccount(t *testing.T, st *store.Store, credits int64) *store.Account {
 	return a
 }
 
+// balanceServer 模拟 setting_info——余额现在的来源，不是已下线的 points/v1/balance。
 func balanceServer(t *testing.T, body string, status int) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != raccoon.PathBalance {
+		if r.URL.Path != raccoon.PathSetting {
+			// 旧端点也拒掉：走到旧端点说明 setting_info 已经失败，测试不该被它救回来
 			http.NotFound(w, r)
 			return
 		}

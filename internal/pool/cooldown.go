@@ -9,21 +9,29 @@ import (
 	"github.com/3166790565/raccoon-relay/internal/store"
 )
 
-// 冷却分级与桌面号池一致：
+// 冷却分级：
 //   402 积分耗尽 → exhausted 至次日 04:00
-//   429 限流     → cooling 60s（有 Retry-After 用绝对值）
+//   429 限流     → 默认只罚「账号 × 模型」，阶梯 3 → 5 → 10 → 20… 分钟；
+//                  关闭模型级冷却时才退化为整号 60s
 //   5xx / 网络   → cooling 10min
 //   401 刷新失败 → relogin 永久
 //   风控拦截     → cooling 2h
 //   其它 4xx     → cooling 60s
 
-type CooldownBook struct {
-	st      *store.Store
-	enabled bool
+// modelCoolResetWindow：冷却早已结束、且超过这么久没有再犯，就当作新的一条失败链，
+// 从 3 分钟重新开始。否则一个号每天偶尔 429 一次，冷却时间会无限累加。
+const modelCoolResetWindow = 24 * time.Hour
 
-	mu       sync.Mutex
-	models   map[string]modelCool
-	hydrated bool
+// modelCoolMax：单次模型冷却上限。
+const modelCoolMax = 24 * time.Hour
+
+type CooldownBook struct {
+	st *store.Store
+
+	mu           sync.Mutex
+	modelEnabled bool
+	models       map[string]modelCool
+	hydrated     bool
 }
 
 type modelCool struct {
@@ -32,85 +40,135 @@ type modelCool struct {
 }
 
 func NewCooldownBook(st *store.Store, modelCooldownEnabled bool) *CooldownBook {
-	return &CooldownBook{st: st, enabled: modelCooldownEnabled, models: map[string]modelCool{}}
+	return &CooldownBook{st: st, modelEnabled: modelCooldownEnabled, models: map[string]modelCool{}}
+}
+
+// SetModelCooldown 供面板热更新「429 是否按账号×模型冷却」。
+func (c *CooldownBook) SetModelCooldown(on bool) {
+	c.mu.Lock()
+	c.modelEnabled = on
+	c.mu.Unlock()
+}
+
+func (c *CooldownBook) ModelEnabled() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.modelEnabled
 }
 
 func coolKey(accID, model string) string { return strings.ToLower(accID + "∥" + model) }
 
-func (c *CooldownBook) hydrate(ctx context.Context) {
+// Hydrate 从库里恢复模型冷却。进程重启后内存表是空的，不恢复的话
+// 正在冷却中的「账号×模型」会被立刻重新选中。
+func (c *CooldownBook) Hydrate(ctx context.Context) {
 	c.mu.Lock()
 	if c.hydrated {
 		c.mu.Unlock()
 		return
 	}
-	c.hydrated = true
 	c.mu.Unlock()
 
 	rows, err := c.st.ListModelCooldowns(ctx)
 	if err != nil {
-		return
+		return // 读失败就下次再试，不要把 hydrated 置位
 	}
 	c.mu.Lock()
 	for _, r := range rows {
 		c.models[coolKey(r.AccountID, r.Model)] = modelCool{until: r.Until, hits: r.Hits}
 	}
+	c.hydrated = true
 	c.mu.Unlock()
 }
 
 func (c *CooldownBook) IsModelCooled(accID, model string) bool {
-	if !c.enabled || model == "" {
+	if model == "" {
 		return false
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if !c.modelEnabled {
+		return false
+	}
 	k := coolKey(accID, model)
 	m, ok := c.models[k]
 	if !ok {
 		return false
 	}
-	if m.until <= time.Now().UnixMilli() {
-		delete(c.models, k)
-		return false
-	}
-	return true
+	// 到期后不能删记录：CoolModel 靠它拿到上一档 hits 才能继续拉长冷却。
+	// 在这里删掉的话，到期后第一次再 429 会从 3 分钟重新开始，阶梯永远停在一档。
+	// 真正的清除只发生在调用成功（ClearModel）或超过断链窗口时。
+	return m.until > time.Now().UnixMilli()
 }
 
-// CoolModel 记一次模型级失败。连续失败用指数退避，上限 24h（对齐桌面口径）。
-func (c *CooldownBook) CoolModel(ctx context.Context, accID, model, reason string, base time.Duration) {
-	if !c.enabled || model == "" {
-		return
+// modelCoolDelay 返回一条连续失败链上第 n 次（从 0 开始）命中的冷却时长：
+// 3 分钟 → 5 分钟 → 10 分钟，之后逐次翻倍，封顶 24 小时。
+func modelCoolDelay(hits int64) time.Duration {
+	switch hits {
+	case 0:
+		return 3 * time.Minute
+	case 1:
+		return 5 * time.Minute
+	case 2:
+		return 10 * time.Minute
 	}
-	if base <= 0 {
-		base = 5 * time.Minute
+	if hits > 12 {
+		return modelCoolMax
+	}
+	d := 10 * time.Minute * time.Duration(int64(1)<<(hits-2))
+	if d > modelCoolMax {
+		d = modelCoolMax
+	}
+	return d
+}
+
+// CoolModel 记一次模型级失败（429 / 模型级限流）。同一账号同一模型连续失败
+// 逐次拉长冷却；冷却到期后再失败会继续上一档，不会退回 3 分钟。
+// 成功返回时由 ClearModel 清零。
+func (c *CooldownBook) CoolModel(ctx context.Context, accID, model, reason string) {
+	if model == "" || !c.ModelEnabled() {
+		return
 	}
 	now := time.Now().UnixMilli()
 	c.mu.Lock()
 	k := coolKey(accID, model)
-	prev := c.models[k]
+	prev, ok := c.models[k]
 	hits := int64(0)
-	if prev.until > now {
-		hits = prev.hits + 1
+	if ok {
+		// 冷却结束超过 ResetWindow 还没有新的失败：视为失败链已断，从头再来。
+		if prev.until > 0 && now-prev.until <= modelCoolResetWindow.Milliseconds() {
+			hits = prev.hits
+		}
 	}
-	backoff := base * time.Duration(1<<min64(hits, 4))
-	if backoff > 24*time.Hour {
-		backoff = 24 * time.Hour
-	}
-	m := modelCool{until: now + backoff.Milliseconds(), hits: hits}
+	delay := modelCoolDelay(hits)
+	m := modelCool{until: now + delay.Milliseconds(), hits: hits + 1}
 	c.models[k] = m
+	// 过期的失败链在这里顺手清掉，免得 map 只增不减。
+	// 注意每个 key 都要自己判过期（不能像以前那样依赖 IsModelCooled 删除——
+	// 删了就丢了 hits，阶梯永远停在 3 分钟）。
+	for key, v := range c.models {
+		if v.until+modelCoolResetWindow.Milliseconds() < now {
+			delete(c.models, key)
+		}
+	}
 	c.mu.Unlock()
 	_ = c.st.UpsertModelCooldown(ctx, store.ModelCooldown{
-		AccountID: accID, Model: model, Until: m.until, Reason: reason, Hits: hits,
+		AccountID: accID, Model: model, Until: m.until, Reason: reason, Hits: m.hits,
 	})
 }
 
+// ClearModel 在一次成功调用后解除该「账号×模型」的冷却并清空失败链。
 func (c *CooldownBook) ClearModel(ctx context.Context, accID, model string) {
 	if model == "" {
 		return
 	}
 	c.mu.Lock()
-	delete(c.models, coolKey(accID, model))
+	k := coolKey(accID, model)
+	_, ok := c.models[k]
+	delete(c.models, k)
 	c.mu.Unlock()
-	_ = c.st.DeleteModelCooldown(ctx, accID, model)
+	if ok {
+		_ = c.st.DeleteModelCooldown(ctx, accID, model)
+	}
 }
 
 // FailKind 是失败分类，由转发层判定后交给号池执行冷却。
@@ -118,7 +176,7 @@ type FailKind string
 
 const (
 	FailQuota       FailKind = "quota"        // 402
-	FailRate        FailKind = "rate"         // 429
+	FailRate        FailKind = "rate"         // 429（模型级冷却关闭时的兜底）
 	FailServer      FailKind = "server"       // 5xx / 网络
 	FailRelogin     FailKind = "relogin"      // 401 且刷新失败
 	FailBlocked     FailKind = "blocked"      // 风控
@@ -170,6 +228,13 @@ func (c *CooldownBook) MarkOnline(ctx context.Context, accID string) {
 }
 
 // ReviveExpired 把冷却到期的账号复活。定时器每轮调用一次。
+//
+// 两种状态都会到期：
+//   - cooling：429/5xx/风控的临时冷却；
+//   - exhausted 且 CoolUntil > 0：402 积分耗尽，冷却到次日 04:00。
+//
+// CoolUntil 为 0 的 exhausted 是「等签到/余额回升」的阈值暂停，交给
+// ApplyCreditPolicy 处理，这里不碰，否则会绕过低积分规则把它放出来。
 func (c *CooldownBook) ReviveExpired(ctx context.Context) {
 	accounts, err := c.st.ListAccounts(ctx)
 	if err != nil {
@@ -177,10 +242,13 @@ func (c *CooldownBook) ReviveExpired(ctx context.Context) {
 	}
 	now := time.Now().UnixMilli()
 	for _, a := range accounts {
-		if a.Status != store.StatusCooling && a.Status != store.StatusExhausted {
-			continue
-		}
-		if a.CoolUntil == 0 || a.CoolUntil > now {
+		switch a.Status {
+		case store.StatusCooling, store.StatusExhausted:
+			// 只有带到期时刻的冷却才在这里复活；0 表示阈值暂停，跳过。
+			if a.CoolUntil == 0 || a.CoolUntil > now {
+				continue
+			}
+		default:
 			continue
 		}
 		st := store.StatusOnline
@@ -206,11 +274,4 @@ func defaultStr(v, def string) string {
 		return def
 	}
 	return v
-}
-
-func min64(a, b int64) int64 {
-	if a < b {
-		return a
-	}
-	return b
 }

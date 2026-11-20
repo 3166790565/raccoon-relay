@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log"
 	"math/rand"
+	"net/http"
 	"sync"
 	"time"
 
@@ -56,13 +58,16 @@ func New(cfg *config.Config, st *store.Store, client *raccoon.Client, refresh *r
 }
 
 // Run 启动定时循环，阻塞直到 ctx 取消。
+//
+// 循环常驻，每轮重新读 CheckinEnable：面板里开关自动签到要能立即生效，
+// 不能在启动时判断一次就 return（那样之后从面板打开也永远不会跑）。
 func (s *Scheduler) Run(ctx context.Context) {
-	if !s.cfg.CheckinEnable {
+	if !s.enabled() {
 		log.Println("[签到] 自动签到已关闭（CHECKIN_ENABLE=false）")
-		return
+	} else {
+		// 启动即补跑一轮
+		s.sweep(ctx)
 	}
-	// 启动即补跑一轮
-	s.sweep(ctx)
 
 	ticker := time.NewTicker(tickInterval)
 	defer ticker.Stop()
@@ -71,8 +76,27 @@ func (s *Scheduler) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			s.sweep(ctx)
+			if s.enabled() {
+				s.sweep(ctx)
+			}
 		}
+	}
+}
+
+// enabled 读运行期开关。配置由面板热更新，这里每次现读。
+func (s *Scheduler) enabled() bool {
+	return s.cfg.CheckinEnable
+}
+
+// SetEnabled 面板切换自动签到。
+func (s *Scheduler) SetEnabled(on bool) {
+	s.mu.Lock()
+	s.cfg.CheckinEnable = on
+	s.mu.Unlock()
+	if on {
+		log.Println("[签到] 自动签到已开启")
+	} else {
+		log.Println("[签到] 自动签到已关闭")
 	}
 }
 
@@ -179,9 +203,29 @@ func (s *Scheduler) checkinOne(ctx context.Context, a *store.Account, today stri
 
 	idn := raccoon.IdentityFor(a.UID, a.DeviceID, a.OSVersion, a.Platform, a.ClientChannel, a.OfficeIdentity, a.Language)
 	res, err := s.client.Checkin(ctx, token, idn)
+	if err != nil && isCheckinDeadToken(err) {
+		// 同对话面：EnsureFresh 只在临期窗口内刷新，手里这枚 access 可能已被上游判过期。
+		// 先强刷一次，刷得动就继续签到；刷不动才算这个号真要重登。
+		if fresh, rerr := s.refresh.RefreshNow(ctx, a); rerr == nil {
+			token = fresh
+			res, err = s.client.Checkin(ctx, token, idn)
+		} else if isCheckinDeadToken(rerr) {
+			// refresh_token 真的失效了，当日不再重试
+			relogin := store.StatusRelogin
+			_ = s.st.UpdateAccount(ctx, a.ID, store.AccountPatch{
+				Status: &relogin, CoolReason: strPtr("凭证失效，需重新登录"),
+			})
+			s.fail(ctx, a, today, "凭证失效："+rerr.Error())
+			return false
+		} else {
+			// 刷新请求本身失败（网络/上游抖动）：保留原错误，下一轮自然重试
+			s.fail(ctx, a, today, err.Error())
+			return false
+		}
+	}
 	if err != nil {
-		if ue, ok := err.(*raccoon.UpstreamError); ok && ue.Auth {
-			// 凭证失效，当日不再重试
+		// 强刷并重签之后仍然被鉴权挡下，才认定这个号要重登
+		if isCheckinDeadToken(err) {
 			relogin := store.StatusRelogin
 			_ = s.st.UpdateAccount(ctx, a.ID, store.AccountPatch{
 				Status: &relogin, CoolReason: strPtr("凭证失效，需重新登录"),
@@ -340,3 +384,23 @@ func (s *Scheduler) RunAll(ctx context.Context) map[string]any {
 }
 
 func strPtr(s string) *string { return &s }
+
+// isAuthErr 判断错误是否属于「这枚 access 不认」。只认显式 Auth 标记：
+// 403 不带标记时交给对话面的风控分类，签到这里不据此打 relogin。
+func isAuthErr(err error) bool {
+	var ue *raccoon.UpstreamError
+	if !errors.As(err, &ue) {
+		return false
+	}
+	return ue.Auth
+}
+
+// isCheckinDeadToken 判断签到用到的 access 是否真的不可用（而不是签到端点临时抽风）。
+// 只认 Auth 标记或 401；这类才值得强刷后重签。
+func isCheckinDeadToken(err error) bool {
+	var ue *raccoon.UpstreamError
+	if !errors.As(err, &ue) {
+		return false
+	}
+	return ue.Auth || ue.Status == http.StatusUnauthorized
+}

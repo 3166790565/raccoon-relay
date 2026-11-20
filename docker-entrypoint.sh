@@ -8,6 +8,17 @@ set -e
 
 DATA_DIR="${DATA_DIR:-/data}"
 
+# 面板「一键更新」会把新二进制装到数据卷里（/data/bin/relay）。数据卷是持久化的，
+# 所以每次启动优先跑它；想回到镜像自带的版本，删掉这个文件重启即可。
+# 只在默认 CMD（/app/relay，无额外参数）时接管，不覆盖用户自定义的启动命令。
+if [ -x "$DATA_DIR/bin/relay" ]; then
+    if [ $# -eq 0 ]; then
+        set -- "$DATA_DIR/bin/relay"
+    elif [ $# -eq 1 ] && [ "$1" = "/app/relay" ]; then
+        set -- "$DATA_DIR/bin/relay"
+    fi
+fi
+
 if [ "$(id -u)" = "0" ]; then
     mkdir -p "$DATA_DIR"
 

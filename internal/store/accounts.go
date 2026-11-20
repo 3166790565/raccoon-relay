@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -262,14 +263,107 @@ func (s *Store) UpdateAccount(ctx context.Context, id string, p AccountPatch) er
 }
 
 func (s *Store) DeleteAccount(ctx context.Context, id string) error {
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM model_cooldowns WHERE account_id = ?`, id); err != nil {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
 		return err
 	}
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM checkin_history WHERE account_id = ?`, id); err != nil {
+	defer func() { _ = tx.Rollback() }()
+	if err := deleteAccountRows(ctx, tx, id); err != nil {
 		return err
 	}
-	_, err := s.db.ExecContext(ctx, `DELETE FROM accounts WHERE id = ?`, id)
-	return err
+	return tx.Commit()
+}
+
+// deleteAccountRows 删掉账号及挂在它下面的冷却与签到记录。
+// 三张表必须一起删：只删 accounts 会留下孤儿行，之后同 uid 重新导入时
+// 旧冷却会把新号立刻压回冷却状态。
+func deleteAccountRows(ctx context.Context, ex interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}, id string) error {
+	for _, q := range []string{
+		`DELETE FROM model_cooldowns WHERE account_id = ?`,
+		`DELETE FROM checkin_history WHERE account_id = ?`,
+		`DELETE FROM accounts WHERE id = ?`,
+	} {
+		if _, err := ex.ExecContext(ctx, q, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// DeadReason 判断账号是否已经救不回来，返回命中原因（空串表示仍然可用）。
+//
+// 两种口径：
+//   - 凭证失效：状态为 relogin。refresh_token 也刷不动，只能靠重新登录拿新凭据；
+//   - 订阅过期：expires_at 已过。凭据也许还能用，但这个号不会再产出可用的额度。
+//
+// 积分耗尽（exhausted）不算：它会在次日 04:00 自动复活，删了就再也回不来。
+// 冷却（cooling）更不算，那只是临时限流。
+func (a *Account) DeadReason(nowMS int64) string {
+	if a.Status == StatusRelogin {
+		return "凭证失效"
+	}
+	if a.ExpiresAt > 0 && a.ExpiresAt <= nowMS {
+		return "订阅已过期"
+	}
+	return ""
+}
+
+// DeadAccount 是待清理账号的最小视图，供面板预览与确认。
+type DeadAccount struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	UID        string `json:"uid"`
+	Reason     string `json:"reason"`
+	ExpiresAt  int64  `json:"expiresAt"`
+	CoolReason string `json:"coolReason"`
+}
+
+// ListDeadAccounts 列出所有失效账号（relogin 或已过期），不改任何数据。
+func (s *Store) ListDeadAccounts(ctx context.Context, nowMS int64) ([]DeadAccount, error) {
+	accounts, err := s.ListAccounts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]DeadAccount, 0)
+	for _, a := range accounts {
+		reason := a.DeadReason(nowMS)
+		if reason == "" {
+			continue
+		}
+		out = append(out, DeadAccount{
+			ID: a.ID, Name: a.Name, UID: a.UID, Reason: reason,
+			ExpiresAt: a.ExpiresAt, CoolReason: a.CoolReason,
+		})
+	}
+	return out, nil
+}
+
+// PurgeDeadAccounts 在一个事务里删除所有失效账号。
+// ids 由调用方先通过 ListDeadAccounts 拿给用户确认，这里只删确认过的那批：
+// 避免用户在「预览」和「确认」之间新增的号被顺手带走。
+func (s *Store) PurgeDeadAccounts(ctx context.Context, ids []string) (int, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	deleted := 0
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if err := deleteAccountRows(ctx, tx, id); err != nil {
+			return 0, err
+		}
+		deleted++
+	}
+	return deleted, tx.Commit()
 }
 
 func joinComma(items []string) string {

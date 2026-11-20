@@ -7,9 +7,11 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
+# 版本号由 CI 通过 build-arg 注入；本地构建没有时显示 dev，面板会提示可更新。
+ARG VERSION=dev
 # CGO_ENABLED=0：modernc.org/sqlite 是纯 Go 实现，静态二进制可直接上 distroless/alpine
 RUN CGO_ENABLED=0 GOOS=linux go build \
-    -trimpath -ldflags="-s -w" \
+    -trimpath -ldflags="-s -w -X main.version=${VERSION}" \
     -o /out/relay ./cmd/relay
 
 # ===== 运行阶段 =====
@@ -28,7 +30,8 @@ VOLUME ["/data"]
 
 ENV DATA_DIR=/data \
     LISTEN_ADDR=0.0.0.0:8080 \
-    TZ=Asia/Shanghai
+    TZ=Asia/Shanghai \
+    RACCOON_DOCKER=1
 
 EXPOSE 8080
 

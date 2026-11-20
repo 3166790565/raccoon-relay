@@ -171,10 +171,12 @@ func (e *simpleErr) Error() string { return e.msg }
 // BuildEngine 是装配辅助，供 main 调用。
 func BuildEngine(cfg *config.Config, st *store.Store, p *pool.Pool, cool *pool.CooldownBook,
 	client *raccoon.Client, refresher *Refresher) *Engine {
-	return &Engine{
+	e := &Engine{
 		ST: st, Pool: p, Cool: cool, Client: client, Refresher: refresher,
-		MaxRetry: cfg.MaxRetries, DefaultModel: DefaultModel,
+		DefaultModel: DefaultModel,
 	}
+	e.SetRetryPolicy(cfg.RetryUntilExhausted, cfg.MaxRetries)
+	return e
 }
 
 const DefaultModel = "raccoon-chat-ml-5-5"

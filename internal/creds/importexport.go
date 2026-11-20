@@ -31,6 +31,7 @@ type Account struct {
 	Credits      int64          `json:"credits"`
 	Status       string         `json:"status"`
 	Source       string         `json:"source"`
+	Enabled      *bool          `json:"enabled,omitempty"`
 	CreatedAt    int64          `json:"createdAt"`
 	UpdatedAt    int64          `json:"updatedAt"`
 	Meta         map[string]any `json:"meta"`
@@ -51,18 +52,34 @@ type ImportResult struct {
 	Message string `json:"message,omitempty"`
 }
 
-// ParseImport 接受三种形态：单个账号对象、账号数组、{channel,accounts:[]}。
+// ParseReport 记录一次解析里被过滤掉的条目，让面板能告诉用户"为什么只导入了这些"。
+type ParseReport struct {
+	Skipped int `json:"skipped"`
+	// Providers 是跳过的非小浣熊供应商及条数，例如 {"qoder": 2, "trae": 1}。
+	Providers map[string]int `json:"providers,omitempty"`
+	// Invalid 是小浣熊账号里凭据不全、无法入库的条目说明。
+	Invalid []string `json:"invalid,omitempty"`
+}
+
+// ParseImport 接受这几种形态：单个账号对象、账号数组、{channel,accounts:[]}，
+// 以及 agent2api 的桌面导出 {version,exportedAt,accounts:[{provider,...}]}
+// （后者是多供应商混装，只保留小浣熊账号）。
 func ParseImport(raw []byte) ([]Account, error) {
+	list, _, err := ParseImportWithReport(raw)
+	return list, err
+}
+
+func ParseImportWithReport(raw []byte) ([]Account, *ParseReport, error) {
 	trimmed := strings.TrimSpace(string(raw))
 	if trimmed == "" {
-		return nil, fmt.Errorf("内容为空")
+		return nil, nil, fmt.Errorf("内容为空")
 	}
 
 	var probe map[string]any
 	if strings.HasPrefix(trimmed, "{") {
 		if err := json.Unmarshal(raw, &probe); err == nil {
 			if f, _ := probe["format"].(string); f == FormatMetadata {
-				return nil, fmt.Errorf("这是账号元数据包（无 token），不能用于导入凭据")
+				return nil, nil, fmt.Errorf("这是账号元数据包（无 token），不能用于导入凭据")
 			}
 			if arr, ok := probe["accounts"].([]any); ok {
 				return decodeList(arr)
@@ -75,28 +92,203 @@ func ParseImport(raw []byte) ([]Account, error) {
 			return decodeList(arr)
 		}
 	}
-	// 单个账号对象
+	// 单个账号对象：先看是不是 agent2api 形态（token 在 pluginSecret 里）
+	var asObj map[string]any
+	if err := json.Unmarshal(raw, &asObj); err == nil && isAgent2APIAccount(asObj) {
+		return decodeList([]any{asObj})
+	}
 	var one Account
 	if err := json.Unmarshal(raw, &one); err != nil {
-		return nil, fmt.Errorf("无法解析导入内容: %w", err)
+		return nil, nil, fmt.Errorf("无法解析导入内容: %w", err)
 	}
-	return []Account{one}, nil
+	return []Account{one}, nil, nil
 }
 
-func decodeList(arr []any) ([]Account, error) {
+func decodeList(arr []any) ([]Account, *ParseReport, error) {
 	out := make([]Account, 0, len(arr))
+	report := &ParseReport{Providers: map[string]int{}}
 	for i, item := range arr {
+		obj, ok := item.(map[string]any)
+		if !ok {
+			return nil, nil, fmt.Errorf("第 %d 条不是对象", i+1)
+		}
+		if isAgent2APIAccount(obj) {
+			// agent2api 导出是多供应商混装：只留小浣熊，其余计入报告后丢弃
+			if !isRaccoonAgent2API(obj) {
+				report.Skipped++
+				report.Providers[agent2apiProvider(obj)]++
+				continue
+			}
+			a, err := fromAgent2API(obj)
+			if err != nil {
+				// 单个坏条目不该让整份导出失败；记进报告，其余照常导入
+				report.Skipped++
+				report.Invalid = append(report.Invalid,
+					fmt.Sprintf("第 %d 条（%s）: %v", i+1, strOf(obj["name"]), err))
+				continue
+			}
+			out = append(out, a)
+			continue
+		}
 		raw, err := json.Marshal(item)
 		if err != nil {
-			return nil, fmt.Errorf("第 %d 条序列化失败: %w", i+1, err)
+			return nil, nil, fmt.Errorf("第 %d 条序列化失败: %w", i+1, err)
 		}
 		var a Account
 		if err := json.Unmarshal(raw, &a); err != nil {
-			return nil, fmt.Errorf("第 %d 条格式非法: %w", i+1, err)
+			return nil, nil, fmt.Errorf("第 %d 条格式非法: %w", i+1, err)
 		}
 		out = append(out, a)
 	}
-	return out, nil
+	if len(report.Providers) == 0 {
+		report.Providers = nil
+	}
+	return out, report, nil
+}
+
+// isAgent2APIAccount 判断一条记录是不是 agent2api 桌面导出里的账号：
+// token 放在 pluginSecret 里（桌面版凭据包没有这个字段），provider 可有可无。
+func isAgent2APIAccount(v any) bool {
+	obj, ok := v.(map[string]any)
+	if !ok {
+		return false
+	}
+	_, hasSecret := obj["pluginSecret"].(map[string]any)
+	return hasSecret
+}
+
+func agent2apiProvider(obj map[string]any) string {
+	p, _ := obj["provider"].(string)
+	if p == "" {
+		return "unknown"
+	}
+	return p
+}
+
+// isRaccoonAgent2API 判别一条 agent2api 记录是否属于小浣熊：
+// 优先看 provider 字段；provider 缺失时退回 token 的 iss。
+func isRaccoonAgent2API(obj map[string]any) bool {
+	if p := agent2apiProvider(obj); p != "unknown" {
+		return p == ChannelRaccoon
+	}
+	tok := agent2apiToken(obj)
+	if tok == "" {
+		return false
+	}
+	c, err := raccoon.DecodeJWT(tok)
+	return err == nil && strings.TrimSpace(c.ISS) == raccoon.Issuer
+}
+
+func agent2apiToken(obj map[string]any) string {
+	if sec, ok := obj["pluginSecret"].(map[string]any); ok {
+		if t, ok := sec["accessToken"].(string); ok && strings.TrimSpace(t) != "" {
+			return strings.TrimSpace(t)
+		}
+	}
+	if t, ok := obj["accessToken"].(string); ok && strings.TrimSpace(t) != "" {
+		return strings.TrimSpace(t)
+	}
+	return ""
+}
+
+// fromAgent2API 把一条 agent2api 记录映射成内部 Account。
+// agent2api 把 token 放在 pluginSecret，meta 是扁平的点号键（pluginLedger.onboarding 等）。
+func fromAgent2API(obj map[string]any) (Account, error) {
+	a := Account{
+		Channel: ChannelRaccoon,
+		Name:    strOf(obj["name"]),
+		Token:   agent2apiToken(obj),
+		Source:  "agent2api",
+		// agent2api 导出不含余额：-1 表示未知，否则 0 会被号池当成"零积分已确认"跳过。
+		Credits: -1,
+		Meta:    map[string]any{},
+	}
+	// uid 以 token 的 sub 为准：桌面导出与 OAuth 都是按它去重的，agent2api 里的
+	// 数字 uid 是平台 ID，混用会让同一个号被当成两个号重复入库、各自签到消费。
+	if tok := a.Token; tok != "" {
+		if uid := raccoon.TokenUID(tok); uid != "" {
+			a.UID = uid
+		} else if c, err := raccoon.DecodeJWT(tok); err == nil {
+			if s := strings.TrimSpace(c.Sub); s != "" {
+				a.UID = s
+			}
+		}
+	}
+	if a.UID == "" {
+		a.UID = strOf(obj["uid"])
+	}
+	if a.UID == "" {
+		if pub, ok := obj["pluginPublic"].(map[string]any); ok {
+			a.UID = strOf(pub["uid"])
+		}
+	}
+	// 保留 agent2api 的平台 uid 方便排障
+	if pu := strOf(obj["uid"]); pu != "" && pu != a.UID {
+		a.Meta["platformUid"] = pu
+	}
+	if a.Name == "" {
+		if pub, ok := obj["pluginPublic"].(map[string]any); ok {
+			a.Name = strOf(pub["name"])
+		}
+	}
+	if sec, ok := obj["pluginSecret"].(map[string]any); ok {
+		if exp, ok := numOf(sec["expiresAt"]); ok {
+			a.TokenExp = exp
+		}
+		if oi := strOf(sec["officeIdentity"]); oi != "" {
+			a.Meta["officeIdentity"] = oi
+		}
+	}
+	// 小浣熊的 refresh_token 与 access_token 是同一枚凭据（桌面导出实测两者逐字相同，
+	// 刷新端点也只认这一枚）。agent2api 导出里没有独立的 refresh_token 字段，
+	// 直接用 accessToken 回填，导入的号才能跟其它来源一样自动续期。
+	a.RefreshToken = a.Token
+	if enabled, ok := obj["enabled"].(bool); ok {
+		a.Enabled = &enabled
+	}
+	if pr, ok := numOf(obj["priority"]); ok {
+		a.Meta["priority"] = pr
+	}
+	// 把 agent2api 的扁平台账键收进 meta，去掉点号前缀便于面板/排障阅读。
+	for k, v := range obj {
+		if strings.HasPrefix(k, "pluginLedger.") {
+			a.Meta[strings.TrimPrefix(k, "pluginLedger.")] = v
+		}
+		if k == "checkinAt" || k == "addedAt" || k == "updatedAt" {
+			a.Meta[k] = v
+		}
+	}
+	if a.Token == "" {
+		return a, fmt.Errorf("缺少 accessToken")
+	}
+	if a.UID == "" {
+		a.UID = raccoon.TokenUID(a.Token)
+	}
+	if a.UID == "" {
+		return a, fmt.Errorf("无法从 token 解析账号 uid")
+	}
+	return a, nil
+}
+
+func strOf(v any) string {
+	s, _ := v.(string)
+	return strings.TrimSpace(s)
+}
+
+func numOf(v any) (int64, bool) {
+	switch t := v.(type) {
+	case float64:
+		return int64(t), true
+	case int64:
+		return t, true
+	case int:
+		return int64(t), true
+	case json.Number:
+		if n, err := t.Int64(); err == nil {
+			return n, true
+		}
+	}
+	return 0, false
 }
 
 // Importer 把解析结果写进号池。按 uid 去重，已存在则合并凭据与 meta。
@@ -173,12 +365,17 @@ func (im *Importer) importOne(ctx context.Context, a Account) ImportResult {
 			Token:          &token,
 			RefreshToken:   &a.RefreshToken,
 			TokenExp:       &tokenExp,
-			Credits:        &a.Credits,
-			Status:         &status,
-			ExpiresAt:      &a.ExpiresAt,
 			OfficeIdentity: &officeIdentity,
-			DeviceID:       &deviceID,
 			Meta:           merged,
+		}
+		// 重新导入只更新凭据，不拿导入包里的「未知」值覆盖已知状态：
+		// agent2api 的 Credits 恒为 -1、ExpiresAt 恒为 0，无条件写会把面板上
+		// 真实的余额和到期时间清掉（余额变成 -1 后负载均衡还会把它当积分最多优先选）。
+		if a.Credits >= 0 {
+			p.Credits = &a.Credits
+		}
+		if a.ExpiresAt > 0 {
+			p.ExpiresAt = &a.ExpiresAt
 		}
 		if name != "" {
 			p.Name = &name
@@ -186,11 +383,16 @@ func (im *Importer) importOne(ctx context.Context, a Account) ImportResult {
 		if a.Note != "" {
 			p.Note = &a.Note
 		}
-		if status == store.StatusOnline {
-			zero := int64(0)
-			empty := ""
-			p.CoolUntil = &zero
-			p.CoolReason = &empty
+		// 导入包明确给出状态时才改状态；否则保留现有的 cooling/exhausted/relogin，
+		// 一次重导入不该把正在冷却或积分耗尽的号放回池子。
+		if strings.TrimSpace(a.Status) != "" {
+			p.Status = &status
+			if status == store.StatusOnline {
+				zero := int64(0)
+				empty := ""
+				p.CoolUntil = &zero
+				p.CoolReason = &empty
+			}
 		}
 		if err := im.ST.UpdateAccount(ctx, existing.ID, p); err != nil {
 			return ImportResult{UID: uid, Message: "更新失败: " + err.Error()}
@@ -217,7 +419,8 @@ func (im *Importer) importOne(ctx context.Context, a Account) ImportResult {
 		ClientChannel:  "stable",
 		Language:       "zh",
 		Meta:           meta,
-		Enabled:        true,
+		// agent2api 导出里明确标记了 enabled:false 的号保留禁用态，其余默认启用
+		Enabled: a.Enabled == nil || *a.Enabled,
 	}
 	if err := im.ST.CreateAccount(ctx, acc); err != nil {
 		return ImportResult{UID: uid, Message: "入库失败: " + err.Error()}

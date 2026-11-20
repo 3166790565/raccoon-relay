@@ -6,7 +6,7 @@ import (
 	"errors"
 	"io"
 	"strings"
-	"time"
+	"sync"
 
 	"github.com/3166790565/raccoon-relay/internal/pool"
 	"github.com/3166790565/raccoon-relay/internal/raccoon"
@@ -20,8 +20,30 @@ type Engine struct {
 	Cool         *pool.CooldownBook
 	Client       *raccoon.Client
 	Refresher    *Refresher
-	MaxRetry     int
 	DefaultModel string
+
+	// 重试策略可在运行期从面板修改，用锁保护。
+	mu                  sync.RWMutex
+	maxRetry            int
+	retryUntilExhausted bool
+}
+
+// RetryPolicy 返回当前重试策略。
+func (e *Engine) RetryPolicy() (untilExhausted bool, maxRetry int) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.retryUntilExhausted, e.maxRetry
+}
+
+// SetRetryPolicy 运行期更新重试策略。
+// untilExhausted 为 true 时忽略 maxRetry，一直换号到号池无可用账号为止。
+func (e *Engine) SetRetryPolicy(untilExhausted bool, maxRetry int) {
+	if maxRetry < 0 {
+		maxRetry = 0
+	}
+	e.mu.Lock()
+	e.retryUntilExhausted, e.maxRetry = untilExhausted, maxRetry
+	e.mu.Unlock()
 }
 
 // Attempt 是一次换号尝试的上下文，供各协议实现写入增量。
@@ -40,7 +62,11 @@ func (e *Engine) RunOpenAI(ctx context.Context, req *ChatContext, sink OpenAISin
 	var excluded = map[string]bool{}
 	var lastErr error
 
-	for attemptNo := 0; attemptNo <= e.MaxRetry; attemptNo++ {
+	for attemptNo := 0; ; attemptNo++ {
+		untilExhausted, maxRetry := e.RetryPolicy()
+		if !untilExhausted && attemptNo > maxRetry {
+			break
+		}
 		lease, err := e.Pool.Pick(ctx, req.Model, excluded)
 		if err != nil {
 			return Result{}, err
@@ -61,8 +87,10 @@ func (e *Engine) RunOpenAI(ctx context.Context, req *ChatContext, sink OpenAISin
 		lastErr = leaseErr
 
 		kind, switchable, _, _ := classify(leaseErr)
-		if isModelScoped(leaseErr) {
-			e.Cool.CoolModel(ctx, acc.ID, req.Model, leaseErr.Error(), 5*time.Minute)
+		// 429 只罚「这个号 × 这个模型」，不把整个号停掉：同一个号换个模型往往还是好的。
+		// 只有模型级冷却被关闭时才退化为整号短冷却。
+		if isModelScoped(leaseErr) || (kind == pool.FailRate && e.Cool.ModelEnabled()) {
+			e.Cool.CoolModel(ctx, acc.ID, req.Model, leaseErr.Error())
 			if at.Started {
 				return Result{AccountID: acc.ID, Model: req.Model}, leaseErr
 			}
@@ -105,6 +133,24 @@ func (e *Engine) runOne(ctx context.Context, at *Attempt, req *ChatContext, sink
 		Session: raccoon.SessionID(at.Account.UID, req.SessionSeed),
 	}
 	stream, err := e.Client.OpenChat(ctx, chatReq)
+	if err != nil && shouldRefreshRetry(err, at.Account.TokenExp) {
+		// EnsureFresh 只在临期窗口内刷新。本地 exp 字段缺失或与上游有偏差时，
+		// 手里这枚 access 可能已经被上游判过期——先强刷一次再定论，
+		// 否则一次 401 就把还有效的 refresh_token 连同账号一起打成「需重登」。
+		fresh, rerr := e.Refresher.RefreshNow(ctx, at.Account)
+		if rerr != nil {
+			var ue *raccoon.UpstreamError
+			if errors.As(rerr, &ue) && ue.Auth {
+				return rerr // refresh_token 真的没了，这个号确实要重登
+			}
+			// 刷新接口自己抽风（网络/5xx）：这是临时故障，不能算到账号头上。
+			// 用 Status 0 走 FailServer → 短冷却 + 换号，账号不会被打成 relogin。
+			return &raccoon.UpstreamError{Status: 0, Message: "刷新令牌失败（临时）：" + rerr.Error()}
+		}
+		at.Token = fresh
+		chatReq.Token = fresh
+		stream, err = e.Client.OpenChat(ctx, chatReq)
+	}
 	if err != nil {
 		return err
 	}
@@ -141,6 +187,8 @@ func (e *Engine) runOne(ctx context.Context, at *Attempt, req *ChatContext, sink
 		return &raccoon.UpstreamError{Status: 502, Message: "小浣熊上游返回空响应"}
 	}
 	e.Cool.MarkOnline(ctx, at.Account.ID)
+	// 成功即清零这条「账号×模型」的失败链，下次再 429 从 3 分钟重新计。
+	e.Cool.ClearModel(ctx, at.Account.ID, req.Model)
 	sink.Complete()
 	return nil
 }

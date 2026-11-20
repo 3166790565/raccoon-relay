@@ -54,13 +54,12 @@ func TestSweepCheckinsDueAccounts(t *testing.T) {
 		mu.Unlock()
 		switch r.URL.Path {
 		case raccoon.PathSetting:
-			fmt.Fprint(w, `{"code":0,"data":{}}`)
+			// setting_info 既是签到第一步，也是余额来源
+			fmt.Fprint(w, `{"code":0,"data":{"available_points":777}}`)
 		case raccoon.PathGrant:
 			fmt.Fprint(w, `{"code":0,"data":{"granted":true,"popup":{"points":300}}}`)
 		case raccoon.PathMobileGrant:
 			fmt.Fprint(w, `{"code":0,"data":{"granted":false}}`)
-		case raccoon.PathBalance:
-			fmt.Fprint(w, `{"code":0,"data":{"available_points":777}}`)
 		}
 	}))
 	defer up.Close()
@@ -126,10 +125,8 @@ func TestSweepIsIdempotentPerDay(t *testing.T) {
 		switch r.URL.Path {
 		case raccoon.PathGrant:
 			fmt.Fprint(w, `{"code":0,"data":{"granted":false}}`)
-		case raccoon.PathBalance:
-			fmt.Fprint(w, `{"code":0,"data":{"available_points":10}}`)
 		default:
-			fmt.Fprint(w, `{"code":0,"data":{}}`)
+			fmt.Fprint(w, `{"code":0,"data":{"available_points":10}}`)
 		}
 	}))
 	defer up.Close()
@@ -162,19 +159,26 @@ func TestSweepIsIdempotentPerDay(t *testing.T) {
 // 401 应判 relogin 且当日不再重试。
 func TestSweep401MarksRelogin(t *testing.T) {
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == raccoon.PathGrant {
+		switch r.URL.Path {
+		case raccoon.PathGrant, raccoon.PathRefresh:
 			w.WriteHeader(401)
 			fmt.Fprint(w, `{"code":200003,"message":"authorization_verify_error"}`)
-			return
+		default:
+			fmt.Fprint(w, `{"code":0,"data":{}}`)
 		}
-		fmt.Fprint(w, `{"code":0,"data":{}}`)
 	}))
 	defer up.Close()
 
 	st, _ := store.Open(t.TempDir(), "k", false)
 	defer st.Close()
 	ctx := context.Background()
-	acc := &store.Account{UID: "pu-1", Token: "tok", Status: store.StatusOnline, Enabled: true, Meta: map[string]any{}}
+	// 给一个有效期很远的 token：否则「无 refreshToken 时回退用 access 续期」会
+	// 先打刷新端点，把测试要验证的 401 路径挡在后面。这里要验的是「刷新也修不好
+	// 才算 relogin」，所以把刷新端点也设成 401。
+	acc := &store.Account{
+		UID: "pu-1", Name: "pu-1", Token: "tok", Status: store.StatusOnline, Enabled: true,
+		Meta: map[string]any{}, TokenExp: time.Now().Add(30 * 24 * time.Hour).UnixMilli(),
+	}
 	_ = st.CreateAccount(ctx, acc)
 
 	cfg := &config.Config{
@@ -204,13 +208,11 @@ func TestOnboardCheckinsAndSyncsBalance(t *testing.T) {
 		mu.Unlock()
 		switch r.URL.Path {
 		case raccoon.PathSetting:
-			fmt.Fprint(w, `{"code":0,"data":{}}`)
+			fmt.Fprint(w, `{"code":0,"data":{"available_points":8888}}`)
 		case raccoon.PathGrant:
 			fmt.Fprint(w, `{"code":0,"data":{"granted":true,"popup":{"points":300}}}`)
 		case raccoon.PathMobileGrant:
 			fmt.Fprint(w, `{"code":0,"data":{"granted":false}}`)
-		case raccoon.PathBalance:
-			fmt.Fprint(w, `{"code":0,"data":{"available_points":8888}}`)
 		default:
 			http.NotFound(w, r)
 		}
@@ -259,8 +261,8 @@ func TestOnboardCheckinsAndSyncsBalance(t *testing.T) {
 	for _, p := range paths {
 		seen[p] = true
 	}
-	if !seen[raccoon.PathBalance] {
-		t.Fatalf("应调用余额接口，实际路径 %v", paths)
+	if !seen[raccoon.PathSetting] {
+		t.Fatalf("应调用余额来源接口 setting_info，实际路径 %v", paths)
 	}
 	if !seen[raccoon.PathGrant] {
 		t.Fatalf("应调用签到接口，实际路径 %v", paths)
@@ -276,5 +278,45 @@ func TestOnboardMissingAccount(t *testing.T) {
 	sch := New(cfg, st, client, relay.NewRefresher(st, client, time.Minute), nil)
 	if _, err := sch.Onboard(context.Background(), "acc-nope"); err == nil {
 		t.Fatal("不存在的账号应报错")
+	}
+}
+
+// 面板里关闭自动签到后，定时循环必须真的停下来；重新打开要能恢复——
+// 旧实现只在启动时判断一次，之后从面板开也永远不跑。
+func TestRunHonorsRuntimeToggle(t *testing.T) {
+	st, _ := store.Open(t.TempDir(), "k", false)
+	defer st.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cfg := &config.Config{CheckinEnable: false, Timezone: "UTC"}
+	client := raccoon.NewClient("http://127.0.0.1:1", time.Second)
+	sch := New(cfg, st, client, relay.NewRefresher(st, client, time.Minute), nil)
+
+	done := make(chan struct{})
+	go func() {
+		sch.Run(ctx)
+		close(done)
+	}()
+
+	// 关闭状态下不应有任何签到动作（没有账号也不该崩）
+	time.Sleep(50 * time.Millisecond)
+	if sch.enabled() {
+		t.Fatal("初始状态应为关闭")
+	}
+	sch.SetEnabled(true)
+	if !sch.enabled() {
+		t.Fatal("SetEnabled(true) 后应为开启")
+	}
+	sch.SetEnabled(false)
+	if sch.enabled() {
+		t.Fatal("SetEnabled(false) 后应为关闭")
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ctx 取消后 Run 应退出")
 	}
 }

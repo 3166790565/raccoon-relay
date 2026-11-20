@@ -126,6 +126,116 @@ func TestImportDedupesByUID(t *testing.T) {
 	}
 }
 
+// agent2api 多供应商导出：只保留 raccoon 账号，其余计入跳过报告。
+func TestParseImportAgent2APIFiltersOtherProviders(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "agent2api-mixed.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	list, report, err := ParseImportWithReport(raw)
+	if err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	if len(list) != 2 {
+		t.Fatalf("期望保留 2 个小浣熊账号，实际 %d", len(list))
+	}
+	if report == nil || report.Skipped != 2 {
+		t.Fatalf("跳过报告不对: %+v", report)
+	}
+	if report.Providers["qoder"] != 1 || report.Providers["trae"] != 1 {
+		t.Fatalf("供应商统计不对: %+v", report.Providers)
+	}
+	byUID := map[string]Account{}
+	for _, a := range list {
+		byUID[a.UID] = a
+	}
+	// uid 以 token 的 sub 为准（与桌面导出/OAuth 同口径，避免同一个号被重复入库）；
+	// 导出里的数字 uid 保留在 meta.platformUid 供排障。
+	a, ok := byUID["pu-aaaa"]
+	if !ok {
+		t.Fatalf("缺少账号 pu-aaaa: %+v", byUID)
+	}
+	if a.Meta["platformUid"] != "7991512" {
+		t.Fatalf("数字 uid 应保留在 meta.platformUid: %+v", a.Meta["platformUid"])
+	}
+	if a.Token == "" || a.Name != "RaccoonSophia" {
+		t.Fatalf("字段映射不对: %+v", a)
+	}
+	if a.TokenExp != 1797086942000 {
+		t.Fatalf("tokenExp 应取 pluginSecret.expiresAt，实际 %d", a.TokenExp)
+	}
+	if a.Credits != -1 {
+		t.Fatalf("agent2api 无余额，应记为未知 -1，实际 %d", a.Credits)
+	}
+	if a.Meta["officeIdentity"] != "personal" {
+		t.Fatalf("officeIdentity 未进 meta: %+v", a.Meta)
+	}
+	if _, ok := a.Meta["onboardingGrants"]; !ok {
+		t.Fatalf("首登奖台账未进 meta: %+v", a.Meta)
+	}
+	if a.Enabled == nil || !*a.Enabled {
+		t.Fatalf("enabled:true 应保留启用态: %+v", a.Enabled)
+	}
+	if b := byUID["pu-bbbb"]; b.Enabled == nil || *b.Enabled {
+		t.Fatalf("enabled:false 应保留禁用态: %+v", b.Enabled)
+	}
+}
+
+// provider 缺失时用 token 的 iss 判别归属，别把别的供应商 token 当小浣熊收进来。
+func TestAgent2APIProviderFallbackToIssuer(t *testing.T) {
+	raw := `{"accounts":[
+		{"name":"r","pluginSecret":{"accessToken":"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJwdS14IiwiaXNzIjoieGlhb2h1YW54aW9uZy5jb20vaWFtIn0.s"}},
+		{"name":"x","pluginSecret":{"accessToken":"opaque-token"}}
+	]}`
+	list, report, err := ParseImportWithReport([]byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || list[0].UID != "pu-x" {
+		t.Fatalf("iss 兜底判别失败: %+v", list)
+	}
+	if report.Skipped != 1 {
+		t.Fatalf("应跳过 1 条: %+v", report)
+	}
+}
+
+// 导入后走完整入库：enabled 状态落库，权重等既有字段不被 agent2api 覆盖。
+func TestImportAgent2APIAccounts(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "agent2api-mixed.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	list, _, err := ParseImportWithReport(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := newTestStore(t)
+	im := &Importer{ST: st}
+	ctx := context.Background()
+	for _, r := range im.Import(ctx, list) {
+		if !r.OK {
+			t.Fatalf("入库失败: %+v", r)
+		}
+	}
+	accounts, err := st.ListAccounts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(accounts) != 2 {
+		t.Fatalf("库里应有 2 条，实际 %d", len(accounts))
+	}
+	byUID := map[string]*store.Account{}
+	for _, a := range accounts {
+		byUID[a.UID] = a
+	}
+	if !byUID["pu-aaaa"].Enabled || byUID["pu-bbbb"].Enabled {
+		t.Fatalf("enabled 落库不对")
+	}
+	if byUID["pu-aaaa"].Credits != -1 {
+		t.Fatalf("未知余额应保持 -1，实际 %d", byUID["pu-aaaa"].Credits)
+	}
+}
+
 func TestParseImportRejectsMetadataOnly(t *testing.T) {
 	raw := `{"format":"agenthub-accounts","accounts":[{"uid":"pu-x"}]}`
 	if _, err := ParseImport([]byte(raw)); err == nil {
@@ -174,5 +284,23 @@ func TestExportReimportable(t *testing.T) {
 	}
 	if list[0].UID != "pu-1" || list[0].Token != "tok" {
 		t.Fatalf("回灌字段错乱: %+v", list[0])
+	}
+}
+
+// agent2api 的 refresh_token 与 access_token 是同一枚凭据，导入时应直接用
+// pluginSecret.accessToken 回填 refreshToken，这样 30 天后还能自动续期。
+func TestImportAgent2APIFillsRefreshToken(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "agent2api-mixed.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	list, _, err := ParseImportWithReport(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range list {
+		if a.RefreshToken != a.Token {
+			t.Fatalf("%s 的 refreshToken 应等于 token，实际 %q vs %q", a.UID, a.RefreshToken, a.Token)
+		}
 	}
 }

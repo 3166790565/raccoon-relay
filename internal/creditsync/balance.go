@@ -23,6 +23,9 @@ type Balancer struct {
 	ST     *store.Store
 	Client *raccoon.Client
 	Auth   Refresher
+	// OnUpdated 在余额写库成功后调用，用来立刻按积分阈值重算账号状态。
+	// 可选：为空时只写余额。
+	OnUpdated func(ctx context.Context)
 }
 
 // Refresh 查询并写回余额。返回最新余额。
@@ -50,6 +53,9 @@ func (b *Balancer) Refresh(ctx context.Context, acc *store.Account) (int64, erro
 		return credits, err
 	}
 	acc.Credits, acc.CreditsAt = credits, at
+	if b.OnUpdated != nil {
+		b.OnUpdated(ctx)
+	}
 	return credits, nil
 }
 

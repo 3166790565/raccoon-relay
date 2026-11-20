@@ -68,9 +68,9 @@ jobs:
         with:
           images: ${{ env.IMAGE }}
           tags: |
-            # 推 master 或推 tag 都更新 latest——tag 就是从默认分支打出来的正式版
+            # 推 master 或推正式 tag 都更新 latest；预发布 tag（v1.0.4-rc1）不覆盖 latest
             type=raw,value=latest,enable={{is_default_branch}}
-            type=raw,value=latest,enable=${{ github.ref_type == 'tag' }}
+            type=raw,value=latest,enable=${{ github.ref_type == 'tag' && !contains(github.ref_name, '-') }}
             # 推 tag v1.2.3 → 1.2.3 与 1.2
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -82,6 +82,9 @@ jobs:
         with:
           context: .
           file: ./Dockerfile
+          # 让服务端能准确报告自己跑的是哪个版本前缀；tag 构建用 tag，默认分支用短 SHA
+          build-args: |
+            VERSION=${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
@@ -91,3 +94,82 @@ jobs:
           cache-to: type=gha,mode=max
           provenance: true
           sbom: true
+
+  # ===== 发布二进制：一键更新从这里拉 =====
+  # 只有推 tag（v*）才产出 Release 资产。面板「一键更新」按
+  # relay-<os>-<arch>[.exe] + checksums.txt 去匹配，改文件名要同步改 internal/updater。
+  release-binaries:
+    name: 构建发布二进制
+    needs: test
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux,   goarch: amd64 }
+          - { goos: linux,   goarch: arm64 }
+          - { goos: windows, goarch: amd64 }
+          - { goos: windows, goarch: arm64 }
+          - { goos: darwin,  goarch: amd64 }
+          - { goos: darwin,  goarch: arm64 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - name: 编译
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+          VERSION: ${{ github.ref_name }}
+        run: |
+          suffix=""
+          [ "$GOOS" = "windows" ] && suffix=".exe"
+          out="relay-${GOOS}-${GOARCH}${suffix}"
+          go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o "dist/${out}" ./cmd/relay
+          # 每个矩阵任务先把自己的校验行收集起来，汇总任务再合并
+          ( cd dist && sha256sum "${out}" > "${out}.sha256" )
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: relay-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/relay-*
+          if-no-files-found: error
+
+  publish:
+    name: 发布 Release
+    needs: release-binaries
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: 汇总校验文件
+        run: |
+          cd dist
+          rm -f checksums.txt
+          cat *.sha256 | sort > checksums.txt
+          cat checksums.txt
+
+      - name: 创建 / 更新 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/relay-* dist/checksums.txt --repo "${{ github.repository }}" --clobber
+          else
+            gh release create "$TAG" dist/relay-* dist/checksums.txt               --repo "${{ github.repository }}"               --title "$TAG" --generate-notes
+          fi

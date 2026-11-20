@@ -19,12 +19,14 @@ import (
 
 // fakeUpstream 模拟小浣熊上游：按脚本决定每个请求的结果。
 type fakeUpstream struct {
-	mu       sync.Mutex
-	calls    []string
-	chatHits int
-	plan     []chatResult // 按顺序消费
-	checkin  []string     // 记录签到调用顺序
-	granted  bool
+	mu          sync.Mutex
+	calls       []string
+	chatHits    int
+	refreshes   int          // 刷新端点被调用次数
+	refreshDead bool         // 刷新端点是否回 401（refresh_token 已失效）
+	plan        []chatResult // 按顺序消费
+	checkin     []string     // 记录签到调用顺序
+	granted     bool
 }
 
 type chatResult struct {
@@ -80,7 +82,8 @@ func (f *fakeUpstream) handler() http.Handler {
 		f.mu.Lock()
 		f.checkin = append(f.checkin, "setting")
 		f.mu.Unlock()
-		fmt.Fprint(w, `{"code":0,"data":{}}`)
+		// setting_info 同时是余额来源：签到两步里的第一步与余额查询共用这条路径
+		fmt.Fprint(w, `{"code":0,"data":{"available_points":4321}}`)
 	})
 	mux.HandleFunc(raccoon.PathGrant, func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
@@ -93,10 +96,22 @@ func (f *fakeUpstream) handler() http.Handler {
 		}
 		fmt.Fprint(w, `{"code":0,"data":{"granted":false}}`)
 	})
+	// 旧余额端点已下线：真实上游对它一律 403，这里保持同样的行为，
+	// 避免测试悄悄依赖一条再也走不通的通道。
 	mux.HandleFunc(raccoon.PathBalance, func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `{"code":0,"data":{"available_points":4321}}`)
+		w.WriteHeader(http.StatusForbidden)
 	})
 	mux.HandleFunc(raccoon.PathRefresh, func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		f.calls = append(f.calls, "refresh")
+		f.refreshes++
+		dead := f.refreshDead
+		f.mu.Unlock()
+		if dead {
+			w.WriteHeader(401)
+			fmt.Fprint(w, `{"code":200003,"message":"authorization_verify_error"}`)
+			return
+		}
 		fmt.Fprint(w, `{"code":0,"data":{"access_token":"new-access-token","refresh_token":"new-refresh"}}`)
 	})
 	mux.HandleFunc(raccoon.PathCatalog, func(w http.ResponseWriter, r *http.Request) {
@@ -193,7 +208,7 @@ func newHarness(t *testing.T, plan []chatResult) *harness {
 	return &harness{srv: srv, st: st, up: up, upstream: upSrv, engine: engine, cool: cool, apiKey: secret}
 }
 
-func (h *harness) addAccount(t *testing.T, uid string, credits int64) {
+func (h *harness) addAccount(t *testing.T, uid string, credits int64) *store.Account {
 	t.Helper()
 	a := &store.Account{
 		UID: uid, Name: uid, Token: testToken(uid), RefreshToken: "rf",
@@ -203,6 +218,7 @@ func (h *harness) addAccount(t *testing.T, uid string, credits int64) {
 	if err := h.st.CreateAccount(context.Background(), a); err != nil {
 		t.Fatal(err)
 	}
+	return a
 }
 
 func (h *harness) do(t *testing.T, method, path, body string) *httptest.ResponseRecorder {
@@ -310,6 +326,86 @@ func TestFailoverOn402(t *testing.T) {
 	}
 	if exhausted != 1 {
 		t.Fatalf("应恰好一个号被判积分耗尽，实际 %d", exhausted)
+	}
+}
+
+// 401 不能把还有效的号打成 relogin：应强刷一次并在同一号上重放成功。
+func TestUnauthorizedRefreshesInsteadOfRelogin(t *testing.T) {
+	h := newHarness(t, []chatResult{
+		{status: 401, errCode: 200003, errMsg: "authorization_verify_error"},
+		{status: 200, frames: sseFrames("刷新后可用"), usage: usageFrame},
+	})
+	h.addAccount(t, "pu-1", 100)
+
+	w := h.do(t, "POST", "/v1/chat/completions",
+		`{"model":"sn-test-model","messages":[{"role":"user","content":"hi"}]}`)
+	if w.Code != 200 {
+		t.Fatalf("401 后强刷应成功，实际 %d：%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "刷新后可用") {
+		t.Fatalf("内容不对: %s", w.Body.String())
+	}
+
+	h.up.mu.Lock()
+	refreshes := h.up.refreshes
+	h.up.mu.Unlock()
+	if refreshes == 0 {
+		t.Fatal("401 后应先尝试刷新令牌")
+	}
+
+	acc, _ := h.st.GetByUID(context.Background(), "pu-1")
+	if acc.Status != store.StatusOnline {
+		t.Fatalf("刷新可用时不应把号打成 %s", acc.Status)
+	}
+}
+
+// 普通 403（权限/风控）既不该强刷白白轮换 refresh_token，也不该打成 relogin：
+// 应换号，失败号只做短冷却。
+func TestForbiddenIsNotRelogin(t *testing.T) {
+	h := newHarness(t, []chatResult{
+		{status: 403, errCode: 403, errMsg: "permission denied"},
+	})
+	h.addAccount(t, "pu-1", 100)
+
+	w := h.do(t, "POST", "/v1/chat/completions",
+		`{"model":"sn-test-model","messages":[{"role":"user","content":"hi"}]}`)
+	if w.Code == 200 {
+		t.Fatal("上游 403 不应返回 200")
+	}
+
+	h.up.mu.Lock()
+	refreshes := h.up.refreshes
+	h.up.mu.Unlock()
+	if refreshes != 0 {
+		t.Fatalf("普通 403 不该触发刷新（会顶掉 refresh_token），实际 %d 次", refreshes)
+	}
+
+	acc, _ := h.st.GetByUID(context.Background(), "pu-1")
+	if acc.Status == store.StatusRelogin {
+		t.Fatal("普通 403 不该把号打成 relogin")
+	}
+	if acc.Status != store.StatusCooling {
+		t.Fatalf("403 应短冷却，实际 %s", acc.Status)
+	}
+}
+
+// 403 且文案是登录态问题、刷新也修不好时，才允许 relogin。
+func TestForbiddenWithDeadRefreshGoesRelogin(t *testing.T) {
+	h := newHarness(t, []chatResult{{status: 403, errCode: 403, errMsg: "登录态已失效"}})
+	h.addAccount(t, "pu-1", 100)
+	// 刷新端点回 401，表示 refresh_token 也不可用了
+	h.up.mu.Lock()
+	h.up.refreshDead = true
+	h.up.mu.Unlock()
+
+	w := h.do(t, "POST", "/v1/chat/completions",
+		`{"model":"sn-test-model","messages":[{"role":"user","content":"hi"}]}`)
+	if w.Code == 200 {
+		t.Fatal("上游不可用不应返回 200")
+	}
+	acc, _ := h.st.GetByUID(context.Background(), "pu-1")
+	if acc.Status != store.StatusRelogin {
+		t.Fatalf("refresh 也失效时应判 relogin，实际 %s", acc.Status)
 	}
 }
 
@@ -471,5 +567,97 @@ func TestCountTokensEstimate(t *testing.T) {
 	}
 	if n, _ := out["input_tokens"].(float64); n <= 0 {
 		t.Fatalf("估算值应大于 0: %v", out["input_tokens"])
+	}
+}
+
+// 全部账号都 429 时，开启「试完整个号池」应把每个账号都试一遍。
+func TestRetryUntilExhaustedTriesWholePool(t *testing.T) {
+	h := newHarness(t, []chatResult{{status: 429, errCode: 429, errMsg: "限流"}})
+	h.engine.SetRetryPolicy(true, 0) // 上限 0 也要能试完整个池
+	for _, uid := range []string{"pu-1", "pu-2", "pu-3", "pu-4", "pu-5"} {
+		h.addAccount(t, uid, 100)
+	}
+
+	w := h.do(t, "POST", "/v1/chat/completions",
+		`{"model":"sn-test-model","messages":[{"role":"user","content":"hi"}]}`)
+	if w.Code == 200 {
+		t.Fatalf("全部 429 不应成功: %s", w.Body.String())
+	}
+
+	h.up.mu.Lock()
+	hits := h.up.chatHits
+	h.up.mu.Unlock()
+	if hits != 5 {
+		t.Fatalf("应依次试完 5 个账号，实际 %d 次", hits)
+	}
+}
+
+// 关闭该开关时，重试次数上限应照常生效。
+func TestRetryLimitWhenExhaustedDisabled(t *testing.T) {
+	h := newHarness(t, []chatResult{{status: 429, errCode: 429, errMsg: "限流"}})
+	h.engine.SetRetryPolicy(false, 1)
+	for _, uid := range []string{"pu-1", "pu-2", "pu-3", "pu-4"} {
+		h.addAccount(t, uid, 100)
+	}
+
+	w := h.do(t, "POST", "/v1/chat/completions",
+		`{"model":"sn-test-model","messages":[{"role":"user","content":"hi"}]}`)
+	if w.Code == 200 {
+		t.Fatalf("全部 429 不应成功: %s", w.Body.String())
+	}
+
+	h.up.mu.Lock()
+	hits := h.up.chatHits
+	h.up.mu.Unlock()
+	if hits != 2 {
+		t.Fatalf("上限 1 应最多打 2 次（首次 + 1 次重试），实际 %d 次", hits)
+	}
+}
+
+// 429 只冷却「这个号 × 这个模型」：账号状态保持在线，下一次同模型选号跳过它。
+func TestRateLimitCoolsModelNotAccount(t *testing.T) {
+	h := newHarness(t, []chatResult{
+		{status: 429, errCode: 429, errMsg: "限流"},
+		{status: 200, frames: sseFrames("换个号成功"), usage: usageFrame},
+	})
+	h.engine.SetRetryPolicy(false, 0)
+	first := h.addAccount(t, "pu-1", 100)
+
+	w := h.do(t, "POST", "/v1/chat/completions",
+		`{"model":"sn-test-model","messages":[{"role":"user","content":"hi"}]}`)
+	if w.Code == 200 {
+		t.Fatalf("单号 429 不应成功: %s", w.Body.String())
+	}
+
+	acc, _ := h.st.GetByUID(context.Background(), "pu-1")
+	if acc.Status != store.StatusOnline {
+		t.Fatalf("429 不该改账号状态，实际 %s", acc.Status)
+	}
+	if !h.cool.IsModelCooled(first.ID, "sn-test-model") {
+		t.Fatal("429 应冷却该「账号 × 模型」")
+	}
+	// 其它模型不受影响
+	if h.cool.IsModelCooled(first.ID, "另一个模型") {
+		t.Fatal("429 不该影响其它模型")
+	}
+
+	// 补一个健康账号：同模型请求应直接避开发 429 的那个号，只打一次就成功
+	second := h.addAccount(t, "pu-2", 100)
+	h.up.mu.Lock()
+	before := h.up.chatHits
+	h.up.mu.Unlock()
+	w2 := h.do(t, "POST", "/v1/chat/completions",
+		`{"model":"sn-test-model","messages":[{"role":"user","content":"hi"}]}`)
+	if w2.Code != 200 {
+		t.Fatalf("健康号应接住请求，实际 %d：%s", w2.Code, w2.Body.String())
+	}
+	h.up.mu.Lock()
+	hits := h.up.chatHits - before
+	h.up.mu.Unlock()
+	if hits != 1 {
+		t.Fatalf("冷却中的号不应被选中，实际打了 %d 次", hits)
+	}
+	if h.cool.IsModelCooled(second.ID, "sn-test-model") {
+		t.Fatal("冷却应只停留在被限流的那个号上")
 	}
 }

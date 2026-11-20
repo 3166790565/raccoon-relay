@@ -26,137 +26,285 @@
   </section>
 
   <div id="app" hidden>
+    <!-- 顶部标签导航 -->
+    <nav class="navtabs" id="navTabs">
+      <button class="navtab active" data-page="overview">概览</button>
+      <button class="navtab" data-page="accounts">号池</button>
+      <button class="navtab" data-page="add">添加账号</button>
+      <button class="navtab" data-page="keys">API Keys</button>
+      <button class="navtab" data-page="logs">调用日志</button>
+      <button class="navtab" data-page="syslogs">运行日志</button>
+      <button class="navtab" data-page="settings">设置</button>
+      <button class="navtab" data-page="update">版本更新</button>
+    </nav>
+
     <!-- 概览 -->
-    <section class="card">
-      <h2>概览</h2>
-      <div class="grid" id="overview"></div>
+    <section class="page active" id="page-overview">
+      <section class="card">
+        <h2>概览</h2>
+        <div class="grid" id="overview"></div>
+      </section>
     </section>
 
-    <!-- 登录 / 添加账号 -->
-    <section class="card">
-      <h2>添加账号</h2>
-      <div class="tabs">
-        <button class="tab active" data-tab="paste">粘贴授权码</button>
-        <button class="tab" data-tab="manual">手填令牌</button>
-        <button class="tab" data-tab="import">导入 JSON</button>
-      </div>
-
-      <div class="tabpane active" id="pane-paste">
-        <ol class="steps">
-          <li>点下面按钮打开官方登录页（新窗口）。</li>
-          <li>完成登录后浏览器会跳到 <code>office-raccoon://auth/callback?code=…</code>：
-            若提示"没有可用应用"，直接整段复制地址栏内容；若装了桌面客户端，请用无痕窗口操作。</li>
-          <li>把整段链接粘到下面，点「兑换并添加」。</li>
-        </ol>
-        <div class="row">
-          <button class="primary" id="openAuthBtn">打开小浣熊登录页</button>
-          <span class="hint" id="redirectHint"></span>
+    <!-- 号池 -->
+    <section class="page" id="page-accounts">
+      <section class="card">
+        <div class="cardhead">
+          <h2>号池</h2>
+          <div class="row">
+            <button class="ghost" id="refreshListBtn">刷新</button>
+            <button class="primary" id="checkinAllBtn">全部签到</button>
+            <button class="danger" id="purgeDeadBtn" title="删除所有凭证失效或订阅已过期的账号">清理失效账号</button>
+            <button class="ghost" id="exportBtn">导出 JSON</button>
+          </div>
         </div>
-        <div class="row">
-          <input type="text" id="pasteInput" placeholder="office-raccoon://auth/callback?code=... 或直接粘贴授权码">
-          <button class="primary" id="exchangeBtn">兑换并添加</button>
+        <div class="tablewrap">
+          <table id="accTable">
+            <thead><tr>
+              <th>名称</th><th>uid</th><th>状态</th><th>积分</th><th>冷却/原因</th><th>今日签到</th><th>操作</th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
         </div>
-        <p class="msg" id="exchangeMsg"></p>
-      </div>
-
-      <div class="tabpane" id="pane-manual">
-        <p class="hint">适用于从桌面客户端 <code>~/.box-agent/config/auth.json</code> 里拷贝凭据。</p>
-        <div class="field"><label>access_token</label><textarea id="mToken" rows="3" placeholder="eyJhbGciOi..."></textarea></div>
-        <div class="field"><label>refresh_token</label><textarea id="mRefresh" rows="2" placeholder="可留空"></textarea></div>
-        <div class="field"><label>office_identity</label><input id="mOffice" placeholder="可留空；个人版为空"></div>
-        <div class="field"><label>备注名</label><input id="mName" placeholder="可留空"></div>
-        <button class="primary" id="manualBtn">添加账号</button>
-        <p class="msg" id="manualMsg"></p>
-      </div>
-
-      <div class="tabpane" id="pane-import">
-        <p class="hint">支持 agenthub-credentials 格式（桌面版导出的那份 JSON），也接受单个账号对象或数组。</p>
-        <textarea id="importText" rows="8" placeholder='{"format":"agenthub-credentials","channel":"raccoon","accounts":[...]}'></textarea>
-        <div class="row">
-          <input type="file" id="importFile" accept=".json,application/json">
-          <button class="primary" id="importBtn">导入</button>
-        </div>
-        <p class="msg" id="importMsg"></p>
-        <pre class="out" id="importOut"></pre>
-      </div>
+        <p class="msg" id="tableMsg"></p>
+      </section>
     </section>
 
-    <!-- 账号表 -->
-    <section class="card">
-      <div class="cardhead">
-        <h2>号池</h2>
-        <div class="row">
-          <button class="ghost" id="refreshListBtn">刷新</button>
-          <button class="primary" id="checkinAllBtn">全部签到</button>
-          <button class="ghost" id="exportBtn">导出 JSON</button>
+    <!-- 添加账号 -->
+    <section class="page" id="page-add">
+      <section class="card">
+        <h2>添加账号</h2>
+        <div class="tabs" id="addTabs">
+          <button class="tab active" data-tab="paste">粘贴授权码</button>
+          <button class="tab" data-tab="manual">手填令牌</button>
+          <button class="tab" data-tab="import">导入 JSON</button>
         </div>
-      </div>
-      <div class="tablewrap">
-        <table id="accTable">
-          <thead><tr>
-            <th>名称</th><th>uid</th><th>状态</th><th>积分</th><th>冷却/原因</th><th>今日签到</th><th>操作</th>
-          </tr></thead>
-          <tbody></tbody>
-        </table>
-      </div>
-      <p class="msg" id="tableMsg"></p>
+
+        <div class="tabpane active" id="pane-paste">
+          <ol class="steps">
+            <li>点下面按钮打开官方登录页（新窗口）。</li>
+            <li>完成登录后浏览器会跳到 <code>office-raccoon://auth/callback?code=…</code>：
+              若提示"没有可用应用"，直接整段复制地址栏内容；若装了桌面客户端，请用无痕窗口操作。</li>
+            <li>把整段链接粘到下面，点「兑换并添加」。</li>
+          </ol>
+          <div class="row">
+            <button class="primary" id="openAuthBtn">打开小浣熊登录页</button>
+            <span class="hint" id="redirectHint"></span>
+          </div>
+          <div class="row">
+            <input type="text" id="pasteInput" placeholder="office-raccoon://auth/callback?code=... 或直接粘贴授权码">
+            <button class="primary" id="exchangeBtn">兑换并添加</button>
+          </div>
+          <p class="msg" id="exchangeMsg"></p>
+        </div>
+
+        <div class="tabpane" id="pane-manual">
+          <p class="hint">适用于从桌面客户端 <code>~/.box-agent/config/auth.json</code> 里拷贝凭据。</p>
+          <div class="field"><label>access_token</label><textarea id="mToken" rows="3" placeholder="eyJhbGciOi..."></textarea></div>
+          <div class="field"><label>refresh_token</label><textarea id="mRefresh" rows="2" placeholder="可留空"></textarea></div>
+          <div class="field"><label>office_identity</label><input id="mOffice" placeholder="可留空；个人版为空"></div>
+          <div class="field"><label>备注名</label><input id="mName" placeholder="可留空"></div>
+          <button class="primary" id="manualBtn">添加账号</button>
+          <p class="msg" id="manualMsg"></p>
+        </div>
+
+        <div class="tabpane" id="pane-import">
+          <p class="hint">支持 agenthub-credentials 格式（桌面版导出的那份 JSON），也接受单个账号对象或数组。</p>
+          <textarea id="importText" rows="8" placeholder='支持桌面版凭据包（agenthub-credentials）与 agent2api 多供应商导出；agent2api 导出里的非小浣熊账号会自动过滤'></textarea>
+          <div class="row">
+            <input type="file" id="importFile" accept=".json,application/json">
+            <button class="primary" id="importBtn">导入</button>
+          </div>
+          <p class="msg" id="importMsg"></p>
+          <pre class="out" id="importOut"></pre>
+        </div>
+      </section>
     </section>
 
     <!-- API Keys -->
-    <section class="card">
-      <div class="cardhead">
-        <h2>API Keys</h2>
-        <div class="row">
-          <input id="keyName" placeholder="名称，如 laptop">
-          <button class="primary" id="createKeyBtn">新建</button>
+    <section class="page" id="page-keys">
+      <section class="card">
+        <div class="cardhead">
+          <h2>API Keys</h2>
+          <div class="row">
+            <input id="keyName" placeholder="名称，如 laptop">
+            <button class="primary" id="createKeyBtn">新建</button>
+          </div>
         </div>
-      </div>
-      <p class="hint">明文只在创建时显示一次。</p>
-      <pre class="out" id="newKeyOut"></pre>
-      <div class="tablewrap">
-        <table id="keyTable">
-          <thead><tr><th>名称</th><th>前缀</th><th>创建</th><th>最近使用</th><th></th></tr></thead>
-          <tbody></tbody>
-        </table>
-      </div>
+        <p class="hint">明文只在创建时显示一次。</p>
+        <pre class="out" id="newKeyOut"></pre>
+        <div class="tablewrap">
+          <table id="keyTable">
+            <thead><tr><th>名称</th><th>前缀</th><th>创建</th><th>最近使用</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+
+    <!-- 调用日志 -->
+    <section class="page" id="page-logs">
+      <section class="card">
+        <div class="cardhead">
+          <h2>最近调用</h2>
+          <button class="ghost" id="loadLogsBtn">刷新</button>
+        </div>
+        <div class="tablewrap">
+          <table id="logTable">
+            <thead><tr><th>时间</th><th>API</th><th>模型</th><th>状态</th><th>tokens</th><th>耗时</th><th>错误</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p class="msg" id="logTableMsg"></p>
+      </section>
+    </section>
+
+    <!-- 运行日志（进程日志文件 + 自动清理） -->
+    <section class="page" id="page-syslogs">
+      <section class="card">
+        <div class="cardhead">
+          <h2>日志概览</h2>
+          <div class="row">
+            <button class="ghost" id="refreshSyslogsBtn">刷新</button>
+            <button class="primary" id="cleanLogsBtn">立即清理</button>
+          </div>
+        </div>
+        <div class="grid" id="logStats"></div>
+        <p class="hint" id="logLastClean"></p>
+      </section>
+
+      <section class="card">
+        <div class="cardhead">
+          <h2>日志文件</h2>
+          <span class="hint">当前文件超过大小上限或跨天时自动轮转，归档按保留天数与数量上限清理。</span>
+        </div>
+        <div class="tablewrap">
+          <table id="logFileTable">
+            <thead><tr><th>文件</th><th>大小</th><th>修改时间</th><th>操作</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p class="msg" id="syslogMsg"></p>
+      </section>
+    </section>
+
+    <!-- 版本更新 -->
+    <section class="page" id="page-update">
+      <section class="card">
+        <div class="cardhead">
+          <h2>版本更新</h2>
+          <div class="row">
+            <button class="ghost" id="checkUpdateBtn">检查更新</button>
+            <button class="primary" id="installUpdateBtn" hidden>一键更新</button>
+            <button class="ghost" id="rollbackBtn" hidden>回滚</button>
+          </div>
+        </div>
+        <div class="grid" id="updateGrid"></div>
+        <div class="update-notes" id="updateNotes" hidden>
+          <div class="hint" id="updateNotesTitle">更新说明</div>
+          <pre class="out" id="updateNotesBody"></pre>
+        </div>
+        <p class="hint" id="updateHint"></p>
+        <p class="msg" id="updateMsg"></p>
+        <p class="err" id="updateErr"></p>
+      </section>
     </section>
 
     <!-- 设置 -->
-    <section class="card">
-      <h2>设置</h2>
-      <div class="grid2">
-        <div class="field"><label>选号策略</label>
-          <select id="setStrategy">
-            <option value="optimal">optimal · 免费优先</option>
-            <option value="credit_first">credit_first · 积分多优先</option>
-            <option value="round_robin">round_robin · 轮询</option>
-            <option value="expire_first">expire_first · 先到期先</option>
-            <option value="manual">manual · 手动优先级</option>
-          </select>
+    <section class="page" id="page-settings">
+      <section class="card">
+        <h2>设置</h2>
+        <div class="grid2">
+          <div class="field"><label>选号策略</label>
+            <select id="setStrategy">
+              <option value="load_balance">负载均衡 · 在途请求最少的优先</option>
+              <option value="round_robin">轮询 · 最久未用的优先</option>
+            </select>
+          </div>
+          <div class="field"><label>自动签到</label>
+            <select id="setCheckinEnable"><option value="true">开启</option><option value="false">关闭</option></select>
+          </div>
+          <div class="field"><label>签到小时</label><input type="number" id="setHour" min="0" max="23"></div>
+          <div class="field"><label>签到分钟</label><input type="number" id="setMinute" min="0" max="59"></div>
+          <div class="field"><label>抖动上限（分钟）</label><input type="number" id="setJitter" min="0" max="180"></div>
+          <div class="field"><label>自动换号重试</label>
+            <select id="setRetryUntilExhausted">
+              <option value="false">关闭 · 按次数上限</option>
+              <option value="true">开启 · 试完整个号池</option>
+            </select>
+          </div>
+          <div class="field"><label>最大重试次数</label><input type="number" id="setMaxRetries" min="0" max="999"></div>
         </div>
-        <div class="field"><label>自动签到</label>
-          <select id="setCheckinEnable"><option value="true">开启</option><option value="false">关闭</option></select>
-        </div>
-        <div class="field"><label>签到小时</label><input type="number" id="setHour" min="0" max="23"></div>
-        <div class="field"><label>签到分钟</label><input type="number" id="setMinute" min="0" max="59"></div>
-        <div class="field"><label>抖动上限（分钟）</label><input type="number" id="setJitter" min="0" max="180"></div>
-      </div>
-      <button class="primary" id="saveSettingsBtn">保存</button>
-      <p class="msg" id="settingsMsg"></p>
-    </section>
+        <p class="hint">遇到 429 限流、402 积分耗尽、401/5xx 等可换号错误时，依次换下一个账号重试。「试完整个号池」会一直换到没有可用账号为止，此时最大重试次数不生效。</p>
+        <button class="primary" id="saveSettingsBtn">保存</button>
+        <p class="msg" id="settingsMsg"></p>
+      </section>
 
-    <!-- 日志 -->
-    <section class="card">
-      <div class="cardhead">
-        <h2>最近调用</h2>
-        <button class="ghost" id="loadLogsBtn">刷新</button>
-      </div>
-      <div class="tablewrap">
-        <table id="logTable">
-          <thead><tr><th>时间</th><th>API</th><th>模型</th><th>状态</th><th>tokens</th><th>耗时</th><th>错误</th></tr></thead>
-          <tbody></tbody>
-        </table>
-      </div>
+      <section class="card">
+        <h2>冷却与积分阈值</h2>
+        <div class="grid2">
+          <div class="field"><label>429 按「账号 × 模型」冷却</label>
+            <select id="setModelCooldown">
+              <option value="true">开启 · 只冷却该号的该模型</option>
+              <option value="false">关闭 · 冷却整个账号 60 秒</option>
+            </select>
+          </div>
+          <div class="field"><label>积分过低暂停</label>
+            <select id="setCreditStopEnable">
+              <option value="false">关闭</option>
+              <option value="true">开启</option>
+            </select>
+          </div>
+          <div class="field"><label>低于该积分暂停</label><input type="number" id="setCreditStopBelow" min="0" step="1"></div>
+          <div class="field"><label>达到该积分解除</label><input type="number" id="setCreditResumeAbove" min="0" step="1"></div>
+        </div>
+        <p class="hint">429 默认只冷却出问题的那一个「账号 × 模型」：同一账号换别的模型仍然可用。
+          冷却阶梯为 3 分钟 → 5 分钟 → 10 分钟，之后每次翻倍（封顶 24 小时）；冷却结束后该模型一旦调用成功即清零，
+          下次再从 3 分钟算起。<br>
+          积分阈值独立于账号冷却：已知余额 ≤「暂停阈值」时该号暂停选号，等到 ≥「解除阈值」时自动恢复——
+          通常配合签到使用，签到补上积分后立即解除，无需等冷却时间。<strong>解除阈值不能小于暂停阈值</strong>。</p>
+        <button class="primary" id="saveCooldownBtn">保存冷却设置</button>
+        <p class="msg" id="cooldownMsg"></p>
+      </section>
+
+      <section class="card">
+        <h2>主动续期</h2>
+        <div class="grid2">
+          <div class="field"><label>提前续期（天）</label><input type="number" id="setRenewWindowDays" min="0" max="30" step="0.5"></div>
+          <div class="field"><label>扫描间隔（小时）</label><input type="number" id="setRenewIntervalHours" min="0" max="168" step="1"></div>
+          <div class="field"><label>账号间隔（毫秒）</label><input type="number" id="setRenewGapMS" min="0" max="60000"></div>
+        </div>
+        <p class="hint">小浣熊 token 有效期 30 天。转发路径只在有请求打到某个号时才刷新，冷门号可能长期不被选中，
+          到期后会直接从号池消失。这里让后台定期把临期号统一续上；续期成功还会把「需重登」的号拉回在线。
+          提前量或扫描间隔填 0 表示关闭。<strong>扫描间隔必须小于提前量</strong>，否则可能有号在两次扫描之间过期。
+          保存后立即生效，无需重启。</p>
+        <div class="row">
+          <button class="primary" id="saveRenewSettingsBtn">保存续期设置</button>
+          <button id="runRenewBtn">立即续期一次</button>
+        </div>
+        <p class="msg" id="renewSettingsMsg"></p>
+      </section>
+
+      <section class="card">
+        <h2>日志管理</h2>
+        <div class="grid2">
+          <div class="field"><label>写入日志文件</label>
+            <select id="setLogFileEnable"><option value="true">开启</option><option value="false">关闭（仅标准输出）</option></select>
+          </div>
+          <div class="field"><label>日志目录</label><input id="setLogDir" placeholder="默认 DATA_DIR/logs"></div>
+          <div class="field"><label>单文件上限（MB）</label><input type="number" id="setLogMaxSizeMB" min="1" max="4096"></div>
+          <div class="field"><label>归档数量上限</label><input type="number" id="setLogMaxFiles" min="1" max="1000"></div>
+          <div class="field"><label>日志文件保留（天）</label><input type="number" id="setLogFileRetainDays" min="0" max="3650"></div>
+          <div class="field"><label>调用流水保留（天）</label><input type="number" id="setLogDBRetainDays" min="0" max="3650"></div>
+          <div class="field"><label>自动清理</label>
+            <select id="setLogCleanEnable"><option value="true">开启</option><option value="false">关闭</option></select>
+          </div>
+          <div class="field"><label>清理间隔（分钟）</label><input type="number" id="setLogCleanIntervalMin" min="1" max="1440"></div>
+        </div>
+        <p class="hint">单文件超过上限或跨天时自动轮转，旧归档按「保留天数」和「数量上限」中更严格的一条清理；调用流水与签到记录按「流水保留天数」从数据库删除。填 0 表示不按天数限制。</p>
+        <button class="primary" id="saveLogSettingsBtn">保存日志设置</button>
+        <p class="msg" id="logSettingsMsg"></p>
+      </section>
     </section>
   </div>
 </main>

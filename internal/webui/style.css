@@ -75,6 +75,24 @@ button.danger { color: var(--bad); border-color: #4a2020; }
 .stat .k { font-size: 12px; color: var(--dim); }
 .stat .v { font-size: 16px; font-weight: 600; margin-top: 4px; word-break: break-all; }
 
+/* 顶层标签页导航 */
+.navtabs {
+  display: flex; gap: 4px; flex-wrap: wrap;
+  border-bottom: 1px solid var(--line);
+}
+.navtab {
+  background: transparent; border: 1px solid transparent; border-bottom: none;
+  border-radius: 8px 8px 0 0; padding: 9px 16px; font-size: 14px;
+  color: var(--dim); margin-bottom: -1px;
+}
+.navtab:hover { color: var(--fg); background: #1b1f27; }
+.navtab.active {
+  color: var(--accent); border-color: var(--line);
+  border-bottom: 1px solid var(--card); background: var(--card); font-weight: 600;
+}
+.page { display: none; }
+.page.active { display: block; }
+
 .tabs { display: flex; gap: 6px; margin-bottom: 12px; }
 .tab { padding: 6px 12px; font-size: 13px; }
 .tab.active { border-color: var(--accent); color: var(--accent); }
@@ -103,3 +121,9 @@ td.ops button { padding: 4px 9px; font-size: 12px; }
   max-height: 240px; overflow: auto; margin: 8px 0 0;
 }
 .out:empty { display: none; }
+
+/* ---------- 版本更新 ---------- */
+.update-notes { margin-top: 14px; }
+.update-notes .out { max-height: 320px; }
+#updateHint { margin-top: 12px; }
+button[disabled] { opacity: .5; cursor: not-allowed; }
