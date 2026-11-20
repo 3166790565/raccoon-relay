@@ -34,9 +34,11 @@ function fmtTime(ms) {
   return `${d.getMonth() + 1}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
+// uid 形如 pu-01a1d03b-c02e-…，面板上只要分辨得出是哪个号，取首尾即可。
+// 截得太短（6+4）会让同一批导入的号看起来一模一样，所以多留几位。
 function shortUID(uid) {
   const s = String(uid || '');
-  return s.length > 10 ? s.slice(0, 6) + '…' + s.slice(-4) : s;
+  return s.length > 18 ? s.slice(0, 12) + '…' + s.slice(-4) : s;
 }
 
 // 积分显示：一万以下用阿拉伯数字，一万及以上用「万」，保留一位小数（去掉多余的 .0）。
@@ -88,7 +90,7 @@ const PAGE_LOADERS = {
   accounts: () => loadAccounts(),
   add: () => Promise.resolve(),
   keys: () => loadKeys(),
-  logs: () => loadLogs(),
+  logs: () => ensureLogFacets().then(() => loadLogs()),
   syslogs: () => loadSysLogs(),
   settings: () => loadSettings(),
   update: () => loadUpdate(),
@@ -166,55 +168,471 @@ async function loadStatus() {
 }
 
 // ---------- 账号 ----------
+// 号池页的筛选、勾选状态都放在 STATE.pool 里：账号列表会被定时/手动刷新，
+// 刷新不该把用户正在看的筛选条件和勾选清掉。
+const POOL = {
+  status: 'all', cool: 'all', q: '', sel: new Set(), fold: false,
+  peakCredits: 1, creditStopBelow: 0,
+};
+
 async function loadAccounts() {
   try {
     const r = await api('/api/accounts');
     STATE.accounts = r.accounts || [];
+    // 账号被删后它的 id 不该继续留在勾选里，否则批量操作会一直报「跳过 1 个」。
+    const alive = new Set(STATE.accounts.map((a) => a.id));
+    POOL.sel.forEach((id) => { if (!alive.has(id)) POOL.sel.delete(id); });
     renderAccounts();
   } catch (e) {
     $('tableMsg').textContent = e.message;
   }
 }
 
+// 限流相关：账号级冷却 与 模型级罚单 是两回事。
+// 状态列只反映账号级；「限流」列汇总模型级罚单，两者都算「已限流」。
+function modelCoolsOf(a) {
+  return Array.isArray(a.modelCools) ? a.modelCools : [];
+}
+
+function isLimited(a) {
+  const st = a.status || 'online';
+  if (st === 'cooling' || st === 'exhausted' || st === 'relogin') return true;
+  if (a.coolUntil > Date.now()) return true;
+  return modelCoolsOf(a).some((m) => m.until > Date.now());
+}
+
+function filteredAccounts() {
+  const q = POOL.q.trim().toLowerCase();
+  return STATE.accounts.filter((a) => {
+    if (POOL.status === 'enabled' && !a.enabled) return false;
+    if (POOL.status === 'disabled' && a.enabled) return false;
+    if (POOL.cool === 'normal' && isLimited(a)) return false;
+    if (POOL.cool === 'cooling' && !isLimited(a)) return false;
+    if (!q) return true;
+    return [a.name, a.uid, a.note, a.platformUid].some((v) => String(v || '').toLowerCase().includes(q));
+  });
+}
+
+// 剩余时间：30 分钟以内显示「还有 N 分钟」，否则显示到几点几分。
+function fmtLeft(ms) {
+  const d = ms - Date.now();
+  if (d <= 0) return '已到期';
+  if (d < 60 * 60 * 1000) return `还有 ${Math.max(1, Math.ceil(d / 60000))} 分钟`;
+  return fmtTime(ms) + ' 恢复';
+}
+
+// 有效期：把 expires_at 显示成「N 天后」。没有订阅到期时间的号（多数个人号）
+// 用 token 到期做兜底，否则这一列会对一大半的号显示「-」。
+function expireInfo(a) {
+  const now = Date.now();
+  if (a.expiresAt > 0) {
+    const days = Math.ceil((a.expiresAt - now) / 86400000);
+    if (days < 0) return { text: '已过期', cls: 'bad' };
+    return { text: days === 0 ? '今天到期' : `${days} 天后`, cls: days <= 3 ? 'warn' : '' };
+  }
+  if (a.tokenExp > 0) {
+    const days = Math.ceil((a.tokenExp - now) / 86400000);
+    if (days < 0) return { text: '令牌过期', cls: 'bad' };
+    return { text: `${days} 天后`, cls: '', title: `access_token 到期：${fmtTime(a.tokenExp)}` };
+  }
+  return { text: '-', cls: '' };
+}
+
+// 余额列：和参考图一样是「额度条 + 可用值」两行。
+// 小浣熊的号没有套餐上限可查，所以上面的条表示余额占全池最高余额的比例
+// （用来一眼看出哪些号快见底），下面那行才是真正的数字。
+function renderQuotaCell(a) {
+  const credits = a.credits;
+  const known = credits >= 0;
+  const peak = POOL.peakCredits || 1;
+  const pct = known ? Math.max(2, Math.min(100, (credits / peak) * 100)) : 0;
+  const low = known && POOL.creditStopBelow > 0 && credits <= POOL.creditStopBelow;
+  return `<div class="quota">
+    <div class="quota-row">
+      <span class="q-label">${known ? '余额' : '未知'}</span>
+      <span class="q-val ${low ? 'bad' : known ? 'ok' : 'dim'}">${known ? fmtCredits(credits) + ' 积分' : '未查询'}</span>
+    </div>
+    <span class="mini-bar ${low ? 'low' : ''}"><i style="width:${pct}%"></i></span>
+  </div>`;
+}
+
 function renderAccounts() {
+  // 余额条的参照系：全池已知余额的最大值。每次渲染前算一次，
+  // 避免每行都去遍历一遍列表。
+  POOL.peakCredits = STATE.accounts.reduce((m, a) => (a.credits > m ? a.credits : m), 0) || 1;
+  renderPoolStats();
   const tbody = $('accTable').querySelector('tbody');
-  if (!STATE.accounts.length) {
-    tbody.innerHTML = '<tr><td colspan="7" class="empty">还没有账号，去「添加账号」页导入</td></tr>';
+  const rows = filteredAccounts();
+  const total = STATE.accounts.length;
+
+  $('poolEmpty').hidden = rows.length > 0 || total === 0;
+  $('poolEmpty').textContent = total === 0 ? '还没有账号，去「添加账号」页导入' : '当前筛选下没有账号';
+  $('poolFootInfo').textContent = total === 0
+    ? '共 0 条'
+    : `共 ${total} 条${rows.length === total ? '（全部显示）' : ` · 筛选出 ${rows.length} 条`}`;
+
+  if (!rows.length) {
+    tbody.innerHTML = '';
+    syncSelUI();
     return;
   }
-  // 用服务端时区的今天（/api/status 的 checkin.today），否则浏览器与服务器时区不同时会误判「已签」。
-  const today = STATE.today;
-  tbody.innerHTML = STATE.accounts.map((a) => {
+
+  tbody.innerHTML = rows.map((a, i) => {
     const st = a.status || 'online';
-    // exhausted 且没有到期时间 = 积分低于阈值被暂停，等签到/余额回升，不是 402 硬耗尽
     const lowCredit = st === 'exhausted' && !a.coolUntil;
-    const stLabel = lowCredit ? '低积分暂停' : (STATUS_LABEL[st] || esc(st));
-    const cool = lowCredit
-      ? esc(a.coolReason || '-')
-      : (st === 'cooling' || st === 'exhausted'
-        ? `${fmtTime(a.coolUntil)} · ${esc(a.coolReason || '')}`
-        : esc(a.coolReason || '-'));
-    const checked = today && a.lastCheckinDay === today ? '✓ 已签' : (a.lastCheckinDay || '-');
-    return `<tr>
-      <td>${esc(a.name)}${a.enabled ? '' : ' <span class="tag">停用</span>'}</td>
-      <td title="${esc(a.uid)}">${esc(shortUID(a.uid))}</td>
-      <td><span class="dot ${esc(st)}"></span>${stLabel}</td>
-      <td title="${a.credits >= 0 ? a.credits : ''}">${fmtCredits(a.credits)}</td>
-      <td class="small">${cool}</td>
-      <td class="small">${esc(checked)}</td>
-      <td class="ops">
-        <button data-act="balance" data-id="${esc(a.id)}">查余额</button>
-        <button data-act="refresh" data-id="${esc(a.id)}">刷新</button>
-        <button data-act="checkin" data-id="${esc(a.id)}">签到</button>
-        <button data-act="toggle" data-id="${esc(a.id)}">${a.enabled ? '停用' : '启用'}</button>
-        <button data-act="delete" data-id="${esc(a.id)}" class="danger">删除</button>
+    const stLabel = lowCredit ? '低积分' : (STATUS_LABEL[st] || esc(st));
+    const cools = modelCoolsOf(a).filter((m) => m.until > Date.now());
+    const exp = expireInfo(a);
+    const checked = POOL.sel.has(a.id);
+
+    // 限流列：账号级冷却显示原因 + 剩余时间；只有模型级罚单时显示「N 个模型」。
+    let coolCell;
+    if (st === 'cooling' || (st === 'exhausted' && a.coolUntil)) {
+      coolCell = `<div class="coolbox warn">
+        <span class="cb-main">${esc(a.coolReason || '限流中')}</span>
+        <span class="cb-sub">${esc(fmtLeft(a.coolUntil || 0))}</span>
+      </div>`;
+    } else if (lowCredit) {
+      coolCell = `<div class="coolbox bad">
+        <span class="cb-main">${esc(a.coolReason || '积分低于阈值')}</span>
+        <span class="cb-sub">待余额恢复</span>
+      </div>`;
+    } else if (st === 'relogin') {
+      coolCell = `<div class="coolbox bad"><span class="cb-main">凭证失效</span><span class="cb-sub">需重新登录</span></div>`;
+    } else if (cools.length) {
+      coolCell = `<div class="coolbox info" title="点击查看限流明细">
+        <span class="cb-main">${cools.length} 个模型</span>
+        <span class="cb-sub">最早 ${esc(fmtLeft(Math.min(...cools.map((m) => m.until))))}</span>
+      </div>`;
+    } else if (a.deadReason) {
+      coolCell = `<div class="coolbox bad"><span class="cb-main">${esc(a.deadReason)}</span></div>`;
+    } else {
+      coolCell = '<span class="dim">—</span>';
+    }
+
+    return `<tr data-id="${esc(a.id)}" class="${checked ? 'sel' : ''}">
+      <td class="c-check"><input type="checkbox" class="row-check" ${checked ? 'checked' : ''}></td>
+      <td class="c-idx"><span class="idx">#${i + 1}</span></td>
+      <td class="c-name">
+        <div class="acc-name" title="${esc(a.uid)}">${esc(a.name || shortUID(a.uid))}</div>
+        <div class="acc-sub">${esc(shortUID(a.uid))}${a.note ? ' · ' + esc(a.note) : ''}</div>
+        ${a.deadReason ? `<div class="acc-sub bad">${esc(a.deadReason)}</div>` : ''}
+      </td>
+      <td class="c-enable">
+        <label class="switch" title="${a.enabled ? '点击停用' : '点击启用'}">
+          <input type="checkbox" class="row-enable" ${a.enabled ? 'checked' : ''}>
+          <span></span>
+        </label>
+      </td>
+      <td class="c-status"><span class="pill ${esc(st)}${lowCredit ? ' lowcredit' : ''}">
+        <i class="dot"></i>${stLabel}</span></td>
+      <td class="c-cool">${coolCell}</td>
+      <td class="c-expire"><span class="${exp.cls}" ${exp.title ? `title="${esc(exp.title)}"` : ''}>${esc(exp.text)}</span></td>
+      <td class="c-balance" title="${a.creditsAt ? '余额更新于 ' + fmtTime(a.creditsAt) : ''}">${renderQuotaCell(a)}</td>
+      <td class="c-ops">
+        <button class="ghost tiny" data-act="balance">余额</button>
+        <button class="ghost tiny" data-act="settings">设置</button>
+        <button class="ghost tiny more" data-act="more" title="更多操作">…</button>
       </td>
     </tr>`;
   }).join('');
 
-  tbody.querySelectorAll('button[data-act]').forEach((btn) => {
-    btn.addEventListener('click', () => accountAction(btn.dataset.act, btn.dataset.id));
+  bindRowEvents(tbody);
+  syncSelUI();
+}
+
+function bindRowEvents(tbody) {
+  tbody.querySelectorAll('tr[data-id]').forEach((tr) => {
+    const id = tr.dataset.id;
+
+    tr.querySelector('.row-check').addEventListener('change', (e) => {
+      if (e.target.checked) POOL.sel.add(id); else POOL.sel.delete(id);
+      tr.classList.toggle('sel', e.target.checked);
+      syncSelUI();
+    });
+
+    tr.querySelector('.row-enable').addEventListener('change', async (e) => {
+      const want = e.target.checked;
+      try {
+        await api('/api/accounts/' + encodeURIComponent(id), {
+          method: 'PATCH', body: JSON.stringify({ enabled: want }),
+        });
+        const acc = STATE.accounts.find((a) => a.id === id);
+        if (acc) acc.enabled = want;
+        toast(want ? '已启用' : '已停用');
+      } catch (err) {
+        e.target.checked = !want; // 失败回滚开关，别让界面显示成已生效
+        toast(err.message, true);
+      }
+      // 开关是乐观更新：先按本地状态重画统计，不重新拉列表，避免正在看的位置被刷掉。
+      renderPoolStats();
+    });
+
+    tr.querySelectorAll('button[data-act]').forEach((btn) => {
+      btn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        const act = btn.dataset.act;
+        if (act === 'more') openRowMenu(btn, id);
+        else if (act === 'settings') openAccountSettings(id);
+        else accountAction(act, id);
+      });
+    });
+
+    const coolBox = tr.querySelector('.coolbox.info');
+    if (coolBox) {
+      coolBox.addEventListener('click', () => openCoolDetail(coolBox, id));
+    }
   });
+}
+
+// 顶部筛选按钮上的数字：一直反映全量统计，不随筛选结果变化。
+function renderPoolStats() {
+  const total = STATE.accounts.length;
+  const enabled = STATE.accounts.filter((a) => a.enabled).length;
+  const limited = STATE.accounts.filter(isLimited).length;
+  const setB = (sel, vals) => {
+    const btns = document.querySelectorAll(sel + ' button');
+    btns.forEach((b, i) => {
+      const b2 = b.querySelector('b');
+      if (b2) b2.textContent = vals[i] ?? 0;
+    });
+  };
+  setB('#pfStatus', [total, enabled, total - enabled]);
+  setB('#pfCool', [total, total - limited, limited]);
+}
+
+function syncSelUI() {
+  const rows = filteredAccounts();
+  const selCount = POOL.sel.size;
+  const allChecked = rows.length > 0 && rows.every((a) => POOL.sel.has(a.id));
+  $('selAll').checked = allChecked;
+  $('selAllHead').checked = allChecked;
+  $('selAll').indeterminate = !allChecked && rows.some((a) => POOL.sel.has(a.id));
+  $('selAllHead').indeterminate = $('selAll').indeterminate;
+  $('selInfo').textContent = selCount
+    ? `已选 ${selCount} 个 · 共 ${rows.length} 个`
+    : `共 ${rows.length} 个`;
+  $('clearSelBtn').disabled = selCount === 0;
+  $('batchToggleBtn').disabled = selCount === 0;
+}
+
+function setSelectAll(on) {
+  const rows = filteredAccounts();
+  if (on) rows.forEach((a) => POOL.sel.add(a.id));
+  else rows.forEach((a) => POOL.sel.delete(a.id));
+  renderAccounts();
+}
+
+['selAll', 'selAllHead'].forEach((id) => {
+  $(id).addEventListener('change', (e) => setSelectAll(e.target.checked));
+});
+$('clearSelBtn').addEventListener('click', () => { POOL.sel.clear(); renderAccounts(); });
+
+// 筛选条：点击切换，再点一次回到「全部」。
+const FILTERS = {
+  pfStatus: 'status',
+  pfCool: 'cool',
+};
+Object.entries(FILTERS).forEach(([elId, key]) => {
+  $(elId).addEventListener('click', (e) => {
+    const btn = e.target.closest('button');
+    if (!btn) return;
+    const v = btn.dataset.v;
+    POOL[key] = POOL[key] === v && v !== 'all' ? 'all' : v;
+    $(elId).querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.v === POOL[key]));
+    renderAccounts();
+  });
+});
+
+$('pfSearch').addEventListener('input', (e) => { POOL.q = e.target.value; renderAccounts(); });
+$('foldFiltersBtn').addEventListener('click', () => {
+  POOL.fold = !POOL.fold;
+  $('poolToolbar').classList.toggle('folded', POOL.fold);
+  $('foldFiltersBtn').textContent = POOL.fold ? '展开' : '折叠';
+});
+
+// ---------- 弹层：限流明细 / 更多操作 / 账号设置 ----------
+// 用一个共享的浮层，点击别处或按 Esc 关闭；浮层挂在 body 上避免被表格的
+// overflow 裁掉（表格横向滚动 + 弹层是常见组合）。
+const POP = { el: null, anchor: null };
+
+function closePop() {
+  if (POP.el) { POP.el.remove(); POP.el = null; POP.anchor = null; }
+  document.removeEventListener('mousedown', onDocDown, true);
+  document.removeEventListener('keydown', onPopKey, true);
+}
+function onDocDown(e) {
+  if (POP.el && !POP.el.contains(e.target) && !(POP.anchor && POP.anchor.contains(e.target))) closePop();
+}
+function onPopKey(e) { if (e.key === 'Escape') closePop(); }
+
+function openPop(anchor, html, { width = 280 } = {}) {
+  closePop();
+  const el = document.createElement('div');
+  el.className = 'pop';
+  el.style.width = width + 'px';
+  el.innerHTML = html;
+  document.body.appendChild(el);
+
+  const r = anchor.getBoundingClientRect();
+  const w = width;
+  let left = r.right - w;
+  if (left < 8) left = 8;
+  if (left + w > window.innerWidth - 8) left = window.innerWidth - w - 8;
+  let top = r.bottom + 6;
+  // 下方放不下就翻到上方
+  const h = el.offsetHeight;
+  if (top + h > window.innerHeight - 8) top = Math.max(8, r.top - h - 6);
+  el.style.left = left + 'px';
+  el.style.top = top + 'px';
+
+  POP.el = el;
+  POP.anchor = anchor;
+  setTimeout(() => {
+    document.addEventListener('mousedown', onDocDown, true);
+    document.addEventListener('keydown', onPopKey, true);
+  }, 0);
+  return el;
+}
+
+function openCoolDetail(anchor, id) {
+  const acc = STATE.accounts.find((a) => a.id === id);
+  if (!acc) return;
+  const cools = modelCoolsOf(acc).filter((m) => m.until > Date.now());
+  // 每条明细压成三行内的紧凑块：模型名 + 恢复倒计时是主行，
+  // 原因单独一行截断（参考图里也是这么排的），「清除」固定贴右侧。
+  const rows = cools.map((m) => `
+    <div class="pd-row">
+      <div class="pd-main">${esc(m.model)}</div>
+      <div class="pd-meta">
+        <span class="pd-reason" title="${esc(m.reason || '')}">${esc(m.reason || '上游限流')}</span>
+        <span class="warn nowrap">${esc(fmtLeft(m.until))}</span>
+      </div>
+      <button class="ghost tiny pd-clear" data-uncool="${esc(m.model)}">清除</button>
+    </div>`).join('');
+
+  const el = openPop(anchor, `
+    <div class="pop-head">${esc(acc.name || shortUID(acc.uid))}</div>
+    <div class="pop-sub">限流明细</div>
+    <div class="pop-body">
+      ${rows || '<p class="hint">该账号当前没有模型级限流</p>'}
+      ${acc.coolUntil && acc.coolUntil > Date.now() ? `
+        <div class="pd-row">
+          <div class="pd-main">账号级冷却</div>
+          <div class="pd-meta"><span class="pd-reason">${esc(acc.coolReason || '')}</span>
+            <span class="warn nowrap">${esc(fmtLeft(acc.coolUntil))}</span></div>
+          <button class="ghost tiny pd-clear" data-uncool="">解除</button>
+        </div>` : ''}
+    </div>
+    <div class="pop-foot">
+      <span class="hint">${cools.length} 个模型限流中 · 到恢复时间自动解除</span>
+      <button class="ghost tiny" id="popUncoolAll">全部解除</button>
+    </div>`, { width: 330 });
+
+  el.querySelectorAll('[data-uncool]').forEach((b) => {
+    b.addEventListener('click', async () => {
+      try {
+        if (b.dataset.uncool) {
+          await api(`/api/accounts/${encodeURIComponent(id)}/uncool`, {
+            method: 'POST', body: JSON.stringify({ model: b.dataset.uncool }),
+          });
+        } else {
+          await api(`/api/accounts/${encodeURIComponent(id)}/uncool`, { method: 'POST', body: '{}' });
+        }
+        closePop();
+        toast('已解除限流');
+        await Promise.all([loadAccounts(), loadStatus()]);
+      } catch (e) { toast(e.message, true); }
+    });
+  });
+  el.querySelector('#popUncoolAll').addEventListener('click', async () => {
+    try {
+      for (const m of cools) {
+        await api(`/api/accounts/${encodeURIComponent(id)}/uncool`, {
+          method: 'POST', body: JSON.stringify({ model: m.model }),
+        });
+      }
+      // 账号级冷却也一起清，否则「全部解除」之后状态列仍显示冷却中。
+      await api(`/api/accounts/${encodeURIComponent(id)}/uncool`, { method: 'POST', body: '{}' });
+      closePop();
+      toast('已全部解除');
+      await Promise.all([loadAccounts(), loadStatus()]);
+    } catch (e) { toast(e.message, true); }
+  });
+}
+
+function openRowMenu(anchor, id) {
+  const acc = STATE.accounts.find((a) => a.id === id);
+  if (!acc) return;
+  const el = openPop(anchor, `
+    <div class="pop-menu">
+      <button data-m="balance">查余额</button>
+      <button data-m="refresh">刷新凭据</button>
+      <button data-m="checkin">签到</button>
+      <button data-m="uncool">解除冷却</button>
+      <button data-m="toggle">${acc.enabled ? '停用账号' : '启用账号'}</button>
+      <div class="sep"></div>
+      <button data-m="delete" class="danger">删除账号</button>
+    </div>`, { width: 160 });
+
+  el.querySelectorAll('[data-m]').forEach((b) => {
+    b.addEventListener('click', () => { closePop(); accountAction(b.dataset.m, id); });
+  });
+}
+
+function openAccountSettings(id) {
+  const acc = STATE.accounts.find((a) => a.id === id);
+  if (!acc) return;
+  // 账号 id 是 "acc-<hex>"，不含需要转义的字符；用属性遍历而不是拼选择器，
+  // 免得旧浏览器上 CSS.escape 不存在时整页脚本挂掉。
+  const row = [...document.querySelectorAll('tr[data-id]')].find((tr) => tr.dataset.id === id);
+  const anchor = (row && row.querySelector('.c-ops')) || document.body;
+  const el = openPop(anchor, `
+    <div class="pop-head">账号设置</div>
+    <div class="pop-sub">${esc(acc.name || '')} · ${esc(shortUID(acc.uid))}</div>
+    <div class="pop-body">
+      <div class="field"><label>备注名</label><input id="asName" value="${esc(acc.name || '')}"></div>
+      <div class="field"><label>备注</label><input id="asNote" value="${esc(acc.note || '')}" placeholder="可留空"></div>
+      <div class="field"><label>优先级</label><input id="asPriority" type="number" step="1" value="${Number(acc.priority) || 0}"></div>
+      <p class="hint">uid：${esc(acc.uid)}<br>最近一次使用：${acc.lastUsed ? fmtTime(acc.lastUsed) : '从未'}<br>
+        今日签到：${STATE.today && acc.lastCheckinDay === STATE.today ? '已签到' : esc(acc.lastCheckinDay || '未签到')}</p>
+    </div>
+    <div class="pop-foot">
+      <button class="ghost tiny" id="asCancel">取消</button>
+      <button class="primary tiny" id="asSave">保存</button>
+    </div>`, { width: 320 });
+
+  el.querySelector('#asCancel').addEventListener('click', closePop);
+  el.querySelector('#asSave').addEventListener('click', async () => {
+    try {
+      await api('/api/accounts/' + encodeURIComponent(id), {
+        method: 'PATCH',
+        body: JSON.stringify({
+          name: el.querySelector('#asName').value.trim(),
+          note: el.querySelector('#asNote').value.trim(),
+          priority: Math.round(Number(el.querySelector('#asPriority').value) || 0),
+        }),
+      });
+      closePop();
+      toast('已保存');
+      await Promise.all([loadAccounts(), loadStatus()]);
+    } catch (e) { toast(e.message, true); }
+  });
+}
+
+// 轻提示：页面右下角一行，3 秒淡出。比 alert 打断少，适合行内操作。
+let toastTimer = null;
+function toast(msg, isErr = false) {
+  let el = $('toast');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'toast';
+    document.body.appendChild(el);
+  }
+  el.textContent = msg;
+  el.className = 'toast show' + (isErr ? ' err' : '');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.className = 'toast'; }, 3000);
 }
 
 async function accountAction(act, id) {
@@ -225,37 +643,96 @@ async function accountAction(act, id) {
     if (act === 'delete') {
       if (!confirm(`确认删除账号「${acc.name}」？`)) return;
       await api('/api/accounts/' + encodeURIComponent(id), { method: 'DELETE' });
-      $('tableMsg').textContent = '已删除';
+      toast('已删除');
     } else if (act === 'toggle') {
       await api('/api/accounts/' + encodeURIComponent(id), {
         method: 'PATCH', body: JSON.stringify({ enabled: !acc.enabled }),
       });
-      $('tableMsg').textContent = acc.enabled ? '已停用' : '已启用';
+      toast(acc.enabled ? '已停用' : '已启用');
+    } else if (act === 'uncool') {
+      const r = await api(`/api/accounts/${encodeURIComponent(id)}/uncool`, { method: 'POST', body: '{}' });
+      toast(r.message || '已解除冷却');
+    } else if (act === 'balance') {
+      const r = await api(`/api/accounts/${encodeURIComponent(id)}/balance`, { method: 'POST' });
+      toast(`余额 ${fmtCredits(r.credits)} 积分`);
     } else {
       const r = await api(`/api/accounts/${encodeURIComponent(id)}/${act}`, { method: 'POST' });
-      $('tableMsg').textContent = r.message || (act === 'balance' ? `积分 ${r.credits}` : '完成');
+      toast(r.message || '完成');
     }
     await Promise.all([loadAccounts(), loadStatus()]);
   } catch (e) {
+    toast(e.message, true);
     $('tableMsg').textContent = e.message;
   }
 }
 
+// ---------- 批量操作 ----------
+$('batchToggleBtn').addEventListener('click', (e) => {
+  const el = openPop(e.currentTarget, `
+    <div class="pop-menu">
+      <button data-b="enable">批量启用</button>
+      <button data-b="disable">批量停用</button>
+      <button data-b="checkin">批量签到</button>
+      <button data-b="uncool">批量解除冷却</button>
+      <div class="sep"></div>
+      <button data-b="delete" class="danger">批量删除</button>
+    </div>`, { width: 170 });
+  el.querySelectorAll('[data-b]').forEach((b) => {
+    b.addEventListener('click', () => { closePop(); batchAction(b.dataset.b); });
+  });
+});
+
+async function batchAction(action) {
+  const ids = [...POOL.sel];
+  if (!ids.length) return;
+  const label = {
+    enable: '启用', disable: '停用', checkin: '签到', uncool: '解除冷却', delete: '删除',
+  }[action] || action;
+  if (action === 'delete' && !confirm(`确认删除选中的 ${ids.length} 个账号？不可恢复。`)) return;
+  if (action === 'checkin' && !confirm(`对选中的 ${ids.length} 个账号执行签到？`)) return;
+  $('tableMsg').textContent = `${label}中…`;
+  try {
+    const r = await api('/api/accounts/batch', {
+      method: 'POST', body: JSON.stringify({ action, ids }),
+    });
+    toast(`${label}完成：成功 ${r.done || 0}${r.failed ? `，失败 ${r.failed}` : ''}`);
+    if (action === 'delete') POOL.sel.clear();
+    await Promise.all([loadAccounts(), loadStatus()]);
+  } catch (e) {
+    toast(e.message, true);
+    $('tableMsg').textContent = e.message;
+  }
+}
+
+// ---------- 查询余额 ----------
+async function queryBalances(ids = []) {
+  const n = ids.length || filteredAccounts().filter((a) => a.enabled).length;
+  if (!n) { toast('没有可查询的账号'); return; }
+  $('tableMsg').textContent = `正在查询 ${n} 个账号的余额…`;
+  $('refreshAllCreditsBtn').disabled = true;
+  try {
+    const r = await api('/api/accounts/balances', {
+      method: 'POST', body: JSON.stringify({ ids }),
+    });
+    toast(`余额查询完成：成功 ${r.done || 0}${r.failed ? `，失败 ${r.failed}` : ''}`);
+    $('tableMsg').textContent = '';
+    await Promise.all([loadAccounts(), loadStatus()]);
+  } catch (e) {
+    toast(e.message, true);
+    $('tableMsg').textContent = e.message;
+  } finally {
+    $('refreshAllCreditsBtn').disabled = false;
+  }
+}
+
+$('refreshAllCreditsBtn').addEventListener('click', () => {
+  // 有勾选就只查勾选的，没勾选查全部启用账号——和参考图的「查询余额」一致。
+  queryBalances([...POOL.sel]);
+});
+
 $('refreshListBtn').addEventListener('click', async () => {
   $('tableMsg').textContent = '';
   await Promise.all([loadAccounts(), loadStatus()]);
-});
-
-$('checkinAllBtn').addEventListener('click', async () => {
-  if (!confirm('对全部启用账号执行签到？')) return;
-  $('tableMsg').textContent = '签到中…';
-  try {
-    const r = await api('/api/checkin/all', { method: 'POST' });
-    $('tableMsg').textContent = `完成：成功 ${r.done || 0} / 共 ${r.total || 0}`;
-    await Promise.all([loadAccounts(), loadStatus()]);
-  } catch (e) {
-    $('tableMsg').textContent = e.message;
-  }
 });
 
 $('exportBtn').addEventListener('click', () => {
@@ -443,6 +920,8 @@ async function loadSettings() {
     $('setModelCooldown').value = String(s.modelCooldown !== false);
     $('setCreditStopEnable').value = String(!!s.creditStopEnable);
     $('setCreditStopBelow').value = s.creditStopBelow ?? 0;
+    // 号池页的余额条要标红「低于暂停阈值」的号，这里顺手把阈值带过去。
+    POOL.creditStopBelow = s.creditStopEnable ? (s.creditStopBelow ?? 0) : 0;
     $('setCreditResumeAbove').value = s.creditResumeAbove ?? 0;
   } catch (e) {
     $('settingsMsg').textContent = e.message;
@@ -590,31 +1069,348 @@ $('saveLogSettingsBtn').addEventListener('click', async () => {
   }
 });
 
-// ---------- 日志 ----------
-async function loadLogs() {
-  try {
-    const r = await api('/api/logs');
-    const tbody = $('logTable').querySelector('tbody');
-    const logs = r.logs || [];
-    if (!logs.length) {
-      tbody.innerHTML = '<tr><td colspan="7" class="empty">还没有调用记录</td></tr>';
-      return;
-    }
-    tbody.innerHTML = logs.map((l) => `<tr>
-      <td class="small">${fmtTime(l.TS)}</td>
-      <td>${esc(l.API)}</td>
-      <td class="small">${esc(l.Model)}</td>
-      <td class="${l.Status >= 400 ? 'bad' : 'ok'}">${l.Status}</td>
-      <td class="small">${l.TotalTokens || 0}</td>
-      <td class="small">${l.MS || 0}ms</td>
-      <td class="small err">${esc(l.Error || '')}</td>
-    </tr>`).join('');
-  } catch (e) {
-    $('logTableMsg').textContent = e.message;
+// ---------- 调用日志 ----------
+// 服务端分页 + 筛选：日志可能有几十万条，一次只取一页，筛选条件交给 SQL。
+// 条件全部放在 LOG 里，翻页只改 page，切页回来也能保持上次的视图。
+const LOG = {
+  range: 'today', status: '', failedOnly: false, account: '', model: '', api: '', q: '',
+  page: 1, pageSize: 50, total: 0, failed: 0, pages: 1, seq: 0, facetsLoaded: false,
+};
+
+function logRangeBounds() {
+  // 区间按浏览器本地时区的自然日切分，和用户看到的「今天」一致。
+  const now = new Date();
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const day = 86400000;
+  switch (LOG.range) {
+    case 'today': return { since: startOfToday, until: 0, label: '今天' };
+    case 'yesterday': return { since: startOfToday - day, until: startOfToday, label: '昨天' };
+    case '7d': return { since: startOfToday - 6 * day, until: 0, label: '近 7 天' };
+    case '30d': return { since: startOfToday - 29 * day, until: 0, label: '近 30 天' };
+    default: return { since: 0, until: 0, label: '全部时间' };
   }
 }
 
-$('loadLogsBtn').addEventListener('click', loadLogs);
+function fmtClock(ms) {
+  if (!ms) return '-';
+  const d = new Date(ms);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+function fmtDuration(ms) {
+  const v = Number(ms) || 0;
+  if (v < 1000) return `${v}毫秒`;
+  if (v < 60000) return `${(v / 1000).toFixed(1)}秒`;
+  const m = Math.floor(v / 60000);
+  return `${m}分${Math.round((v % 60000) / 1000)}秒`;
+}
+
+// 大数字压缩成「1.2万 / 3.4k」，避免长数字把列撑开。
+function fmtNum(n) {
+  const v = Number(n) || 0;
+  if (v >= 10000) return (v / 10000).toFixed(1).replace(/\.0$/, '') + '万';
+  return String(v);
+}
+
+// 用量列：主行是速度（输出 token / 耗时），副行是输入输出明细。
+// 真实请求的速度在几十到几百 tok/s，离线补写的脏数据可能算出离谱值，所以压成万/k。
+function fmtTokens(l) {
+  const total = Number(l.totalTokens) || 0;
+  const p = Number(l.promptTokens) || 0;
+  const c = Number(l.completionTokens) || 0;
+  if (!total && !p && !c) return '<span class="dim">-</span>';
+  const ms = Number(l.ms) || 0;
+  const head = ms > 0 && c > 0
+    ? `${fmtNum(Math.round(c / (ms / 1000)))} tok/s`
+    : `${fmtNum(total)} tok`;
+  return `<div class="tok"><b>${head}</b><span>输入 ${fmtNum(p)} · 输出 ${fmtNum(c)}</span></div>`;
+}
+
+function logStatusCell(l) {
+  const code = Number(l.status) || 0;
+  if (code >= 500) return `<span class="lpill bad">${code || 'ERR'}</span>`;
+  if (code >= 400) return `<span class="lpill warn">${code}</span>`;
+  if (code >= 200) return `<span class="lpill ok">${code}</span>`;
+  return `<span class="lpill">${code || '-'}</span>`;
+}
+
+function logAccountCell(l) {
+  const name = l.accountName || '';
+  const uid = l.accountUID || l.accountId || '';
+  if (!name && !uid) return '<span class="dim">-</span>';
+  return `<div class="log-acc">
+    <div class="acc-name" title="${esc(uid)}">${esc(name || shortUID(uid))}</div>
+    <div class="acc-sub">${esc(shortUID(uid))}</div>
+  </div>`;
+}
+
+function logQuery() {
+  const b = logRangeBounds();
+  const p = new URLSearchParams();
+  if (b.since) p.set('since', b.since);
+  if (b.until) p.set('until', b.until);
+  const status = LOG.failedOnly ? 'fail' : LOG.status;
+  if (status) p.set('status', status);
+  if (LOG.account) p.set('account', LOG.account);
+  if (LOG.model) p.set('model', LOG.model);
+  if (LOG.api) p.set('api', LOG.api);
+  if (LOG.q.trim()) p.set('q', LOG.q.trim());
+  p.set('page', LOG.page);
+  p.set('pageSize', LOG.pageSize);
+  return p;
+}
+
+function renderLogRows(rows) {
+  const tbody = $('logTable').querySelector('tbody');
+  $('logEmpty').hidden = rows.length > 0;
+  $('logEmpty').textContent = '当前筛选下没有调用记录';
+  if (!rows.length) { tbody.innerHTML = ''; return; }
+  tbody.innerHTML = rows.map((l) => {
+    const err = l.error || '';
+    return `<tr data-id="${esc(l.id)}" class="${l.status >= 400 ? 'is-fail' : ''}">
+      <td class="lc-time"><div class="log-time">${esc(fmtClock(l.ts))}</div></td>
+      <td class="lc-account">${logAccountCell(l)}</td>
+      <td class="lc-status">${logStatusCell(l)}</td>
+      <td class="lc-model"><div class="log-model" title="${esc(l.model)}">${esc(l.model || '-')}</div></td>
+      <td class="lc-api"><span class="tag">${esc(l.api || '-')}</span></td>
+      <td class="lc-ms"><span class="log-ms">${esc(fmtDuration(l.ms))}</span></td>
+      <td class="lc-tokens">${fmtTokens(l)}</td>
+      <td class="lc-error"><div class="log-err" title="${esc(err)}">${esc(err) || '<span class="dim">-</span>'}</div></td>
+      <td class="lc-detail"><button class="ghost tiny log-detail" data-id="${esc(l.id)}">详情</button></td>
+    </tr>`;
+  }).join('');
+}
+
+function renderLogFoot() {
+  const pages = Math.max(1, LOG.pages);
+  const b = logRangeBounds();
+  const failText = LOG.failed > 0 ? ` · <span class="bad">${LOG.failed} 失败</span>` : '';
+  $('logCount').innerHTML = `${LOG.total} 条${failText}`;
+  $('logRangeInfo').innerHTML = `${esc(b.label)} · 共 ${LOG.total} 条${failText}`;
+  $('logPageInfo').textContent = `第 ${LOG.page} / ${pages} 页`;
+  $('lfPrev').disabled = LOG.page <= 1;
+  $('lfNext').disabled = LOG.page >= pages;
+  $('lfJump').max = String(pages);
+  if (document.activeElement !== $('lfJump')) $('lfJump').value = String(LOG.page);
+}
+
+async function loadLogs() {
+  const seq = ++LOG.seq;
+  $('logTableMsg').textContent = '';
+  try {
+    const r = await api('/api/logs?' + logQuery().toString());
+    if (seq !== LOG.seq) return; // 快速翻页/改筛选时丢弃过期响应
+    LOG.total = r.total || 0;
+    LOG.failed = r.failed || 0;
+    LOG.pages = r.pages || 1;
+    // 数据变少（被清理或换了筛选）时当前页可能越界，退到最后一页重取。
+    if (LOG.page > LOG.pages) { LOG.page = LOG.pages; return loadLogs(); }
+    LOG.page = r.page || LOG.page;
+    LOG_ROWS = r.logs || [];
+    renderLogRows(LOG_ROWS);
+    renderLogFoot();
+  } catch (e) {
+    if (seq === LOG.seq) $('logTableMsg').textContent = e.message;
+  }
+}
+
+// 筛选下拉依赖当前号池和历史流水里的取值，数据少时带来即可。
+async function ensureLogFacets() {
+  try {
+    const [a, f] = await Promise.all([
+      api('/api/accounts'),
+      LOG.facetsLoaded ? Promise.resolve(null) : api('/api/logs/facets'),
+    ]);
+    const accSel = $('lfAccount');
+    const keep = accSel.value;
+    accSel.innerHTML = '<option value="">全部账号</option>' + (a.accounts || []).map((x) =>
+      `<option value="${esc(x.id)}">${esc(x.name || shortUID(x.uid))}</option>`).join('');
+    accSel.value = keep;
+
+    if (f) {
+      const fill = (id, items, keepV) => {
+        const sel = $(id);
+        sel.innerHTML = `<option value="">全部${id === 'lfModel' ? '模型' : '接口'}</option>` +
+          items.map((v) => `<option value="${esc(v)}">${esc(v)}</option>`).join('');
+        sel.value = keepV;
+      };
+      fill('lfModel', f.models || [], $('lfModel').value);
+      fill('lfAPI', f.apis || [], $('lfAPI').value);
+      LOG.facetsLoaded = true;
+    }
+  } catch { /* 下拉拉不到不影响主列表 */ }
+}
+
+function gotoLogPage(p) {
+  LOG.page = Math.max(1, Math.min(LOG.pages || 1, p));
+  loadLogs();
+}
+
+// 任一筛选变化都回到第 1 页，否则会停在一个不存在的页上。
+function applyLogFilter() {
+  LOG.page = 1;
+  loadLogs();
+}
+
+// 筛选控件是用户自己改的，不回写 value，否则选中的过滤条件没法点「取消」。
+// 只有重置时统一同步一次。
+function syncLogFilterUI() {
+  document.querySelectorAll('#lfRange button').forEach((b) => b.classList.toggle('on', b.dataset.v === LOG.range));
+  $('lfStatus').value = LOG.status;
+  $('lfAccount').value = LOG.account;
+  $('lfModel').value = LOG.model;
+  $('lfAPI').value = LOG.api;
+  $('lfFailedOnly').checked = LOG.failedOnly;
+  $('lfSearch').value = LOG.q;
+}
+
+document.querySelectorAll('#lfRange button').forEach((b) => {
+  b.addEventListener('click', () => {
+    LOG.range = b.dataset.v;
+    document.querySelectorAll('#lfRange button').forEach((x) => x.classList.toggle('on', x === b));
+    applyLogFilter();
+  });
+});
+$('lfStatus').addEventListener('change', () => { LOG.status = $('lfStatus').value; applyLogFilter(); });
+$('lfAccount').addEventListener('change', () => { LOG.account = $('lfAccount').value; applyLogFilter(); });
+$('lfModel').addEventListener('change', () => { LOG.model = $('lfModel').value; applyLogFilter(); });
+$('lfAPI').addEventListener('change', () => { LOG.api = $('lfAPI').value; applyLogFilter(); });
+$('lfFailedOnly').addEventListener('change', () => { LOG.failedOnly = $('lfFailedOnly').checked; applyLogFilter(); });
+$('lfPageSize').addEventListener('change', () => { LOG.pageSize = Number($('lfPageSize').value) || 50; applyLogFilter(); });
+$('lfPrev').addEventListener('click', () => gotoLogPage(LOG.page - 1));
+$('lfNext').addEventListener('click', () => gotoLogPage(LOG.page + 1));
+$('lfJump').addEventListener('change', () => gotoLogPage(Number($('lfJump').value) || 1));
+$('lfReset').addEventListener('click', () => {
+  Object.assign(LOG, { range: 'today', status: '', failedOnly: false, account: '', model: '', api: '', q: '' });
+  syncLogFilterUI();
+  applyLogFilter();
+});
+let logSearchTimer = null;
+$('lfSearch').addEventListener('input', () => {
+  clearTimeout(logSearchTimer);
+  const v = $('lfSearch').value;
+  logSearchTimer = setTimeout(() => { LOG.q = v; applyLogFilter(); }, 300);
+});
+// 回车立刻查，不再等防抖
+$('lfSearch').addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter') return;
+  clearTimeout(logSearchTimer);
+  LOG.q = $('lfSearch').value;
+  applyLogFilter();
+});
+// 行内「详情」用事件委托：分页重渲染后不需要重新绑定
+$('logTable').addEventListener('click', (e) => {
+  const btn = e.target.closest('.log-detail');
+  if (btn) openLogDetail(btn);
+});
+
+$('logRefreshBtn').addEventListener('click', () => {
+  LOG.facetsLoaded = false;
+  ensureLogFacets().then(() => loadLogs());
+});
+
+// 自动刷新：只在「还在日志页 + 标签页可见」时轮询，切走或最小化就停，
+// 既不白烧请求，也不会在别的页面上把后台刷成一片红。
+const AUTO = { on: false, sec: 10, timer: null, inflight: false };
+
+function autoRefreshTick() {
+  // 上一次还没回来就跳过本轮，避免慢网络下请求叠起来。
+  if (!AUTO.on || AUTO.inflight || STATE.page !== 'logs' || document.hidden) return;
+  AUTO.inflight = true;
+  Promise.resolve(loadLogs()).finally(() => { AUTO.inflight = false; });
+}
+
+function syncAutoRefresh() {
+  clearInterval(AUTO.timer);
+  AUTO.timer = null;
+  if (AUTO.on) AUTO.timer = setInterval(autoRefreshTick, AUTO.sec * 1000);
+  $('lfAutoDot').classList.toggle('on', AUTO.on);
+  localStorage.setItem('logAutoRefresh', JSON.stringify({ on: AUTO.on, sec: AUTO.sec }));
+  // 刚打开时先补一次，不用干等一个周期
+  if (AUTO.on) autoRefreshTick();
+}
+
+$('lfAuto').addEventListener('change', () => { AUTO.on = $('lfAuto').checked; syncAutoRefresh(); });
+$('lfAutoSec').addEventListener('change', () => {
+  AUTO.sec = Number($('lfAutoSec').value) || 10;
+  syncAutoRefresh();
+});
+
+// 从后台切回来时立刻补一次，而不是等下一个周期。
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && AUTO.on) autoRefreshTick();
+});
+
+// 恢复上次的开关状态（默认关闭，避免一进来就打后端）。
+try {
+  const saved = JSON.parse(localStorage.getItem('logAutoRefresh') || '{}');
+  if (saved.on) {
+    AUTO.on = true;
+    AUTO.sec = Number(saved.sec) || 10;
+    $('lfAuto').checked = true;
+    $('lfAutoSec').value = String(AUTO.sec);
+  }
+} catch { /* 存储被清或格式坏了就用默认值 */ }
+syncAutoRefresh();
+
+// 「清理」不在这里直接删数据：跳到运行日志页的清理入口，那里有确认和策略说明。
+$('loadLogsBtn').addEventListener('click', () => {
+  switchPage('syslogs');
+  toast('已跳到运行日志的清理入口');
+});
+
+// 列设置：允许把不常看的列藏起来，选择存在 localStorage。
+const LOG_COLS = [['time', '时间'], ['account', '账号'], ['status', '状态'], ['model', '模型'],
+  ['api', '接口'], ['ms', '用时'], ['tokens', '用量'], ['error', '错误']];
+const LOG_HIDDEN = new Set(JSON.parse(localStorage.getItem('logHiddenCols') || '[]'));
+
+function applyLogCols() {
+  LOG_COLS.forEach(([k]) => $('logTable').classList.toggle('hide-' + k, LOG_HIDDEN.has(k)));
+  localStorage.setItem('logHiddenCols', JSON.stringify([...LOG_HIDDEN]));
+}
+applyLogCols();
+
+$('logColumnsBtn').addEventListener('click', (e) => {
+  const html = `<div class="pop-menu">
+    ${LOG_COLS.map(([k, label]) => `<label class="pop-check">
+      <input type="checkbox" data-col="${k}" ${LOG_HIDDEN.has(k) ? '' : 'checked'}>
+      <span>${label}</span></label>`).join('')}
+  </div>`;
+  const el = openPop(e.currentTarget, html, { width: 160 });
+  el.querySelectorAll('[data-col]').forEach((cb) => {
+    cb.addEventListener('change', () => {
+      if (cb.checked) LOG_HIDDEN.delete(cb.dataset.col); else LOG_HIDDEN.add(cb.dataset.col);
+      applyLogCols();
+    });
+  });
+});
+
+// 详情弹层：单条请求的完整信息，错误全文在这里展开（表格里只显示一行）。
+let LOG_ROWS = [];
+function openLogDetail(anchor) {
+  const id = anchor.dataset.id;
+  const l = LOG_ROWS.find((x) => String(x.id) === String(id));
+  if (!l) return;
+  const kv = (k, v, cls = '') => `<div class="ld-row"><span class="ld-k">${k}</span><span class="ld-v ${cls}">${v}</span></div>`;
+  openPop(anchor, `
+    <div class="pop-head">请求详情</div>
+    <div class="pop-sub">${esc(fmtClock(l.ts))} · ${esc(l.model || '-')}</div>
+    <div class="pop-body">
+      ${kv('状态', logStatusCell(l))}
+      ${kv('接口', esc(l.api || '-'))}
+      ${kv('账号', esc(l.accountName || shortUID(l.accountUID || l.accountId) || '-'))}
+      ${kv('UID', esc(l.accountUID || l.accountId || '-'))}
+      ${kv('用时', esc(fmtDuration(l.ms)))}
+      ${kv('输入 token', String(l.promptTokens || 0))}
+      ${kv('输出 token', String(l.completionTokens || 0))}
+      ${kv('总 token', String(l.totalTokens || 0))}
+      ${l.error ? `<div class="ld-row col"><span class="ld-k">错误</span><pre class="ld-err">${esc(l.error)}</pre></div>` : ''}
+    </div>
+    <div class="pop-foot"><span class="hint">#${esc(l.id)}</span>
+      <button class="ghost tiny" id="ldClose">关闭</button></div>`, { width: 380 });
+  document.getElementById('ldClose').addEventListener('click', closePop);
+}
 
 // ---------- 运行日志（文件 + 自动清理） ----------
 function fmtSize(n) {

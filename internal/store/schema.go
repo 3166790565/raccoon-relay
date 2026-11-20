@@ -79,6 +79,7 @@ var schema = []string{
 		error             TEXT NOT NULL DEFAULT ''
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_usage_ts ON usage_logs(ts)`,
+	`CREATE INDEX IF NOT EXISTS idx_usage_account ON usage_logs(account_id, id)`,
 
 	`CREATE TABLE IF NOT EXISTS settings (
 		key   TEXT PRIMARY KEY,

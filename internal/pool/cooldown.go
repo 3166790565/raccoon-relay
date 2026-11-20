@@ -2,6 +2,7 @@ package pool
 
 import (
 	"context"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -35,8 +36,19 @@ type CooldownBook struct {
 }
 
 type modelCool struct {
-	until int64
-	hits  int64
+	accID  string // 原始大小写，内存 key 统一小写，展示时要还原
+	model  string // 原始大小写，用于面板展示
+	until  int64
+	hits   int64
+	reason string
+}
+
+// ModelCoolInfo 是面板上「限流」列的一条明细。
+type ModelCoolInfo struct {
+	Model  string `json:"model"`
+	Until  int64  `json:"until"`
+	Reason string `json:"reason"`
+	Hits   int64  `json:"hits"`
 }
 
 func NewCooldownBook(st *store.Store, modelCooldownEnabled bool) *CooldownBook {
@@ -74,10 +86,35 @@ func (c *CooldownBook) Hydrate(ctx context.Context) {
 	}
 	c.mu.Lock()
 	for _, r := range rows {
-		c.models[coolKey(r.AccountID, r.Model)] = modelCool{until: r.Until, hits: r.Hits}
+		c.models[coolKey(r.AccountID, r.Model)] = modelCool{
+			accID: r.AccountID, model: r.Model, until: r.Until, hits: r.Hits, reason: r.Reason,
+		}
 	}
 	c.hydrated = true
 	c.mu.Unlock()
+}
+
+// ModelCooldownsOf 返回某个账号当前仍在冷却中的「账号×模型」明细。
+// 已到期的记录不返回：它们只是失败链的历史，不该再显示成「限流中」。
+func (c *CooldownBook) ModelCooldownsOf(accID string) []ModelCoolInfo {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := time.Now().UnixMilli()
+	var out []ModelCoolInfo
+	for _, m := range c.models {
+		if m.until <= now || !strings.EqualFold(m.accID, accID) {
+			continue
+		}
+		out = append(out, ModelCoolInfo{Model: m.model, Until: m.until, Reason: m.reason, Hits: m.hits})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Until < out[j].Until })
+	return out
+}
+
+// ClearModelNow 手动解除一条「账号×模型」冷却，同时清空失败链。
+// 面板上的「清除」用它——用户比阶梯算法更清楚那个模型是不是真的还能用。
+func (c *CooldownBook) ClearModelNow(ctx context.Context, accID, model string) {
+	c.ClearModel(ctx, accID, model)
 }
 
 func (c *CooldownBook) IsModelCooled(accID, model string) bool {
@@ -140,7 +177,7 @@ func (c *CooldownBook) CoolModel(ctx context.Context, accID, model, reason strin
 		}
 	}
 	delay := modelCoolDelay(hits)
-	m := modelCool{until: now + delay.Milliseconds(), hits: hits + 1}
+	m := modelCool{accID: accID, model: model, until: now + delay.Milliseconds(), hits: hits + 1, reason: reason}
 	c.models[k] = m
 	// 过期的失败链在这里顺手清掉，免得 map 只增不减。
 	// 注意每个 key 都要自己判过期（不能像以前那样依赖 IsModelCooled 删除——

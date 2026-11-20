@@ -5,10 +5,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // Delta 是流式增量。Reasoning 单独拆出来，便于 Anthropic 侧映射成 thinking 块。
@@ -144,9 +146,13 @@ func (c *Client) OpenChat(ctx context.Context, req ChatRequest) (*ChatStream, er
 	if err != nil {
 		return nil, err
 	}
+	// 流式响应用「无数据空闲超时」管：每秒都可能来帧，但整条流可能跑几十分钟。
+	// 这里只负责在空闲超期时取消请求，计时由 ChatStream 在每次读到数据后重置。
+	streamCtx, cancel := context.WithCancel(ctx)
 	h := chatHeaders(req.Token, req.IDN, req.Session, NewTurnID(), titleTrim(req.Title))
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url(PathChat), bytes.NewReader(raw))
+	httpReq, err := http.NewRequestWithContext(streamCtx, http.MethodPost, c.url(PathChat), bytes.NewReader(raw))
 	if err != nil {
+		cancel()
 		return nil, err
 	}
 	for k, v := range h {
@@ -154,32 +160,50 @@ func (c *Client) OpenChat(ctx context.Context, req ChatRequest) (*ChatStream, er
 	}
 	resp, err := c.HTTP.Do(httpReq)
 	if err != nil {
+		cancel()
 		return nil, &UpstreamError{Status: 0, Message: "上游连接失败: " + err.Error()}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 		resp.Body.Close()
+		cancel()
 		return nil, &UpstreamError{Status: resp.StatusCode, Message: upstreamErrText(resp.StatusCode, body)}
 	}
 	sc := bufio.NewScanner(resp.Body)
 	// 单帧上限 4MB：图片/长工具参数偶尔会撑到几百 KB
 	sc.Buffer(make([]byte, 0, 64<<10), 4<<20)
-	return &ChatStream{resp: resp, scanner: sc}, nil
+	s := &ChatStream{resp: resp, scanner: sc, cancel: cancel, parent: ctx, idle: c.IdleTimeout}
+	if s.idle > 0 {
+		s.timer = time.AfterFunc(s.idle, cancel)
+	}
+	return s, nil
 }
 
 type ChatStream struct {
 	resp    *http.Response
 	scanner *bufio.Scanner
-	seen    bool
-	err     error
+	cancel  context.CancelFunc
+	// parent 是调用方的 ctx；它被取消说明是客户端断开，不是上游空闲。
+	parent context.Context
+	// idle>0 时，timer 在空闲超期后取消请求；每读到一帧就重置。
+	idle  time.Duration
+	timer *time.Timer
+	seen  bool
+	err   error
 }
 
 // Seen 表示已经产出过内容，此后失败不能换号重试。
 func (s *ChatStream) Seen() bool { return s.seen }
 
 func (s *ChatStream) Close() {
+	if s.timer != nil {
+		s.timer.Stop()
+	}
 	if s.resp != nil && s.resp.Body != nil {
 		s.resp.Body.Close()
+	}
+	if s.cancel != nil {
+		s.cancel()
 	}
 }
 
@@ -189,6 +213,10 @@ func (s *ChatStream) Next() (*ChatEvent, error) {
 		return nil, s.err
 	}
 	for s.scanner.Scan() {
+		// 收到任何数据就说明上游还活着，重置空闲计时
+		if s.timer != nil {
+			s.timer.Reset(s.idle)
+		}
 		line := strings.TrimRight(s.scanner.Text(), "\r")
 		if line == "" || strings.HasPrefix(line, ":") {
 			continue
@@ -261,7 +289,12 @@ func (s *ChatStream) Next() (*ChatEvent, error) {
 		}
 	}
 	if err := s.scanner.Err(); err != nil {
-		s.err = &UpstreamError{Status: 0, Message: "上游流读取中断: " + err.Error()}
+		msg := "上游流读取中断: " + err.Error()
+		if s.idle > 0 && errors.Is(err, context.Canceled) && (s.parent == nil || s.parent.Err() == nil) {
+			// 取消只能来自我们自己的空闲计时器（客户端断开走的是父 ctx，读体会直接报错）
+			msg = fmt.Sprintf("上游超过 %d 秒无数据，已断开", int(s.idle.Seconds()))
+		}
+		s.err = &UpstreamError{Status: 0, Message: msg}
 		return nil, s.err
 	}
 	return nil, io.EOF

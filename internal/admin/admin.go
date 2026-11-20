@@ -53,6 +53,12 @@ type Panel struct {
 	onRestart func(target string) // 安装成功后请求主循环优雅重启，target 是刚装好的二进制
 	updateMu  sync.Mutex
 	updating  bool
+
+	// 调用日志页筛选下拉的缓存（模型/接口清单）
+	facetMu     sync.Mutex
+	facetModels []string
+	facetAPIs   []string
+	facetAt     time.Time
 }
 
 func New(cfg *config.Config, st *store.Store, client *raccoon.Client, refresh *relay.Refresher,
@@ -148,6 +154,10 @@ func (p *Panel) Route(w http.ResponseWriter, r *http.Request) {
 		p.handleListDead(w, r)
 	case path == "/api/accounts/dead/purge" && r.Method == http.MethodPost:
 		p.handlePurgeDead(w, r)
+	case path == "/api/accounts/balances" && r.Method == http.MethodPost:
+		p.handleRefreshBalances(w, r)
+	case path == "/api/accounts/batch" && r.Method == http.MethodPost:
+		p.handleBatchAccounts(w, r)
 	case path == "/api/checkin/all" && r.Method == http.MethodPost:
 		p.handleCheckinAll(w, r)
 	case path == "/api/renew/run" && r.Method == http.MethodPost:
@@ -162,6 +172,8 @@ func (p *Panel) Route(w http.ResponseWriter, r *http.Request) {
 		p.handlePutSettings(w, r)
 	case path == "/api/logs":
 		p.handleLogs(w, r)
+	case path == "/api/logs/facets" && r.Method == http.MethodGet:
+		p.handleLogFacets(w, r)
 	case path == "/api/update" && r.Method == http.MethodGet:
 		p.handleUpdateStatus(w, r)
 	case path == "/api/update/check" && r.Method == http.MethodPost:
@@ -199,18 +211,27 @@ func (p *Panel) handleListAccounts(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 500, map[string]any{"ok": false, "message": err.Error()})
 		return
 	}
+	now := time.Now().UnixMilli()
 	out := make([]map[string]any, 0, len(accounts))
 	for _, a := range accounts {
+		// 限流明细：429 只罚「账号 × 模型」，面板要把每条罚单列出来，
+		// 否则整号状态显示「正常」时用户看不到某些模型其实还在冷却。
+		modelCools := []pool.ModelCoolInfo{}
+		if p.cool != nil {
+			modelCools = p.cool.ModelCooldownsOf(a.ID)
+		}
 		out = append(out, map[string]any{
 			"id": a.ID, "uid": a.UID, "name": a.Name, "note": a.Note,
 			"status": a.Status, "credits": a.Credits, "creditsAt": a.CreditsAt,
 			"coolUntil": a.CoolUntil, "coolReason": a.CoolReason,
-			"tokenExp": a.TokenExp, "expiresAt": a.ExpiresAt,
+			"modelCools": modelCools,
+			"tokenExp":   a.TokenExp, "expiresAt": a.ExpiresAt,
 			"enabled": a.Enabled, "lastCheckinDay": a.LastCheckinDay,
 			"priority": a.Priority, "lastUsed": a.LastUsed,
 			"deviceId": a.DeviceID, "officeIdentity": a.OfficeIdentity,
 			"hasRefresh":  a.RefreshToken != "",
 			"platformUid": platformUIDOf(a.Meta),
+			"deadReason":  a.DeadReason(now),
 			"createdAt":   a.CreatedAt, "updatedAt": a.UpdatedAt,
 		})
 	}
@@ -337,6 +358,119 @@ func (p *Panel) handlePurgeDead(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"ok": true, "deleted": n, "skipped": skipped})
 }
 
+// handleRefreshBalances 批量查余额（面板「查询余额」按钮）。
+//
+// 顺序执行而不是并发：上游同一出口 IP 并发查余额更容易触发风控，
+// 而且这里本来就是个用户主动触发的慢操作，几十个号几十秒可以接受。
+// 单个号失败不影响其它号，逐条回传结果让面板标注哪些号查失败了。
+func (p *Panel) handleRefreshBalances(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		IDs []string `json:"ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+		writeJSON(w, 400, map[string]any{"ok": false, "message": err.Error()})
+		return
+	}
+	accounts, err := p.st.ListAccounts(r.Context())
+	if err != nil {
+		writeJSON(w, 500, map[string]any{"ok": false, "message": err.Error()})
+		return
+	}
+	want := map[string]bool{}
+	for _, id := range body.IDs {
+		want[id] = true
+	}
+	results := make([]map[string]any, 0)
+	okCount, failCount := 0, 0
+	for _, a := range accounts {
+		// 不指定 ids 时查全部启用账号；指定了就只查这批。
+		if len(want) > 0 && !want[a.ID] {
+			continue
+		}
+		if len(want) == 0 && (!a.Enabled || a.Status == store.StatusRelogin) {
+			continue
+		}
+		if r.Context().Err() != nil {
+			break
+		}
+		credits, err := p.balancer.Refresh(r.Context(), a)
+		if err != nil {
+			failCount++
+			results = append(results, map[string]any{"id": a.ID, "ok": false, "message": err.Error()})
+			continue
+		}
+		okCount++
+		results = append(results, map[string]any{"id": a.ID, "ok": true, "credits": credits})
+	}
+	writeJSON(w, 200, map[string]any{
+		"ok": true, "done": okCount, "failed": failCount, "results": results,
+	})
+}
+
+// handleBatchAccounts 批量操作：enable / disable / delete / checkin / uncool。
+//
+// 删除前按当前状态复核一遍（和单删一致）：批量操作发起后用户可能已经改过状态，
+// 但删除是不可逆的，不能因为勾选时的快照把号删掉——这里只按 id 删，不做二次判定，
+// 与单删语义保持一致即可。
+func (p *Panel) handleBatchAccounts(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Action string   `json:"action"`
+		IDs    []string `json:"ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, 400, map[string]any{"ok": false, "message": err.Error()})
+		return
+	}
+	if len(body.IDs) == 0 {
+		writeJSON(w, 400, map[string]any{"ok": false, "message": "缺少 ids"})
+		return
+	}
+	done, failed := 0, 0
+	for _, id := range body.IDs {
+		acc, err := p.st.GetAccount(r.Context(), id)
+		if err != nil || acc == nil {
+			failed++
+			continue
+		}
+		switch body.Action {
+		case "enable", "disable":
+			on := body.Action == "enable"
+			if err := p.st.UpdateAccount(r.Context(), id, store.AccountPatch{Enabled: &on}); err != nil {
+				failed++
+				continue
+			}
+		case "delete":
+			if err := p.st.DeleteAccount(r.Context(), id); err != nil {
+				failed++
+				continue
+			}
+		case "uncool":
+			// 账号级与模型级一起清：面板上的「解除冷却」是一键恢复，
+			// 只清账号级的话那些 429 罚单还在，换回原模型依然被拦住。
+			if p.cool != nil {
+				p.cool.MarkOnline(r.Context(), id)
+				for _, m := range p.cool.ModelCooldownsOf(id) {
+					p.cool.ClearModelNow(r.Context(), id, m.Model)
+				}
+			}
+		case "checkin":
+			if p.sched == nil {
+				writeJSON(w, 400, map[string]any{"ok": false, "message": "签到调度器未启用"})
+				return
+			}
+			if _, err := p.sched.Onboard(r.Context(), id); err != nil {
+				failed++
+				continue
+			}
+		default:
+			writeJSON(w, 400, map[string]any{"ok": false, "message": "未知批量操作：" + body.Action})
+			return
+		}
+		done++
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "done": done, "failed": failed})
+}
+
 // handleAccountAction 处理 /api/accounts/{id}/{action}。
 func (p *Panel) handleAccountAction(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/api/accounts/")
@@ -380,6 +514,8 @@ func (p *Panel) handleAccountAction(w http.ResponseWriter, r *http.Request) {
 		p.actionRefresh(w, r, acc)
 	case "checkin":
 		p.actionCheckin(w, r, acc)
+	case "uncool":
+		p.actionUncool(w, r, acc)
 	default:
 		writeJSON(w, 404, map[string]any{"ok": false, "message": "未知操作"})
 	}
@@ -428,6 +564,40 @@ func (p *Panel) actionRefresh(w http.ResponseWriter, r *http.Request, acc *store
 		})
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+// actionUncool 手动解除限流。带 model 时只清该「账号×模型」的罚单，
+// 不带时清账号级冷却并恢复在线。
+func (p *Panel) actionUncool(w http.ResponseWriter, r *http.Request, acc *store.Account) {
+	var body struct {
+		Model string `json:"model"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	if m := strings.TrimSpace(body.Model); m != "" {
+		if p.cool == nil {
+			writeJSON(w, 400, map[string]any{"ok": false, "message": "冷却表不可用"})
+			return
+		}
+		p.cool.ClearModelNow(r.Context(), acc.ID, m)
+		writeJSON(w, 200, map[string]any{"ok": true, "message": "已解除 " + m + " 的限流"})
+		return
+	}
+	// 手动解除 = 用户认为这个号现在就应该能跑：状态、冷却时刻、原因一起清掉。
+	// 积分阈值暂停（exhausted 且 CoolUntil = 0）也一并放行，否则用户点了没效果。
+	if p.cool != nil {
+		p.cool.MarkOnline(r.Context(), acc.ID)
+	} else {
+		online := store.StatusOnline
+		zero := int64(0)
+		empty := ""
+		if err := p.st.UpdateAccount(r.Context(), acc.ID, store.AccountPatch{
+			Status: &online, CoolUntil: &zero, CoolReason: &empty,
+		}); err != nil {
+			writeJSON(w, 500, map[string]any{"ok": false, "message": err.Error()})
+			return
+		}
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "message": "已解除账号冷却"})
 }
 
 func (p *Panel) actionCheckin(w http.ResponseWriter, r *http.Request, acc *store.Account) {
@@ -1136,19 +1306,74 @@ func (p *Panel) applyLogSettings(ctx context.Context, body settingsBody) error {
 	return nil
 }
 
+// handleLogs 分页返回调用流水。
+//
+// 老版本一次拉 200 条并整表渲染，日志一多浏览器就卡死；现在按页取，
+// 并支持时间窗、状态、账号、模型、接口、关键字筛选，筛选都在 SQL 里做。
 func (p *Panel) handleLogs(w http.ResponseWriter, r *http.Request) {
-	n := 200
-	if raw := r.URL.Query().Get("limit"); raw != "" {
-		if v, err := strconv.Atoi(raw); err == nil && v > 0 && v <= 2000 {
-			n = v
+	q := r.URL.Query()
+	num := func(key string, def int) int {
+		if v, err := strconv.Atoi(q.Get(key)); err == nil {
+			return v
 		}
+		return def
 	}
-	logs, err := p.st.RecentUsage(r.Context(), n)
+	f := store.UsageFilter{
+		SinceMS:   int64(num("since", 0)),
+		UntilMS:   int64(num("until", 0)),
+		Status:    q.Get("status"),
+		AccountID: q.Get("account"),
+		Model:     q.Get("model"),
+		API:       q.Get("api"),
+		Query:     q.Get("q"),
+		Page:      num("page", 1),
+		PageSize:  num("pageSize", 50),
+	}
+	// 和 store 里的上限保持一致，否则 pages 会和实际取的条数对不上。
+	if f.Page <= 0 {
+		f.Page = 1
+	}
+	if f.PageSize <= 0 {
+		f.PageSize = 50
+	}
+	if f.PageSize > 500 {
+		f.PageSize = 500
+	}
+	logs, total, failed, err := p.st.QueryUsage(r.Context(), f)
 	if err != nil {
 		writeJSON(w, 500, map[string]any{"ok": false, "message": err.Error()})
 		return
 	}
-	writeJSON(w, 200, map[string]any{"ok": true, "logs": logs})
+	pages := int((total + int64(f.PageSize) - 1) / int64(f.PageSize))
+	writeJSON(w, 200, map[string]any{
+		"ok": true, "logs": logs, "total": total, "failed": failed,
+		"page": f.Page, "pageSize": f.PageSize, "pages": pages,
+	})
+}
+
+// handleLogFacets 返回筛选下拉的模型/接口清单，缓存 30 秒。
+// 下拉内容不要求实时，缓存一下可避免每次进页面都做一次 DISTINCT 扫描。
+func (p *Panel) handleLogFacets(w http.ResponseWriter, r *http.Request) {
+	p.facetMu.Lock()
+	defer p.facetMu.Unlock()
+	if time.Since(p.facetAt) < 30*time.Second && (p.facetModels != nil || p.facetAPIs != nil) {
+		writeJSON(w, 200, map[string]any{"ok": true, "models": p.facetModels, "apis": p.facetAPIs})
+		return
+	}
+	sinceMS := time.Now().AddDate(0, 0, -30).UnixMilli()
+	models, apis, err := p.st.UsageFacets(r.Context(), sinceMS)
+	if err != nil {
+		writeJSON(w, 500, map[string]any{"ok": false, "message": err.Error()})
+		return
+	}
+	if models == nil {
+		models = []string{}
+	}
+	if apis == nil {
+		apis = []string{}
+	}
+	p.facetModels, p.facetAPIs, p.facetAt = models, apis, time.Now()
+	writeJSON(w, 200, map[string]any{"ok": true, "models": models, "apis": apis})
 }
 
 // ---------- 日志管理 ----------

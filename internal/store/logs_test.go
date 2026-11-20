@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -78,6 +79,78 @@ func TestPurgeCheckinBefore(t *testing.T) {
 	}
 	if earliest < now-1000 {
 		t.Fatalf("剩下的应是最新那条，earliest=%d", earliest)
+	}
+}
+
+// 分页：按 id 倒序取，页大小与 offset 正确，total 不受分页影响。
+func TestQueryUsagePagination(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	now := time.Now().UnixMilli()
+	for i := 0; i < 5; i++ {
+		_ = s.AddUsage(ctx, UsageLog{TS: now + int64(i), Model: "m" + strconv.Itoa(i), Status: 200})
+	}
+	rows, total, failed, err := s.QueryUsage(ctx, UsageFilter{Page: 2, PageSize: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 5 || failed != 0 {
+		t.Fatalf("total/failed 应为 5/0，实际 %d/%d", total, failed)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("第 2 页应有 2 条，实际 %d", len(rows))
+	}
+	if rows[0].Model != "m2" || rows[1].Model != "m1" {
+		t.Fatalf("第 2 页应是 m2,m1，实际 %s,%s", rows[0].Model, rows[1].Model)
+	}
+}
+
+// 筛选：状态、时间窗、账号、模型、关键字都要真正进 SQL。
+func TestQueryUsageFilters(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	now := time.Now().UnixMilli()
+	_ = s.AddUsage(ctx, UsageLog{TS: now - 2000, AccountID: "acc-1", Model: "gpt-a", Status: 200})
+	_ = s.AddUsage(ctx, UsageLog{TS: now - 1000, AccountID: "acc-2", Model: "gpt-b", Status: 401, Error: "authorization_verify_error"})
+
+	cases := []struct {
+		name string
+		f    UsageFilter
+		want int64
+	}{
+		{"仅失败", UsageFilter{Status: "fail"}, 1},
+		{"仅成功", UsageFilter{Status: "ok"}, 1},
+		{"按账号", UsageFilter{AccountID: "acc-2"}, 1},
+		{"按模型", UsageFilter{Model: "gpt-a"}, 1},
+		{"时间窗", UsageFilter{SinceMS: now - 1500}, 1},
+		{"错误关键字", UsageFilter{Query: "verify"}, 1},
+		{"无匹配", UsageFilter{Model: "不存在"}, 0},
+	}
+	for _, c := range cases {
+		_, total, _, err := s.QueryUsage(ctx, c.f)
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if total != c.want {
+			t.Fatalf("%s: 应 %d 条，实际 %d", c.name, c.want, total)
+		}
+	}
+}
+
+// failed 计数与 total 同源，不需要前端再算一遍。
+func TestQueryUsageFailedCount(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	now := time.Now().UnixMilli()
+	for _, st := range []int{200, 401, 500, 429} {
+		_ = s.AddUsage(ctx, UsageLog{TS: now, Status: st})
+	}
+	_, total, failed, err := s.QueryUsage(ctx, UsageFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 4 || failed != 3 {
+		t.Fatalf("应 4 条其中 3 条失败，实际 %d/%d", total, failed)
 	}
 }
 

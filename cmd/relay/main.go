@@ -61,7 +61,9 @@ func main() {
 	lmgr.Start(ctx)
 	defer lmgr.Close()
 
-	client := raccoon.NewClient(cfg.UpstreamBase, 0)
+	client := raccoon.NewClient(cfg.UpstreamBase, time.Duration(cfg.UpstreamTimeoutSec)*time.Second)
+	// 对话流不能套总时限：长回答会被硬掐在超时点。改用上游空闲超时。
+	client.IdleTimeout = cfg.StreamIdleTimeout
 	cool := pool.NewCooldownBook(st, cfg.ModelCooldown)
 	po := pool.New(st, cfg.PoolStrategy, cool)
 	po.SetCreditPolicy(pool.CreditPolicy{

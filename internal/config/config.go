@@ -32,12 +32,15 @@ type Config struct {
 	RefreshWindowSec    int
 	// 主动续期：token 30 天有效，后台提前 RenewWindowSec 秒统一刷新，
 	// 避免冷门号因长期不被选中而静默过期。RenewIntervalM 是扫描间隔。
-	RenewWindowSec    int
-	RenewIntervalM    int
-	RenewGapMS        int
-	StreamIdleTimeout time.Duration
-	MaxBodyMB         int
-	ModelCooldown     bool
+	RenewWindowSec int
+	RenewIntervalM int
+	RenewGapMS     int
+	// StreamIdleTimeout 是对话流「多久没收到上游数据算超时」，不是整条流的总时限。
+	// UpstreamTimeoutSec 管登录/余额/目录等非流式端点的整体超时；0 = 用默认 120s。
+	StreamIdleTimeout  time.Duration
+	UpstreamTimeoutSec int
+	MaxBodyMB          int
+	ModelCooldown      bool
 	// 积分阈值：低于 StopBelow 暂停该号，回升到 ResumeAbove 解除。
 	CreditStopEnable  bool
 	CreditStopBelow   int64
@@ -135,18 +138,19 @@ func Load() (*Config, error) {
 		RefreshWindowSec:    envInt("REFRESH_WINDOW_SEC", 300),
 		// 默认提前 3 天续期、每 6 小时扫一次、账号间隔 1 秒：避开了「提前太久轮换凭据」
 		// 的坑，也给长时间停机留够余量。
-		RenewWindowSec:    envInt("RENEW_WINDOW_SEC", 3*24*3600),
-		RenewIntervalM:    envInt("RENEW_INTERVAL_MIN", 360),
-		RenewGapMS:        envInt("RENEW_GAP_MS", 1000),
-		StreamIdleTimeout: time.Duration(envInt("STREAM_IDLE_TIMEOUT_SEC", 120)) * time.Second,
-		MaxBodyMB:         envInt("MAX_BODY_MB", 32),
-		ModelCooldown:     envBool("MODEL_COOLDOWN_ENABLE", true),
-		CreditStopEnable:  envBool("CREDIT_STOP_ENABLE", false),
-		CreditStopBelow:   envInt64("CREDIT_STOP_BELOW", 0),
-		CreditResumeAbove: envInt64("CREDIT_RESUME_ABOVE", 0),
-		OAuthRedirectBase: strings.TrimRight(env("OAUTH_REDIRECT_BASE", ""), "/"),
-		Timezone:          env("TZ", "Asia/Shanghai"),
-		UpstreamBase:      strings.TrimRight(env("UPSTREAM_BASE", "https://xiaohuanxiong.com"), "/"),
+		RenewWindowSec:     envInt("RENEW_WINDOW_SEC", 3*24*3600),
+		RenewIntervalM:     envInt("RENEW_INTERVAL_MIN", 360),
+		RenewGapMS:         envInt("RENEW_GAP_MS", 1000),
+		StreamIdleTimeout:  time.Duration(envInt("STREAM_IDLE_TIMEOUT_SEC", 120)) * time.Second,
+		UpstreamTimeoutSec: envInt("UPSTREAM_TIMEOUT_SEC", 120),
+		MaxBodyMB:          envInt("MAX_BODY_MB", 32),
+		ModelCooldown:      envBool("MODEL_COOLDOWN_ENABLE", true),
+		CreditStopEnable:   envBool("CREDIT_STOP_ENABLE", false),
+		CreditStopBelow:    envInt64("CREDIT_STOP_BELOW", 0),
+		CreditResumeAbove:  envInt64("CREDIT_RESUME_ABOVE", 0),
+		OAuthRedirectBase:  strings.TrimRight(env("OAUTH_REDIRECT_BASE", ""), "/"),
+		Timezone:           env("TZ", "Asia/Shanghai"),
+		UpstreamBase:       strings.TrimRight(env("UPSTREAM_BASE", "https://xiaohuanxiong.com"), "/"),
 
 		LogFileEnable:     envBool("LOG_FILE_ENABLE", true),
 		LogDir:            env("LOG_DIR", filepath.Join(env("DATA_DIR", "/data"), "logs")),

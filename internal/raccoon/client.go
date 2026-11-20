@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -16,15 +17,29 @@ import (
 type Client struct {
 	Base string
 	HTTP *http.Client
+	// RequestTimeout 是非流式端点（登录/余额/目录等）的整体超时。
+	RequestTimeout time.Duration
+	// IdleTimeout 对对话流生效：多久没收到上游数据算超时。
+	// 不能用 http.Client.Timeout 管流式——那是整条请求（含读响应体）的总时限，
+	// 长回答会被硬掐在超时点，报 "context deadline exceeded while reading body"。
+	IdleTimeout time.Duration
 }
 
 func NewClient(base string, timeout time.Duration) *Client {
 	if timeout <= 0 {
 		timeout = 120 * time.Second
 	}
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.DialContext = (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext
+	tr.TLSHandshakeTimeout = 10 * time.Second
+	// 等响应头的时间上限；拿到响应头后响应体读取由 IdleTimeout 逐次判定
+	tr.ResponseHeaderTimeout = timeout
+	tr.IdleConnTimeout = 90 * time.Second
 	return &Client{
-		Base: strings.TrimRight(base, "/"),
-		HTTP: &http.Client{Timeout: timeout},
+		Base:           strings.TrimRight(base, "/"),
+		HTTP:           &http.Client{Transport: tr},
+		RequestTimeout: timeout,
+		IdleTimeout:    timeout,
 	}
 }
 
@@ -53,6 +68,12 @@ func (e *Envelope) OK() bool { return e.Code == 0 || e.Code == 200 }
 func (c *Client) url(path string) string { return c.Base + path }
 
 func (c *Client) doJSON(ctx context.Context, method, path string, headers map[string]string, payload any) (int, *Envelope, error) {
+	// 非流式端点用总超时兜底，避免连接卡死时 goroutine 一直挂着
+	if c.RequestTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, c.RequestTimeout)
+		defer cancel()
+	}
 	var body io.Reader
 	if payload != nil {
 		raw, err := json.Marshal(payload)

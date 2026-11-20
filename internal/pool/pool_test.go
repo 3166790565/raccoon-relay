@@ -500,3 +500,70 @@ func getID(t *testing.T, st *store.Store, uid string) string {
 	}
 	return a.ID
 }
+
+// 面板「限流」列依赖 ModelCooldownsOf：只列仍在冷却中的组合，
+// 已到期的记录（失败链历史）不能被当成「限流中」显示。
+func TestModelCooldownsOfForPanel(t *testing.T) {
+	st := newStore(t)
+	cool := NewCooldownBook(st, true)
+	ctx := context.Background()
+	a := addAcc(t, st, "a", 100)
+	b := addAcc(t, st, "b", 100)
+
+	cool.CoolModel(ctx, a.ID, "sn-glm-5-3", "429 限流")
+	cool.CoolModel(ctx, a.ID, "sn-deepseek", "429 限流")
+	cool.CoolModel(ctx, b.ID, "sn-glm-5-3", "429 限流")
+
+	got := cool.ModelCooldownsOf(a.ID)
+	if len(got) != 2 {
+		t.Fatalf("a 应有 2 条限流明细，实际 %d", len(got))
+	}
+	// 展示用的是原始大小写，不是内存 key 里的小写
+	seen := map[string]bool{}
+	for _, m := range got {
+		seen[m.Model] = true
+		if m.Until <= time.Now().UnixMilli() {
+			t.Fatalf("%s 应仍在冷却中", m.Model)
+		}
+	}
+	if !seen["sn-glm-5-3"] || !seen["sn-deepseek"] {
+		t.Fatalf("模型名应与入库时一致，实际 %v", seen)
+	}
+	if n := len(cool.ModelCooldownsOf(b.ID)); n != 1 {
+		t.Fatalf("b 只应有 1 条，实际 %d", n)
+	}
+
+	// 人为把一条设置成已过期：它只是失败链历史，不该再出现在面板上
+	cool.mu.Lock()
+	cool.models[coolKey(a.ID, "sn-deepseek")] = modelCool{
+		accID: a.ID, model: "sn-deepseek", until: time.Now().Add(-time.Minute).UnixMilli(), hits: 1,
+	}
+	cool.mu.Unlock()
+	if n := len(cool.ModelCooldownsOf(a.ID)); n != 1 {
+		t.Fatalf("已到期的记录不应计入限流，实际剩 %d 条", n)
+	}
+
+	// 手动清除后立即消失
+	cool.ClearModelNow(ctx, a.ID, "sn-glm-5-3")
+	if n := len(cool.ModelCooldownsOf(a.ID)); n != 0 {
+		t.Fatalf("清除后不应再有明细，实际 %d", n)
+	}
+}
+
+// 重启（Hydrate）之后面板仍要看得到限流明细，否则面板会把冷却中的号显示成「正常」。
+func TestModelCooldownsOfAfterHydrate(t *testing.T) {
+	st := newStore(t)
+	ctx := context.Background()
+	a := addAcc(t, st, "a", 100)
+	NewCooldownBook(st, true).CoolModel(ctx, a.ID, "sn-glm-5-3", "429 限流")
+
+	fresh := NewCooldownBook(st, true)
+	fresh.Hydrate(ctx)
+	got := fresh.ModelCooldownsOf(a.ID)
+	if len(got) != 1 || got[0].Model != "sn-glm-5-3" {
+		t.Fatalf("重启后应恢复 1 条限流明细，实际 %+v", got)
+	}
+	if got[0].Reason != "429 限流" {
+		t.Fatalf("重启后应保留原因，实际 %q", got[0].Reason)
+	}
+}
