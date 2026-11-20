@@ -209,11 +209,26 @@ cmd_watch() {
   [ "$missing" = "0" ] || exit 1
 
   step "sha256 自洽"
+  # 必须把资产本体一起下下来校验：只下载 checksums.txt 的话
+  # sha256sum -c 会因「没有文件可校验」而失败（v1.0.5 发版时踩过）。
   local tmp; tmp="$(mktemp -d)"
   curl -fsSL "https://github.com/$REPO/releases/download/$VERSION/checksums.txt" -o "$tmp/checksums.txt"
-  ( cd "$tmp" && sha256sum -c --ignore-missing checksums.txt ) || {
-    red "checksums.txt 与实际资产不符"; exit 1
-  }
+  local checked=0
+  while read -r sum name; do
+    [ -n "$name" ] || continue
+    curl -fsSL "https://github.com/$REPO/releases/download/$VERSION/$name" -o "$tmp/$name"
+    local got
+    got="$(sha256sum "$tmp/$name" | awk '{print $1}')"
+    if [ "$got" = "$sum" ]; then
+      ok "$name"
+      checked=$((checked+1))
+    else
+      problem "$name sha256 不符（期望 $sum，实际 $got）"
+    fi
+  done < "$tmp/checksums.txt"
+  if [ "$checked" -eq 0 ]; then
+    problem "checksums.txt 为空或格式异常，没有任何资产被校验"
+  fi
   rm -rf "$tmp"
 
   step "Release 说明"
@@ -265,8 +280,14 @@ cmd_verify() {
         curl -fsS -b "$tmp/cj" http://127.0.0.1:18099/api/update | \
         python -c 'import json,sys;print(json.load(sys.stdin)["status"]["current"])' 2>/dev/null || true)"
   if [ "$cur" = "$VERSION" ]; then ok "版本号正确：$cur"; else problem "版本号显示为 $cur，期望 $VERSION"; fi
+  # 等进程真正退出、放开 DB/日志句柄后再删临时目录，否则 Windows 上 rm 会报 busy。
   kill "$(cat "$tmp/pid")" 2>/dev/null || true
-  rm -rf "$tmp"
+  for _ in $(seq 1 20); do
+    kill -0 "$(cat "$tmp/pid")" 2>/dev/null || break
+    sleep 0.25
+  done
+  rm -rf "$tmp" 2>/dev/null || true
+  [ -d "$tmp" ] && yellow "  ! 临时目录未清理干净：$tmp"
 }
 
 # VERSION 可用环境变量预置（方便 check 同一版本号），命令行参数优先。
