@@ -194,8 +194,9 @@ DATA_DIR=./data SECRET_KEY=dev ADMIN_TOKEN=dev ./relay
 - 账号之间串行，间隔 800~2000ms 随机，防风控。
 - 顺带领一次性首登奖（桌面端 + 手机端两条互不相通的端点各领一次），台账存账号 `meta.onboardingGrants`；
   端点返回 404/410 就记 `-1` 永久停试。
-- 每轮顺带刷一次余额。余额走 `GET setting_info` 的 `available_points`（网页版头部同源）；
-  原来的 `points/v1/balance` 已被上游下线，对所有凭证一律 403，只作为最后兜底。
+- 每轮顺带刷一次余额。余额走 `GET office/v2/setting_info` 的 `available_points`
+  （网页版头部同源）；`office/v3/setting_info` 自 2026-11 起被网关整体拦截（403，
+  响应头 `X-TT-System-Error: 3`），留作第一回退；旧 `points/v1/balance` 已下线，只作最后兜底。
 - 启动时会补跑：错过窗口不会漏签。
 
 面板上可以「全部签到」手动触发一轮，也可以在账号行上单独签到。

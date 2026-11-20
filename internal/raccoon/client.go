@@ -92,8 +92,9 @@ func (c *Client) doJSON(ctx context.Context, method, path string, headers map[st
 const (
 	PathChat        = "/api/web/llm/v2/chat/completions"
 	PathCatalog     = "/api/web/llm/v2/model_catalog"
-	PathBalance     = "/api/web/points/v1/balance" // 已下线：上游对任何凭证都回 403，仅保留给旧号定位
+	PathBalance     = "/api/web/points/v1/balance" // 已下线：上游对任何凭证都回 403，仅作最后兜底
 	PathSetting     = "/api/web/office/v3/setting_info"
+	PathSettingV2   = "/api/web/office/v2/setting_info"
 	PathSettingOrg  = "/api/web/org/user/office/v1/setting_info"
 	PathGrant       = "/api/web/desktop/v1/login/points/grant"
 	PathMobileGrant = "/api/web/mobile/v1/login/points/grant"
@@ -163,21 +164,23 @@ func (c *Client) Refresh(ctx context.Context, idn Identity, refreshToken string)
 
 // Balance 查账号可用积分。
 //
-// 2026-11 上游下线了 /points/v1/balance：该路径对任何凭证、任何头都直接回
-// 403（响应头 X-TT-System-Error: 3），网页端自己也不再调它。网页版头部那个
-// 积分数字取自 setting_info 的 available_points，这里跟它保持一致，顺便复用
-// 个人号/团队号两条 setting_info 路径。
+// 通道全部走 setting_info 的 available_points，按存活情况排列：
 //
-// 失败时逐级回退：团队号 setting_info 不认就退到个人号路径，再不行才试一次旧
-// 端点——旧端点即便已下线，个别还在刷新的部署可能仍可用，能拿到就别浪费。
+//	v2  ← 当前可用（2026-11-21 实测，无 Cookie 机头也 200）
+//	v3  ← 2026-11 起网关整体拦截，对任何凭证都 403（X-TT-System-Error: 3）；
+//	      留作第一回退，上游恢复后会自动重新优先
+//	旧 /points/v1/balance ← 已下线，只作最后兜底
+//
+// 团队号先走组织路径，失败再退个人路径；退个人路径时摘掉 X-Org-Code，
+// 否则读到的仍是组织口径的积分。
 func (c *Client) Balance(ctx context.Context, token string, idn Identity) (int64, error) {
 	var lastErr error
-	paths := []string{PathSetting}
+	paths := []string{PathSettingV2, PathSetting}
 	if isTeam(idn.OfficeIdentity) {
-		paths = []string{PathSettingOrg, PathSetting}
+		paths = []string{PathSettingOrg, PathSettingV2, PathSetting}
 	}
 	for i, path := range paths {
-		// 退到个人路径时要摘掉 X-Org-Code，否则读到的仍是组织口径的积分
+		// 组织路径之后的都按个人口径查
 		personal := i > 0
 		points, err := c.balanceFromSetting(ctx, token, idn, path, personal)
 		if err == nil {

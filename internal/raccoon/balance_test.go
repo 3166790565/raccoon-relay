@@ -17,6 +17,8 @@ type balanceHarness struct {
 	calls      []string
 	settingSt  int
 	settingBdy string
+	v2Bdy      string
+	v2St       int
 	orgBdy     string
 	legacyBdy  string
 	legacySt   int
@@ -32,6 +34,18 @@ func (h *balanceHarness) server(t *testing.T) *httptest.Server {
 			return
 		}
 		fmt.Fprint(w, h.settingBdy)
+	})
+	mux.HandleFunc(PathSettingV2, func(w http.ResponseWriter, r *http.Request) {
+		h.record("setting_v2")
+		if h.v2St != 0 {
+			w.WriteHeader(h.v2St)
+			return
+		}
+		if h.v2Bdy == "" {
+			w.WriteHeader(http.StatusForbidden) // v3 挂掉时模拟上游当前状态
+			return
+		}
+		fmt.Fprint(w, h.v2Bdy)
 	})
 	mux.HandleFunc(PathSettingOrg, func(w http.ResponseWriter, r *http.Request) {
 		h.record("setting_org")
@@ -71,9 +85,9 @@ func (h *balanceHarness) order() []string {
 	return append([]string(nil), h.calls...)
 }
 
-// 旧余额端点对所有人 403，setting_info 成为唯一可用通道。
-func TestBalanceReadsSettingInfo(t *testing.T) {
-	h := &balanceHarness{settingBdy: `{"code":0,"data":{"available_points":4321}}`}
+// 当前存活的是 v2 setting_info：旧余额端点与 v3 都会 403，主通道必须是 v2。
+func TestBalanceReadsSettingV2(t *testing.T) {
+	h := &balanceHarness{v2Bdy: `{"code":0,"data":{"available_points":4321}}`}
 	c := NewClient(h.server(t).URL, 5*time.Second)
 
 	got, err := c.Balance(context.Background(), "tok", IdentityFor("pu-1", "", "", "", "", "", ""))
@@ -81,16 +95,33 @@ func TestBalanceReadsSettingInfo(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got != 4321 {
-		t.Fatalf("应取 setting_info 的 available_points，实际 %d", got)
+		t.Fatalf("应取 v2 setting_info 的 available_points，实际 %d", got)
 	}
-	if calls := h.order(); calls[0] != "setting" {
-		t.Fatalf("应优先走 setting_info，实际顺序 %v", calls)
+	if calls := h.order(); calls[0] != "setting_v2" {
+		t.Fatalf("应优先走 v2 setting_info，实际顺序 %v", calls)
+	}
+}
+
+// v2 不可用时退到 v3（上游恢复后会自动优先）。
+func TestBalanceFallsBackToSettingV3(t *testing.T) {
+	h := &balanceHarness{
+		v2St: http.StatusInternalServerError, v2Bdy: `{"code":500}`,
+		settingBdy: `{"code":0,"data":{"available_points":777}}`,
+	}
+	c := NewClient(h.server(t).URL, 5*time.Second)
+
+	got, err := c.Balance(context.Background(), "tok", IdentityFor("pu-1", "", "", "", "", "", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 777 {
+		t.Fatalf("v2 失败应退 v3，实际 %d", got)
 	}
 }
 
 // 团队号先走组织路径，组织路径没给积分再退个人路径。
 func TestBalanceTeamFallsBackToPersonalSetting(t *testing.T) {
-	h := &balanceHarness{settingBdy: `{"code":0,"data":{"available_points":88}}`}
+	h := &balanceHarness{v2Bdy: `{"code":0,"data":{"available_points":88}}`}
 	c := NewClient(h.server(t).URL, 5*time.Second)
 	idn := IdentityFor("pu-1", "", "", "", "", "org-123", "")
 
@@ -102,14 +133,17 @@ func TestBalanceTeamFallsBackToPersonalSetting(t *testing.T) {
 		t.Fatalf("团队路径失败后应退回个人 setting_info，实际 %d", got)
 	}
 	order := h.order()
-	if len(order) < 2 || order[0] != "setting_org" || order[1] != "setting" {
+	if len(order) < 2 || order[0] != "setting_org" || order[1] != "setting_v2" {
 		t.Fatalf("团队号应先 org 后 personal，实际 %v", order)
 	}
 }
 
-// setting_info 与旧端点都拿不到时必须报错，让上层保留旧余额而不是写 0。
+// 所有通道都拿不到时必须报错，让上层保留旧余额而不是写 0。
 func TestBalanceAllChannelsFail(t *testing.T) {
-	h := &balanceHarness{settingSt: http.StatusInternalServerError, settingBdy: `{"code":500}`}
+	h := &balanceHarness{
+		v2St: http.StatusInternalServerError, v2Bdy: `{"code":500}`,
+		settingSt: http.StatusInternalServerError, settingBdy: `{"code":500}`,
+	}
 	c := NewClient(h.server(t).URL, 5*time.Second)
 
 	if _, err := c.Balance(context.Background(), "tok", IdentityFor("pu-1", "", "", "", "", "", "")); err == nil {
@@ -117,9 +151,11 @@ func TestBalanceAllChannelsFail(t *testing.T) {
 	}
 }
 
-// setting_info 少了积分字段（或返回 0 之外的空值）不能当成余额 0。
+// setting_info 少了积分字段不能当成余额 0，否则会把旧余额覆盖掉。
 func TestBalanceMissingFieldIsError(t *testing.T) {
-	h := &balanceHarness{settingBdy: `{"code":0,"data":{}}`}
+	h := &balanceHarness{
+		v2Bdy: `{"code":0,"data":{}}`, settingBdy: `{"code":0,"data":{}}`,
+	}
 	c := NewClient(h.server(t).URL, 5*time.Second)
 
 	if _, err := c.Balance(context.Background(), "tok", IdentityFor("pu-1", "", "", "", "", "", "")); err == nil {
@@ -129,7 +165,9 @@ func TestBalanceMissingFieldIsError(t *testing.T) {
 
 // 凭证失效要直接上报为 Auth 错误，而不是继续在通道之间试错。
 func TestBalanceAuthErrorShortCircuits(t *testing.T) {
-	h := &balanceHarness{settingSt: http.StatusUnauthorized, settingBdy: `{"code":200003,"message":"authorization_verify_error"}`}
+	h := &balanceHarness{
+		v2St: http.StatusUnauthorized, v2Bdy: `{"code":200003,"message":"authorization_verify_error"}`,
+	}
 	c := NewClient(h.server(t).URL, 5*time.Second)
 
 	_, err := c.Balance(context.Background(), "tok", IdentityFor("pu-1", "", "", "", "", "", ""))
@@ -145,6 +183,7 @@ func TestBalanceAuthErrorShortCircuits(t *testing.T) {
 // 旧端点万一还活着（老部署），setting_info 不可用时可以兜住。
 func TestBalanceLegacyFallback(t *testing.T) {
 	h := &balanceHarness{
+		v2St: http.StatusInternalServerError, v2Bdy: `{"code":500}`,
 		settingSt: http.StatusInternalServerError, settingBdy: `{"code":500}`,
 		legacyBdy: `{"code":0,"data":{"available_points":2048}}`,
 	}
