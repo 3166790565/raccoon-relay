@@ -10,6 +10,9 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	// 内嵌时区数据库：Windows / macOS 的发布二进制在没装 tzdata 的机器上
+	// 找不到 IANA 数据，TZ=Asia/Shanghai 会直接报「TZ 非法」起不来。
+	_ "time/tzdata"
 
 	"github.com/3166790565/raccoon-relay/internal/admin"
 	"github.com/3166790565/raccoon-relay/internal/config"

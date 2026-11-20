@@ -174,9 +174,13 @@ func (u *Updater) statusLocked() Status {
 		if !u.lastRel.PublishedAt.IsZero() {
 			st.PublishedAt = u.lastRel.PublishedAt.Format(time.RFC3339)
 		}
-		// dev / 空版本 / CI 注入的 commit SHA 都不是正式版本号，没法做数值比较：
-		// 提示可以安装最新发布，而不是让 Compare 退回字符串比较得出随意的结论。
-		// （SHA 以字母开头时 "v1.x" 恒大于它，会出现「永远可更新」）。
+	} else if !u.checkedAt.IsZero() && u.lastErr == "" {
+		// 请求成功但没拿到可用 release（仓库还没有 Release，或最新版没有本平台资产）。
+		// 这不是网络/限流错误，面板显示「暂无可用版本」比「检查失败」准确。
+		st.Latest = ""
+		st.UpdateAvailable = false
+	}
+	if u.lastRel != nil {
 		if isUnversioned(u.opts.Current) {
 			st.UpdateAvailable = st.Latest != ""
 		} else {
