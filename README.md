@@ -356,3 +356,21 @@ internal/scheduler/  自动签到
 internal/admin/      管理面 REST
 internal/webui/      内嵌单页面板
 ```
+
+---
+
+## 发版
+
+发版流程固定在 [`docs/releases/README.md`](docs/releases/README.md)，用脚本执行：
+
+```bash
+scripts/release.sh check v1.0.5    # 发版前检查（只读）
+scripts/release.sh tag v1.0.5      # 打 tag 并推送，触发 CI
+scripts/release.sh watch v1.0.5    # 等 CI、校验 Release 资产与 sha256
+scripts/release.sh verify v1.0.5   # 下载本平台发布版实跑一次
+```
+
+发布说明存放在 `docs/releases/<tag>.md`，同时用作 tag 正文与 GitHub Release 说明。
+`check` 会模拟 CI 环境（挪开被 gitignore 的 `internal/creds/testdata/`）跑一遍全量测试，
+并逐项检查六平台交叉编译、`time/tzdata` 内嵌、更新器资产名与 CI 产物名是否一致。
+每一项都对应一次实际踩过的坑，说明见该文档。
