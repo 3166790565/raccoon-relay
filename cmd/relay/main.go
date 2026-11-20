@@ -115,6 +115,7 @@ func main() {
 		Token:        cfg.GitHubToken,
 		APIBase:      cfg.UpdateAPIBase,
 		DownloadBase: cfg.UpdateDownloadBase,
+		Mirrors:      updater.ParseMirrors(cfg.UpdateMirrors),
 		TargetPath:   cfg.UpdateTarget,
 		DataDir:      cfg.DataDir,
 	})

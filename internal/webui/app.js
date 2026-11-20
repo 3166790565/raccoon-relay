@@ -1993,6 +1993,7 @@ function renderUpdate() {
     ['最新版本', latestText],
     ['运行方式', esc(modeText)],
     ['安装包', esc(s.asset || '-')],
+    ['下载来源', esc(s.source || '-')],
     ['检查时间', esc(fmtUpdateTime(s.checkedAt))],
     ['安装时间', esc(fmtUpdateTime(s.installedAt))],
     ['自动重启', s.autoRestart ? '支持' : '需手动'],
@@ -2018,6 +2019,9 @@ function renderUpdate() {
   }
   if (s.mode === 'docker' && s.updateAvailable) {
     hint += ' 容器内更新落在数据卷 /data/bin/relay，重建容器后仍生效；想回到镜像版本删掉该文件即可。';
+  }
+  if (s.source && s.source !== 'api.github.com') {
+    hint += ' 直连 GitHub 失败，已自动改用镜像源下载。';
   }
   $('updateHint').textContent = hint;
 }

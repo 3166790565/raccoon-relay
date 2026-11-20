@@ -345,8 +345,13 @@ uid / 备注）筛选，筛选结果可一键全选后批量启用、停用、�
 限制与注意：
 
 - 只认 GitHub Release 资产并对 sha256 强制校验，缺 `checksums.txt` 的版本会被拒绝安装。
-- GitHub API 匿名调用有频率限制；被墙或限流时设 `GITHUB_TOKEN`，或用
-  `UPDATE_API_BASE` / `UPDATE_DOWNLOAD_BASE` 走镜像。
+- 直连 GitHub 失败时自动改用镜像源：检查更新依次尝试 `gh-proxy.com`、
+  `cdn.gh-proxy.org`、`o-o.men`，下载安装包同样逐个兜底，全部失败才报错。
+  面板「版本更新」里的「下载来源」会显示本次实际用的是哪个源。
+  可用 `UPDATE_MIRRORS` 换成自己的镜像列表（空格或逗号分隔）；旧版 `UPDATE_DOWNLOAD_BASE`
+  仍然可用，填了它就只走该镜像、不再自动兜底。
+- GitHub API 匿名调用有频率限制；限流时设 `GITHUB_TOKEN`，或用
+  `UPDATE_API_BASE` 指向自建代理。
 - 更新失败不会动当前版本；更新成功但新版本起不来，用「回滚」或删掉数据卷里的
   `bin/relay` 重启即可。
 

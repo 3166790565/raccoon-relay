@@ -30,6 +30,11 @@ const (
 	defaultAPIBase = "https://api.github.com"
 	defaultTTL     = 10 * time.Minute
 	maxAssetBytes  = 200 << 20 // 200MB，远超单二进制体积，防止异常响应打满磁盘
+
+	// 默认下载镜像前缀（空格分隔）。直连 GitHub 检查/下载失败时依次兜底，
+	// 单个镜像失败会继续尝试下一个，全部失败才报错。
+	// 高阶覆盖：UPDATE_MIRRORS 自定义列表。
+	defaultMirrors = "https://gh-proxy.com https://cdn.gh-proxy.org https://o-o.men"
 )
 
 // Release 是 GitHub Release 里与自更新相关的字段。
@@ -58,6 +63,7 @@ type Status struct {
 	AutoRestart     bool   `json:"autoRestart"`
 	Mode            string `json:"mode"` // docker | binary
 	Asset           string `json:"asset"`
+	Source          string `json:"source,omitempty"` // 本次检查用的源：直连主机或镜像域名
 	BackupAvailable bool   `json:"backupAvailable"`
 	InstalledAt     int64  `json:"installedAt,omitempty"`
 }
@@ -68,9 +74,10 @@ type Options struct {
 	Current      string
 	Token        string // 可选 GitHub Token，提高 API 限额
 	APIBase      string
-	DownloadBase string // 可选镜像前缀，如 https://ghfast.top/
-	TargetPath   string // 可选覆盖安装目标
-	DataDir      string // 容器内安装到数据卷，重启/重建容器都不丢
+	DownloadBase string   // 可选镜像前缀（旧版单镜像，兼容保留）；非空时优先于 Mirrors
+	Mirrors      []string // 下载镜像前缀列表，直连失败时依次兜底
+	TargetPath   string   // 可选覆盖安装目标
+	DataDir      string   // 容器内安装到数据卷，重启/重建容器都不丢
 	HTTPClient   *http.Client
 	TTL          time.Duration
 }
@@ -82,6 +89,7 @@ type Updater struct {
 	mu        sync.Mutex
 	lastRel   *Release
 	lastErr   string
+	lastSrc   string
 	checkedAt time.Time
 }
 
@@ -94,6 +102,12 @@ func New(opts Options) *Updater {
 	}
 	if opts.TTL <= 0 {
 		opts.TTL = defaultTTL
+	}
+	if opts.DownloadBase != "" {
+		// 旧版单镜像配置优先：显式指定了 UPDATE_DOWNLOAD_BASE 就只走它，不再兜底。
+		opts.Mirrors = nil
+	} else if len(opts.Mirrors) == 0 {
+		opts.Mirrors = ParseMirrors(defaultMirrors)
 	}
 	client := opts.HTTPClient
 	if client == nil {
@@ -127,13 +141,14 @@ func (u *Updater) Refresh(ctx context.Context, force bool) Status {
 		return u.statusLocked()
 	}
 
-	rel, err := u.fetchLatest(ctx)
+	rel, src, err := u.fetchLatest(ctx)
 	u.checkedAt = time.Now()
 	if err != nil {
 		u.lastErr = err.Error()
 	} else {
 		u.lastErr = ""
 		u.lastRel = rel
+		u.lastSrc = src
 	}
 	return u.statusLocked()
 }
@@ -167,6 +182,7 @@ func (u *Updater) statusLocked() Status {
 	if !u.checkedAt.IsZero() {
 		st.CheckedAt = u.checkedAt.UnixMilli()
 	}
+	st.Source = u.lastSrc
 	if u.lastRel != nil {
 		st.Latest = u.lastRel.Version
 		st.Notes = u.lastRel.Notes
@@ -228,24 +244,58 @@ type ghAsset struct {
 	BrowserDownloadURL string `json:"browser_download_url"`
 }
 
-func (u *Updater) fetchLatest(ctx context.Context) (*Release, error) {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+// apiEndpoints 返回检查更新时可依次尝试的 releases/latest 端点。
+// 直连 GitHub 在墙内常常超时，此时退回镜像源拉取（镜像前缀 + 完整 GitHub URL）。
+func (u *Updater) apiEndpoints() []string {
+	direct := strings.TrimRight(u.opts.APIBase, "/") + "/repos/" + u.opts.Repo + "/releases/latest"
+	out := []string{direct}
+	// 只有默认官方 API 才做镜像兜底：自定义 UPDATE_API_BASE 视为用户自己的
+	// 代理/私有实例，再套一层镜像只会拼出错误地址。
+	if sameHost(u.opts.APIBase, defaultAPIBase) {
+		for _, m := range u.opts.Mirrors {
+			if m != "" {
+				out = append(out, m+"/"+direct)
+			}
+		}
+	}
+	return out
+}
+
+// fetchLatest 依次尝试直连与镜像，返回第一个成功的 release 及其来源主机。
+func (u *Updater) fetchLatest(ctx context.Context) (*Release, string, error) {
+	// 每个源单独限时，避免一个卡死的镜像耗尽整体预算。
+	var firstErr error
+	for _, ep := range u.apiEndpoints() {
+		rel, err := u.fetchLatestFrom(ctx, ep)
+		if err == nil {
+			return rel, hostOf(ep), nil
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	return nil, "", firstErr
+}
+
+// fetchLatestFrom 向单个 releases/latest 端点（直连或镜像）请求最新 release。
+func (u *Updater) fetchLatestFrom(ctx context.Context, endpoint string) (*Release, error) {
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 
-	endpoint := strings.TrimRight(u.opts.APIBase, "/") + "/repos/" + u.opts.Repo + "/releases/latest"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", "raccoon-relay/"+u.opts.Current)
-	if u.opts.Token != "" {
+	// token 只发给 GitHub 官方主机，第三方镜像不附带。
+	if u.opts.Token != "" && sameHost(endpoint, defaultAPIBase) {
 		req.Header.Set("Authorization", "Bearer "+u.opts.Token)
 	}
 
 	resp, err := u.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("请求 GitHub 失败: %w", err)
+		return nil, fmt.Errorf("请求 %s 失败: %w", hostOf(endpoint), err)
 	}
 	defer resp.Body.Close()
 
@@ -259,17 +309,17 @@ func (u *Updater) fetchLatest(ctx context.Context) (*Release, error) {
 			return nil, errors.New("GitHub API 限流，请稍后再试（可设置 GITHUB_TOKEN 提高限额）")
 		}
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-		return nil, fmt.Errorf("GitHub API 拒绝访问（%d）：%s。请检查 GITHUB_TOKEN 权限",
-			resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("%s 拒绝访问（%d）：%s。请检查 GITHUB_TOKEN 权限",
+			hostOf(endpoint), resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-		return nil, fmt.Errorf("GitHub API 返回 %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("%s 返回 %d: %s", hostOf(endpoint), resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
 	var rel ghRelease
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&rel); err != nil {
-		return nil, fmt.Errorf("解析 Release 失败: %w", err)
+		return nil, fmt.Errorf("解析 Release 失败（%s）: %w", hostOf(endpoint), err)
 	}
 	if rel.Draft || rel.Prerelease {
 		// releases/latest 正常不会返回草稿/预发布；这里只是防御。
@@ -319,6 +369,8 @@ func (u *Updater) Install(ctx context.Context, rel *Release) (string, error) {
 		return "", fmt.Errorf("创建安装目录失败: %w", err)
 	}
 
+	// 校验文件优先直连原站获取。镜像既能改二进制又能改校验值，sha256 就失去意义；
+	// 只有直连取不到（墙内常见）时才退回镜像，与二进制走同一批来源。
 	sums, err := u.fetchChecksums(ctx, rel.ChecksumURL)
 	if err != nil {
 		return "", err
@@ -328,14 +380,11 @@ func (u *Updater) Install(ctx context.Context, rel *Release) (string, error) {
 		return "", fmt.Errorf("checksums.txt 中没有 %s", rel.AssetName)
 	}
 
-	resp, err := u.get(ctx, u.assetURL(rel.AssetURL))
+	resp, err := u.downloadAsset(ctx, rel.AssetURL)
 	if err != nil {
 		return "", fmt.Errorf("下载安装包失败: %w", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("下载安装包返回 %d", resp.StatusCode)
-	}
 
 	tmp, err := os.CreateTemp(dir, ".relay-update-*")
 	if err != nil {
@@ -441,18 +490,105 @@ func copyFile(src, dst string) error {
 	return replaceBinary(tmp, dst)
 }
 
+// downloadSources 返回下载可依次尝试的来源列表：直连 GitHub 在前，镜像随后。
+// 旧的单镜像配置（DownloadBase）保持原语义：只走它，不再直连也不追加其他镜像。
+func (u *Updater) downloadSources(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	if u.opts.DownloadBase != "" {
+		return []string{strings.TrimRight(u.opts.DownloadBase, "/") + "/" + raw}
+	}
+	out := []string{raw}
+	for _, m := range u.opts.Mirrors {
+		m = strings.TrimRight(m, "/")
+		if m == "" {
+			continue
+		}
+		src := m + "/" + raw
+		if !strings.EqualFold(src, raw) {
+			out = append(out, src)
+		}
+	}
+	return out
+}
+
+// fetchChecksums 依次尝试各来源下载 checksums.txt，返回第一个成功解析的结果。
+// 直连优先，镜像只在直连失败（墙内超时/连接被重置）时兜底。
 func (u *Updater) fetchChecksums(ctx context.Context, raw string) (map[string]string, error) {
-	// 校验文件必须从原站取（不走镜像）：镜像若能同时替换二进制和校验值，
-	// sha256 校验就形同虚设。
+	var firstErr error
+	for _, src := range u.downloadSources(raw) {
+		sums, err := u.fetchChecksumsFrom(ctx, src)
+		if err == nil {
+			u.noteSource(src)
+			return sums, nil
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	if firstErr == nil {
+		return nil, errors.New("没有可用的校验文件来源")
+	}
+	return nil, firstErr
+}
+
+// noteSource 记录最近一次实际使用的下载来源，供面板展示。
+func (u *Updater) noteSource(raw string) {
+	u.mu.Lock()
+	u.lastSrc = hostOf(raw)
+	u.mu.Unlock()
+}
+
+func (u *Updater) fetchChecksumsFrom(ctx context.Context, raw string) (map[string]string, error) {
 	resp, err := u.get(ctx, raw)
 	if err != nil {
-		return nil, fmt.Errorf("下载校验文件失败: %w", err)
+		return nil, fmt.Errorf("下载校验文件失败（%s）: %w", hostOf(raw), err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("下载校验文件返回 %d", resp.StatusCode)
+		return nil, fmt.Errorf("下载校验文件（%s）返回 %d", hostOf(raw), resp.StatusCode)
 	}
-	return parseChecksums(io.LimitReader(resp.Body, 4<<20))
+	sums, err := parseChecksums(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return nil, err
+	}
+	if len(sums) == 0 {
+		return nil, fmt.Errorf("校验文件（%s）为空或格式错误", hostOf(raw))
+	}
+	return sums, nil
+}
+
+// downloadAsset 依次尝试各下载来源，返回第一个 200 响应。
+// 连接错误、非 200 都会自动换下一个源；全部失败时才返回首个错误。
+func (u *Updater) downloadAsset(ctx context.Context, raw string) (*http.Response, error) {
+	sources := u.downloadSources(raw)
+	if len(sources) == 0 {
+		return nil, errors.New("没有可用的安装包地址")
+	}
+	var firstErr error
+	for _, src := range sources {
+		resp, err := u.get(ctx, src)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("%s: %w", hostOf(src), err)
+			}
+			continue
+		}
+		if resp.StatusCode == http.StatusOK {
+			u.noteSource(src)
+			return resp, nil
+		}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		_ = resp.Body.Close()
+		if firstErr == nil {
+			firstErr = fmt.Errorf("%s 返回 %d: %s", hostOf(src), resp.StatusCode, strings.TrimSpace(string(body)))
+		}
+	}
+	if firstErr == nil {
+		firstErr = errors.New("所有下载来源均失败")
+	}
+	return nil, firstErr
 }
 
 func (u *Updater) get(ctx context.Context, raw string) (*http.Response, error) {
@@ -461,8 +597,8 @@ func (u *Updater) get(ctx context.Context, raw string) (*http.Response, error) {
 		return nil, err
 	}
 	req.Header.Set("User-Agent", "raccoon-relay/"+u.opts.Current)
-	// 只把 GITHUB_TOKEN 发回 GitHub API 主机的 release 资产：
-	// 走镜像（UPDATE_DOWNLOAD_BASE）时绝不附带，否则 token 就泄露给第三方了。
+	// 只把 GITHUB_TOKEN 发回 GitHub 官方主机：
+	// 走镜像时绝不附带，否则 token 就泄露给第三方了。
 	if u.opts.Token != "" && sameHost(raw, u.opts.APIBase) {
 		req.Header.Set("Authorization", "Bearer "+u.opts.Token)
 	}
@@ -482,19 +618,32 @@ func sameHost(raw, base string) bool {
 	return strings.EqualFold(ru.Host, bu.Host)
 }
 
-// assetURL 支持只前缀镜像（例如 https://ghfast.top/），不改写 GitHub API 返回的路径。
-func (u *Updater) assetURL(raw string) string {
-	if raw == "" {
-		return raw
+// hostOf 返回 URL 的主机名，用于错误信息里区分具体是哪个源失败。
+func hostOf(raw string) string {
+	if u, err := url.Parse(raw); err == nil && u.Host != "" {
+		return u.Host
 	}
-	base := strings.TrimRight(u.opts.DownloadBase, "/")
-	if base == "" {
-		return raw
+	return raw
+}
+
+// ParseMirrors 解析空格/逗号分隔的镜像前缀列表；缺少 scheme 时补 https://。
+// 空串返回 nil，New 会退回内置默认镜像。
+func ParseMirrors(s string) []string {
+	fields := strings.FieldsFunc(s, func(r rune) bool {
+		return r == ' ' || r == ',' || r == '\t' || r == '\n'
+	})
+	var out []string
+	for _, f := range fields {
+		f = strings.TrimSpace(f)
+		if f == "" {
+			continue
+		}
+		if !strings.Contains(f, "://") {
+			f = "https://" + f
+		}
+		out = append(out, strings.TrimRight(f, "/"))
 	}
-	if _, err := url.Parse(raw); err != nil {
-		return raw
-	}
-	return base + "/" + raw
+	return out
 }
 
 func (u *Updater) targetPath() (string, error) {

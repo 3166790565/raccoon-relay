@@ -64,6 +64,7 @@ type Config struct {
 	GitHubToken        string
 	UpdateAPIBase      string
 	UpdateDownloadBase string
+	UpdateMirrors      string // 空格/逗号分隔的镜像前缀，直连失败时依次兜底
 	UpdateTarget       string
 }
 
@@ -165,6 +166,7 @@ func Load() (*Config, error) {
 		GitHubToken:        env("GITHUB_TOKEN", ""),
 		UpdateAPIBase:      strings.TrimRight(env("UPDATE_API_BASE", "https://api.github.com"), "/"),
 		UpdateDownloadBase: strings.TrimRight(env("UPDATE_DOWNLOAD_BASE", ""), "/"),
+		UpdateMirrors:      env("UPDATE_MIRRORS", ""),
 		UpdateTarget:       env("UPDATE_TARGET", ""),
 	}
 	if c.AdminToken == "" {
