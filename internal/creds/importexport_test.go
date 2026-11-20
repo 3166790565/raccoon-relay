@@ -128,9 +128,9 @@ func TestImportDedupesByUID(t *testing.T) {
 
 // agent2api 多供应商导出：只保留 raccoon 账号，其余计入跳过报告。
 func TestParseImportAgent2APIFiltersOtherProviders(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join("testdata", "agent2api-mixed.json"))
+	raw, err := readAgent2APISample()
 	if err != nil {
-		t.Fatal(err)
+		t.Skip("缺少样例文件，跳过")
 	}
 	list, report, err := ParseImportWithReport(raw)
 	if err != nil {
@@ -201,9 +201,9 @@ func TestAgent2APIProviderFallbackToIssuer(t *testing.T) {
 
 // 导入后走完整入库：enabled 状态落库，权重等既有字段不被 agent2api 覆盖。
 func TestImportAgent2APIAccounts(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join("testdata", "agent2api-mixed.json"))
+	raw, err := readAgent2APISample()
 	if err != nil {
-		t.Fatal(err)
+		t.Skip("缺少样例文件，跳过")
 	}
 	list, _, err := ParseImportWithReport(raw)
 	if err != nil {
@@ -290,9 +290,9 @@ func TestExportReimportable(t *testing.T) {
 // agent2api 的 refresh_token 与 access_token 是同一枚凭据，导入时应直接用
 // pluginSecret.accessToken 回填 refreshToken，这样 30 天后还能自动续期。
 func TestImportAgent2APIFillsRefreshToken(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join("testdata", "agent2api-mixed.json"))
+	raw, err := readAgent2APISample()
 	if err != nil {
-		t.Fatal(err)
+		t.Skip("缺少样例文件，跳过")
 	}
 	list, _, err := ParseImportWithReport(raw)
 	if err != nil {
@@ -303,4 +303,10 @@ func TestImportAgent2APIFillsRefreshToken(t *testing.T) {
 			t.Fatalf("%s 的 refreshToken 应等于 token，实际 %q vs %q", a.UID, a.RefreshToken, a.Token)
 		}
 	}
+}
+
+// readAgent2APISample 读 agent2api 样例。该文件含真实 token，被 .gitignore 排除，
+// CI 上没有它，调用方要按「缺少样例则跳过」处理。
+func readAgent2APISample() ([]byte, error) {
+	return os.ReadFile(filepath.Join("testdata", "agent2api-mixed.json"))
 }
