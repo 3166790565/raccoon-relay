@@ -1,6 +1,7 @@
 package logmgr
 
 import (
+	"context"
 	"io"
 	"os"
 	"path/filepath"
@@ -157,6 +158,35 @@ func TestPruneByRetainDays(t *testing.T) {
 }
 
 // 跨天时旧当前文件应被归档，而不是让新日志接在旧文件后面。
+// 清理要把运行事件一起按流水保留天数删掉，否则排障数据会比流水先滚掉。
+func TestCleanPurgesRuntimeEvents(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, err := store.Open(dir, "", true)
+	if err != nil {
+		t.Fatalf("开库失败: %v", err)
+	}
+	defer st.Close()
+
+	old := time.Now().AddDate(0, 0, -10).UnixMilli()
+	if err := st.AddEvent(ctx, store.RuntimeEvent{TS: old, Message: "旧事件"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AddEvent(ctx, store.RuntimeEvent{Message: "新事件"}); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newTest(Config{Enable: false, Dir: dir, DBRetainDays: 7, MaxSizeMB: 1, MaxFiles: 5}, st)
+	defer m.Close()
+	res := m.CleanNow(ctx)
+	if res.RemovedEvents != 1 {
+		t.Fatalf("应删除 1 条过期事件，实际 %d", res.RemovedEvents)
+	}
+	if count, _, _ := st.EventStats(ctx); count != 1 {
+		t.Fatalf("应剩 1 条事件，实际 %d", count)
+	}
+}
+
 func TestArchiveStaleCurrentFile(t *testing.T) {
 	dir := t.TempDir()
 	cur := filepath.Join(dir, currentName)

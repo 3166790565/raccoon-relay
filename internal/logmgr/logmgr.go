@@ -73,6 +73,7 @@ type CleanResult struct {
 	FreedBytes     int64  `json:"freedBytes"`
 	RemovedUsage   int64  `json:"removedUsage"`
 	RemovedCheckin int64  `json:"removedCheckin"`
+	RemovedEvents  int64  `json:"removedEvents"`
 	Error          string `json:"error,omitempty"`
 }
 
@@ -413,6 +414,12 @@ func (m *Manager) Status(ctx context.Context) map[string]any {
 		} else {
 			out["checkinCount"] = -1
 		}
+		if n, earliest, err := m.st.EventStats(ctx); err == nil {
+			out["eventCount"] = n
+			out["eventEarliest"] = earliest
+		} else {
+			out["eventCount"] = -1
+		}
 	}
 	return out
 }
@@ -468,15 +475,32 @@ func (m *Manager) finishClean(ctx context.Context, cfg Config, res CleanResult) 
 				break
 			}
 		}
+		// 运行事件和调用流水同口径保留，否则排障数据会比流水先消失。
+		for i := 0; i < maxBatches; i++ {
+			if ctx.Err() != nil {
+				break
+			}
+			n, err := m.st.PurgeEventsBefore(ctx, cutoff.UnixMilli(), batch)
+			if err != nil {
+				if res.Error == "" {
+					res.Error = err.Error()
+				}
+				break
+			}
+			res.RemovedEvents += n
+			if n < batch {
+				break
+			}
+		}
 	}
 	m.mu.Lock()
 	m.lastClean = time.Now()
 	m.lastResult = res
 	m.mu.Unlock()
 
-	if res.RemovedFiles > 0 || res.RemovedUsage > 0 || res.RemovedCheckin > 0 {
-		log.Printf("[日志] 清理完成：删除归档 %d 个（%.1f MB），调用流水 %d 条，签到记录 %d 条",
-			res.RemovedFiles, float64(res.FreedBytes)/1024/1024, res.RemovedUsage, res.RemovedCheckin)
+	if res.RemovedFiles > 0 || res.RemovedUsage > 0 || res.RemovedCheckin > 0 || res.RemovedEvents > 0 {
+		log.Printf("[日志] 清理完成：删除归档 %d 个（%.1f MB），调用流水 %d 条，签到记录 %d 条，运行事件 %d 条",
+			res.RemovedFiles, float64(res.FreedBytes)/1024/1024, res.RemovedUsage, res.RemovedCheckin, res.RemovedEvents)
 	}
 	if res.Error != "" {
 		log.Printf("[日志] 清理时出错：%s", res.Error)

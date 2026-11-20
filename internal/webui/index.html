@@ -291,34 +291,154 @@
       </section>
     </section>
 
-    <!-- 运行日志（进程日志文件 + 自动清理） -->
-    <section class="page" id="page-syslogs">
-      <section class="card">
+    <!-- 运行日志（结构化事件流 + 文件与清理） -->
+    <section class="page xwide" id="page-syslogs">
+      <section class="card log-card">
+        <div class="cardhead log-head">
+          <div class="log-title">
+            <h2>运行日志</h2>
+            <span class="log-count" id="evHeaderCount">-</span>
+            <span class="hint">上游失败、换号、冷却、签到、续期等事件，按时间倒序</span>
+          </div>
+          <div class="row">
+            <label class="auto-refresh" title="停留在本页且标签可见时，按所选间隔自动刷新">
+              <input type="checkbox" id="evAuto">
+              <span>实时刷新</span>
+              <select id="evAutoSec">
+                <option value="5">5 秒</option>
+                <option value="10" selected>10 秒</option>
+                <option value="30">30 秒</option>
+                <option value="60">60 秒</option>
+              </select>
+              <i class="auto-dot" id="evAutoDot"></i>
+            </label>
+            <button class="ghost" id="refreshSyslogsBtn">刷新</button>
+            <button class="danger" id="cleanLogsBtn">清理日志</button>
+          </div>
+        </div>
+
+        <!-- 等级标签 -->
+        <div class="ev-tabs">
+          <div class="seg" id="evLevel" role="tablist">
+            <button class="on" data-v="">全部 <b id="evCountAll">0</b></button>
+            <button data-v="info">信息 <b id="evCountInfo">0</b></button>
+            <button data-v="warn">警告 <b id="evCountWarn">0</b></button>
+            <button data-v="error">错误 <b id="evCountError">0</b></button>
+          </div>
+          <div class="seg log-range" id="evRange">
+            <button class="on" data-v="today">今天</button>
+            <button data-v="yesterday">昨天</button>
+            <button data-v="7d">7 天</button>
+            <button data-v="30d">30 天</button>
+            <button data-v="all">全部</button>
+          </div>
+          <div class="search log-search">
+            <span>⌕</span>
+            <input id="evSearch" placeholder="事件 / 原因 / 账号 / 来源" autocomplete="off">
+          </div>
+          <!-- 筛选面板：来源多选、账号、只看到异常的快捷开关 -->
+          <div class="ev-filterwrap">
+            <button class="ghost" id="evFilterBtn">来源 <b id="evFilterCount"></b> ▾</button>
+          </div>
+          <label class="lf-check">
+            <input type="checkbox" id="evProblem">
+            <span>只看异常</span>
+          </label>
+          <button class="ghost tiny" id="evReset">重置</button>
+        </div>
+        <div class="ev-chipbar" id="evChipBar" hidden></div>
+
+        <div class="log-wrap ev-wrap">
+          <table id="evTable" class="log-table ev-table">
+            <thead><tr>
+              <th class="ev-c-time">时间</th>
+              <th class="ev-c-level">级别</th>
+              <th class="ev-c-scope">来源</th>
+              <th class="ev-c-account">账号</th>
+              <th class="ev-c-msg">事件摘要</th>
+              <th class="ev-c-count">次数</th>
+              <th class="ev-c-detail"></th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+          <p class="empty" id="evEmpty" hidden>当前筛选下没有运行日志</p>
+        </div>
+
+        <div class="log-foot">
+          <span class="hint" id="evRangeInfo">共 0 条</span>
+          <span class="grow"></span>
+          <span class="hint" id="evPageInfo">第 1 / 1 页</span>
+          <label class="lf-field tiny-field">每页
+            <select id="evPageSize">
+              <option value="20">20</option>
+              <option value="50" selected>50</option>
+              <option value="100">100</option>
+              <option value="200">200</option>
+            </select>
+          </label>
+          <label class="lf-field tiny-field">跳至
+            <input id="evJump" type="number" min="1" value="1">
+            <span>页</span>
+          </label>
+          <button class="ghost tiny" id="evPrev">上一页</button>
+          <button class="ghost tiny" id="evNext">下一页</button>
+        </div>
+        <p class="msg" id="syslogMsg"></p>
+      </section>
+
+      <!-- 折叠的资源概览：平时不占地方，要看文件/清理情况再展开 -->
+      <details class="card ev-fold" id="evManageFold">
+        <summary>日志存储与清理</summary>
         <div class="cardhead">
           <h2>日志概览</h2>
           <div class="row">
-            <button class="ghost" id="refreshSyslogsBtn">刷新</button>
-            <button class="primary" id="cleanLogsBtn">立即清理</button>
+            <button class="ghost" id="refreshSysStatusBtn">刷新概览</button>
+            <button class="ghost danger" id="cleanLogsBtn2">立即清理</button>
           </div>
         </div>
         <div class="grid" id="logStats"></div>
         <p class="hint" id="logLastClean"></p>
-      </section>
-
-      <section class="card">
-        <div class="cardhead">
-          <h2>日志文件</h2>
-          <span class="hint">当前文件超过大小上限或跨天时自动轮转，归档按保留天数与数量上限清理。</span>
-        </div>
         <div class="tablewrap">
           <table id="logFileTable">
             <thead><tr><th>文件</th><th>大小</th><th>修改时间</th><th>操作</th></tr></thead>
             <tbody></tbody>
           </table>
         </div>
-        <p class="msg" id="syslogMsg"></p>
-      </section>
+        <p class="hint">当前文件超过大小上限或跨天时自动轮转，归档按保留天数与数量上限清理。</p>
+      </details>
     </section>
+
+    <!-- 运行日志筛选弹层 -->
+    <div class="modal-scrim" id="evModal" hidden>
+      <div class="modal">
+        <div class="modal-head">
+          <h3 id="evModalTitle">筛选日志</h3>
+          <button class="ghost tiny" id="evModalClose">关闭</button>
+        </div>
+        <div class="modal-body" id="evModalBody"></div>
+        <div class="modal-foot">
+          <button class="ghost" id="evModalReset">重置</button>
+          <span class="grow"></span>
+          <button class="primary" id="evModalApply">应用筛选</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 运行日志详情弹层 -->
+    <div class="modal-scrim" id="evDetailModal" hidden>
+      <div class="modal wide">
+        <div class="modal-head">
+          <h3>运行日志详情</h3>
+          <button class="ghost tiny" id="evDetailClose">关闭</button>
+        </div>
+        <div class="modal-body" id="evDetailBody"></div>
+        <div class="modal-foot">
+          <button class="ghost tiny" id="evDetailCopy">复制详情</button>
+          <span class="grow"></span>
+          <span class="hint" id="evDetailMeta"></span>
+        </div>
+      </div>
+    </div>
 
     <!-- 版本更新 -->
     <section class="page" id="page-update">

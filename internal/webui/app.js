@@ -1412,7 +1412,7 @@ function openLogDetail(anchor) {
   document.getElementById('ldClose').addEventListener('click', closePop);
 }
 
-// ---------- 运行日志（文件 + 自动清理） ----------
+// ---------- 运行日志（结构化事件流 + 文件与清理） ----------
 function fmtSize(n) {
   const v = Number(n) || 0;
   if (v < 1024) return v + ' B';
@@ -1420,10 +1420,375 @@ function fmtSize(n) {
   return (v / 1024 / 1024).toFixed(2) + ' MB';
 }
 
+// 事件筛选状态。和调用日志一样，条件全部保存在这里，翻页只改 page。
+const EV = {
+  level: '', range: 'today', problem: false, scopes: [], account: '', q: '',
+  page: 1, pageSize: 50, total: 0, pages: 1, seq: 0, facetsLoaded: false,
+  scopeLabels: {}, scopesKnown: [],
+};
+let EV_ROWS = [];
+
+const LEVEL_LABEL = { info: '信息', warn: '警告', error: '错误' };
+const SCOPE_FALLBACK = {
+  relay: '转发请求', pool: '号池冷却', checkin: '自动签到', renew: '凭证续期',
+  update: '版本更新', logs: '日志管理', account: '账号操作', system: '系统',
+};
+
+function evScopeLabel(s) {
+  return EV.scopeLabels[s] || SCOPE_FALLBACK[s] || s || '-';
+}
+
+function evRangeBounds() {
+  const now = new Date();
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const day = 86400000;
+  switch (EV.range) {
+    case 'today': return { since: startOfToday, until: 0, label: '今天' };
+    case 'yesterday': return { since: startOfToday - day, until: startOfToday, label: '昨天' };
+    case '7d': return { since: startOfToday - 6 * day, until: 0, label: '近 7 天' };
+    case '30d': return { since: startOfToday - 29 * day, until: 0, label: '近 30 天' };
+    default: return { since: 0, until: 0, label: '全部时间' };
+  }
+}
+
+function evLevelCell(level) {
+  const cls = level === 'error' ? 'bad' : level === 'warn' ? 'warn' : 'ok';
+  return `<span class="lpill ${cls}">${esc(LEVEL_LABEL[level] || level)}</span>`;
+}
+
+// 摘要行：主行是事件标题，副行是 detail 的第一行（通常是具体原因）。
+function evMessageCell(e) {
+  const first = String(e.detail || '').split('\n').find((x) => x.trim()) || '';
+  const sub = first.length > 120 ? first.slice(0, 120) + '…' : first;
+  const countHint = e.count > 1
+    ? `<span class="ev-repeat" title="同一事件在合并窗口内重复出现，已折叠">近 ${e.count} 次</span>`
+    : '';
+  return `<div class="ev-msg">
+    <div class="ev-msg-main" title="${esc(e.message)}">${esc(e.message)}${countHint}</div>
+    ${sub ? `<div class="ev-msg-sub" title="${esc(first)}">${esc(sub)}</div>` : ''}
+  </div>`;
+}
+
+function renderEvRows(rows) {
+  const tbody = $('evTable').querySelector('tbody');
+  $('evEmpty').hidden = rows.length > 0;
+  if (!rows.length) { tbody.innerHTML = ''; return; }
+  tbody.innerHTML = rows.map((e) => {
+    const uid = e.accountUID || e.accountId || '';
+    const acc = e.accountName
+      ? `<div class="log-acc"><div class="acc-name" title="${esc(uid)}">${esc(e.accountName)}</div><div class="acc-sub">${esc(shortUID(uid))}</div></div>`
+      : (uid ? `<div class="log-acc"><div class="acc-name">${esc(shortUID(uid))}</div></div>` : '<span class="dim">-</span>');
+    return `<tr data-id="${esc(e.id)}" class="ev-row ${e.level}">
+      <td class="ev-c-time"><div class="log-time">${esc(fmtClock(e.ts))}</div></td>
+      <td class="ev-c-level">${evLevelCell(e.level)}</td>
+      <td class="ev-c-scope"><span class="tag">${esc(evScopeLabel(e.scope))}</span></td>
+      <td class="ev-c-account">${acc}</td>
+      <td class="ev-c-msg">${evMessageCell(e)}</td>
+      <td class="ev-c-count"><span class="ev-count ${e.count > 1 ? 'hot' : ''}">${e.count > 1 ? '×' + e.count : '—'}</span></td>
+      <td class="ev-c-detail"><button class="ghost tiny ev-detail" data-id="${esc(e.id)}">详情</button></td>
+    </tr>`;
+  }).join('');
+}
+
+function renderEvFoot(sum) {
+  const pages = Math.max(1, EV.pages);
+  const b = evRangeBounds();
+  EV.total = (sum && sum.total) || 0;
+  $('evCountAll').textContent = String(EV.total);
+  $('evCountInfo').textContent = String(Math.max(0, EV.total - ((sum && sum.failed) || 0) - ((sum && sum.warning) || 0)));
+  $('evCountWarn').textContent = String((sum && sum.warning) || 0);
+  $('evCountError').textContent = String((sum && sum.failed) || 0);
+  $('evHeaderCount').innerHTML = `${EV.total} 条` +
+    (sum && sum.failed ? ` · <span class="bad">${sum.failed} 错误</span>` : '') +
+    (sum && sum.warning ? ` · <span class="warn">${sum.warning} 警告</span>` : '');
+  $('evRangeInfo').innerHTML = `${esc(b.label)} · 共 ${EV.total} 条`;
+  $('evPageInfo').textContent = `第 ${EV.page} / ${pages} 页`;
+  $('evPrev').disabled = EV.page <= 1;
+  $('evNext').disabled = EV.page >= pages;
+  $('evJump').max = String(pages);
+  if (document.activeElement !== $('evJump')) $('evJump').value = String(EV.page);
+}
+
+function evQuery() {
+  const b = evRangeBounds();
+  const p = new URLSearchParams();
+  if (b.since) p.set('since', b.since);
+  if (b.until) p.set('until', b.until);
+  if (EV.level) p.set('level', EV.level);
+  if (EV.problem) p.set('problem', '1');
+  if (EV.scopes.length) p.set('scopes', EV.scopes.join(','));
+  if (EV.account) p.set('account', EV.account);
+  if (EV.q.trim()) p.set('q', EV.q.trim());
+  p.set('page', EV.page);
+  p.set('pageSize', EV.pageSize);
+  return p;
+}
+
+async function loadEvents() {
+  const seq = ++EV.seq;
+  $('syslogMsg').textContent = '';
+  try {
+    const r = await api('/api/logs/events?' + evQuery().toString());
+    if (seq !== EV.seq) return; // 快速翻页/改筛选时丢弃过期响应
+    EV.total = (r.summary && r.summary.total) || 0;
+    EV.pages = r.pages || 1;
+    if (EV.page > EV.pages) { EV.page = EV.pages; return loadEvents(); }
+    EV.page = r.page || EV.page;
+    EV_ROWS = r.events || [];
+    renderEvRows(EV_ROWS);
+    renderEvFoot(r.summary);
+  } catch (e) {
+    if (seq === EV.seq) $('syslogMsg').textContent = e.message;
+  }
+}
+
+// 来源下拉依赖历史事件里出现过的值，缓存一次即可。
+async function ensureEvFacets() {
+  try {
+    const f = await api('/api/logs/events/facets');
+    EV.scopeLabels = f.labels || SCOPE_FALLBACK;
+    EV.scopesKnown = f.scopes || [];
+    EV.facetsLoaded = true;
+    syncEvFilterUI();
+  } catch { /* 拉不到就用内置字典 */ }
+}
+
+function applyEvFilter() {
+  EV.page = 1;
+  loadEvents();
+}
+
+function gotoEvPage(p) {
+  EV.page = Math.max(1, Math.min(EV.pages || 1, p));
+  loadEvents();
+}
+
+function syncEvFilterUI() {
+  document.querySelectorAll('#evLevel button').forEach((b) => b.classList.toggle('on', b.dataset.v === EV.level));
+  document.querySelectorAll('#evRange button').forEach((b) => b.classList.toggle('on', b.dataset.v === EV.range));
+  $('evProblem').checked = EV.problem;
+  $('evSearch').value = EV.q;
+  $('evFilterCount').textContent = EV.scopes.length ? String(EV.scopes.length) : '';
+  // 已被选中的来源做成可点掉的标签条，收起时也知道当前筛了什么
+  const bar = $('evChipBar');
+  if (!EV.scopes.length) { bar.hidden = true; bar.innerHTML = ''; return; }
+  bar.hidden = false;
+  bar.innerHTML = EV.scopes.map((s) =>
+    `<button class="ev-chip" data-scope="${esc(s)}">${esc(evScopeLabel(s))}<i>×</i></button>`).join('');
+}
+
+document.querySelectorAll('#evLevel button').forEach((b) => {
+  b.addEventListener('click', () => { EV.level = b.dataset.v; EV.page = 1; syncEvFilterUI(); loadEvents(); });
+});
+document.querySelectorAll('#evRange button').forEach((b) => {
+  b.addEventListener('click', () => { EV.range = b.dataset.v; syncEvFilterUI(); applyEvFilter(); });
+});
+$('evProblem').addEventListener('change', () => { EV.problem = $('evProblem').checked; EV.page = 1; loadEvents(); });
+$('evPageSize').addEventListener('change', () => { EV.pageSize = Number($('evPageSize').value) || 50; applyEvFilter(); });
+$('evPrev').addEventListener('click', () => gotoEvPage(EV.page - 1));
+$('evNext').addEventListener('click', () => gotoEvPage(EV.page + 1));
+$('evJump').addEventListener('change', () => gotoEvPage(Number($('evJump').value) || 1));
+
+$('evChipBar').addEventListener('click', (e) => {
+  const chip = e.target.closest('.ev-chip');
+  if (!chip) return;
+  EV.scopes = EV.scopes.filter((s) => s !== chip.dataset.scope);
+  syncEvFilterUI();
+  applyEvFilter();
+});
+
+let evSearchTimer = null;
+$('evSearch').addEventListener('input', () => {
+  clearTimeout(evSearchTimer);
+  const v = $('evSearch').value;
+  evSearchTimer = setTimeout(() => { EV.q = v; EV.page = 1; loadEvents(); }, 300);
+});
+$('evSearch').addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter') return;
+  clearTimeout(evSearchTimer);
+  EV.q = $('evSearch').value;
+  EV.page = 1;
+  loadEvents();
+});
+
+$('evReset').addEventListener('click', () => {
+  Object.assign(EV, { level: '', range: 'today', problem: false, scopes: [], account: '', q: '' });
+  syncEvFilterUI();
+  applyEvFilter();
+});
+
+// 来源多选 + 账号筛选放在弹层里：平时筛选条已经很满，展开会把行挤到两行。
+$('evFilterBtn').addEventListener('click', (e) => {
+  const scopes = EV.facetsLoaded && EV.scopesKnown.length ? EV.scopesKnown : Object.keys(SCOPE_FALLBACK);
+  $('evModalTitle').textContent = '筛选运行日志';
+  $('evModalBody').innerHTML = `
+    <div class="ev-modal-sec">
+      <div class="ev-modal-label">来源（可多选）</div>
+      <div class="ev-modal-checks" id="evScopeChecks">
+        ${scopes.map((s) => `<label class="ev-check">
+          <input type="checkbox" value="${esc(s)}" ${EV.scopes.includes(s) ? 'checked' : ''}>
+          <span>${esc(evScopeLabel(s))}</span>
+        </label>`).join('')}
+      </div>
+    </div>
+    <div class="ev-modal-sec">
+      <div class="ev-modal-label">账号</div>
+      <input id="evAccountInput" placeholder="按账号 UID 或名称包含…" value="${esc(EV.account)}" list="evAccountList">
+      <datalist id="evAccountList">${(STATE.accounts || []).map((a) =>
+        `<option value="${esc(a.id)}">${esc(a.name || shortUID(a.uid))}</option>`).join('')}</datalist>
+    </div>`;
+  openEvModal('evModal');
+});
+
+$('evModalApply').addEventListener('click', () => {
+  EV.scopes = Array.from($('evScopeChecks').querySelectorAll('input:checked')).map((x) => x.value);
+  const acc = $('evAccountInput');
+  EV.account = acc ? acc.value.trim() : EV.account;
+  closeEvModal('evModal');
+  syncEvFilterUI();
+  applyEvFilter();
+});
+$('evModalReset').addEventListener('click', () => {
+  $('evScopeChecks').querySelectorAll('input').forEach((x) => { x.checked = false; });
+  if ($('evAccountInput')) $('evAccountInput').value = '';
+});
+$('evModalClose').addEventListener('click', () => closeEvModal('evModal'));
+
+function openEvModal(id) {
+  $(id).hidden = false;
+  document.body.classList.add('modal-open');
+}
+function closeEvModal(id) {
+  $(id).hidden = true;
+  if (document.querySelectorAll('.modal-scrim:not([hidden])').length === 0) {
+    document.body.classList.remove('modal-open');
+  }
+}
+document.querySelectorAll('.modal-scrim').forEach((scrim) => {
+  scrim.addEventListener('click', (e) => { if (e.target === scrim) closeEvModal(scrim.id); });
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  document.querySelectorAll('.modal-scrim:not([hidden])').forEach((s) => closeEvModal(s.id));
+});
+
+// 详情：两个视图 —— 人读的字段视图，和可复制的原始 JSON（等同于事件落库的样子）。
+let evDetailRow = null;
+$('evTable').addEventListener('click', (e) => {
+  const btn = e.target.closest('.ev-detail');
+  if (!btn) return;
+  const row = EV_ROWS.find((x) => String(x.id) === String(btn.dataset.id));
+  if (!row) return;
+  evDetailRow = row;
+  renderEvDetail('fields');
+  openEvModal('evDetailModal');
+});
+
+function renderEvDetail(tab) {
+  const e = evDetailRow;
+  if (!e) return;
+  const kv = (k, v) => `<div class="ld-row"><span class="ld-k">${esc(k)}</span><span class="ld-v">${v}</span></div>`;
+  const uid = e.accountUID || e.accountId || '';
+  const meta = `#${e.id} · ${e.count > 1 ? `合并 ${e.count} 次 · ` : ''}最近 ${fmtClock(e.lastTs || e.ts)}`;
+  $('evDetailMeta').textContent = meta;
+
+  const raw = JSON.stringify({
+    id: e.id, ts: e.ts, lastTs: e.lastTs, level: e.level, scope: e.scope,
+    component: e.component, accountId: e.accountId, accountName: e.accountName,
+    accountUid: e.accountUid, message: e.message, detail: e.detail, count: e.count,
+  }, null, 2);
+
+  const tabs = `<div class="ev-dtabs">
+    <button class="${tab === 'fields' ? 'on' : ''}" data-tab="fields">字段视图</button>
+    <button class="${tab === 'raw' ? 'on' : ''}" data-tab="raw">原始记录</button>
+  </div>`;
+
+  const fields = `<div class="ev-detail-head">
+      ${evLevelCell(e.level)}
+      <span class="ev-detail-msg">${esc(e.message)}</span>
+    </div>
+    <div class="ev-detail-time">${esc(fmtClock(e.ts))}${e.count > 1 ? ` · 合并 ${e.count} 次，最近 ${esc(fmtClock(e.lastTs))}` : ''}</div>
+    <div class="pop-body ev-detail-kv">
+      ${kv('来源', `<span class="tag">${esc(evScopeLabel(e.scope))}</span> <span class="hint">${esc(e.scope)}</span>`)}
+      ${kv('组件', esc(e.component || '-'))}
+      ${kv('账号', e.accountName ? `${esc(e.accountName)} <span class="hint">${esc(uid)}</span>` : (uid ? esc(uid) : '-'))}
+      ${kv('事件', esc(e.message))}
+    </div>
+    ${e.detail ? `<div class="ev-detail-block"><div class="ev-detail-label">详情</div><pre class="ld-err ev-pre">${esc(e.detail)}</pre></div>` : ''}`;
+
+  const rawView = `<div class="ev-detail-block"><pre class="ld-err ev-pre raw">${esc(raw)}</pre></div>`;
+
+  $('evDetailBody').innerHTML = tabs + (tab === 'fields' ? fields : rawView);
+  $('evDetailBody').querySelectorAll('.ev-dtabs button').forEach((b) => {
+    b.addEventListener('click', () => renderEvDetail(b.dataset.tab));
+  });
+}
+
+$('evDetailClose').addEventListener('click', () => closeEvModal('evDetailModal'));
+$('evDetailCopy').addEventListener('click', async () => {
+  const e = evDetailRow;
+  if (!e) return;
+  const text = `[${fmtClock(e.ts)}] [${e.level.toUpperCase()}] [${e.scope}/${e.component}] ${e.message}\n${e.detail || ''}`;
+  try {
+    await navigator.clipboard.writeText(text);
+    $('evDetailCopy').textContent = '已复制';
+    setTimeout(() => { $('evDetailCopy').textContent = '复制详情'; }, 1500);
+  } catch {
+    $('evDetailCopy').textContent = '复制失败';
+  }
+});
+
+// 实时刷新：和调用日志同一套策略，切走或标签隐藏就停，请求不叠加。
+const EV_AUTO = { on: false, sec: 10, timer: null, inflight: false };
+
+function evAutoTick() {
+  if (!EV_AUTO.on || EV_AUTO.inflight || STATE.page !== 'syslogs' || document.hidden) return;
+  EV_AUTO.inflight = true;
+  Promise.resolve(loadEvents()).finally(() => { EV_AUTO.inflight = false; });
+}
+
+function syncEvAuto() {
+  clearInterval(EV_AUTO.timer);
+  EV_AUTO.timer = null;
+  if (EV_AUTO.on) EV_AUTO.timer = setInterval(evAutoTick, EV_AUTO.sec * 1000);
+  $('evAutoDot').classList.toggle('on', EV_AUTO.on);
+  localStorage.setItem('evAutoRefresh', JSON.stringify({ on: EV_AUTO.on, sec: EV_AUTO.sec }));
+  if (EV_AUTO.on) evAutoTick();
+}
+
+$('evAuto').addEventListener('change', () => { EV_AUTO.on = $('evAuto').checked; syncEvAuto(); });
+$('evAutoSec').addEventListener('change', () => {
+  EV_AUTO.sec = Number($('evAutoSec').value) || 10;
+  syncEvAuto();
+});
+
+// 切回浏览器标签时补一次，不让页面停在切走前的那一刻。
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && EV_AUTO.on) evAutoTick();
+});
+
+// 恢复上次的实时刷新设置（默认关闭）。
+try {
+  const saved = JSON.parse(localStorage.getItem('evAutoRefresh') || '{}');
+  if (saved.on) {
+    EV_AUTO.on = true;
+    EV_AUTO.sec = Number(saved.sec) || 10;
+    $('evAuto').checked = true;
+    $('evAutoSec').value = String(EV_AUTO.sec);
+  }
+} catch { /* 存储被清或格式坏了就用默认值 */ }
+syncEvAuto();
+
+// ---------- 日志存储与清理 ----------
 async function loadSysLogs() {
+  // 页面加载器同时负责事件流和存储概览：事件流是主视图，概览失败不影响它。
+  await Promise.all([ensureEvFacets().then(() => loadEvents()), loadSysStatus()]);
+}
+
+async function loadSysStatus() {
   try {
     const r = await api('/api/logs/manage');
-    if (!r.ok) { $('syslogMsg').textContent = r.message || '日志管理未启用'; return; }
+    if (!r.ok) { $('logStats').innerHTML = `<div class="stat"><div class="k">状态</div><div class="v">${esc(r.message || '日志管理未启用')}</div></div>`; return; }
     const s = r.status || {};
     const c = s.config || {};
 
@@ -1431,17 +1796,18 @@ async function loadSysLogs() {
       ['日志目录', c.logDir || '-'],
       ['文件日志', c.logFileEnable ? '开启' : '关闭'],
       ['日志文件', `${s.fileCount || 0} 个 · ${fmtSize(s.fileBytes)}`],
-      ['单文件上限', `${c.logMaxSizeMB || 0} MB`],
+      ['运行事件', s.eventCount >= 0 ? `${s.eventCount || 0} 条` : '未知'],
       ['调用流水', s.usageCount >= 0 ? `${s.usageCount || 0} 条` : '未知'],
       ['签到记录', s.checkinCount >= 0 ? `${s.checkinCount || 0} 条` : '未知'],
       ['自动清理', c.logCleanEnable ? `开启 · 每 ${c.logCleanIntervalMin} 分钟` : '关闭'],
-      ['保留策略', `文件 ${c.logFileRetainDays || 0} 天 / 流水 ${c.logDBRetainDays || 0} 天`],
+      ['保留策略', `文件 ${c.logFileRetainDays || 0} 天 / 库内 ${c.logDBRetainDays || 0} 天`],
     ].map(([k, v]) => `<div class="stat"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></div>`).join('');
 
     const lc = s.lastCleanResult || {};
     if (s.lastClean) {
       const parts = [`上次清理 ${fmtTime(s.lastClean)}`];
       parts.push(`删除文件 ${lc.removedFiles || 0} 个（${fmtSize(lc.freedBytes)}）`);
+      parts.push(`事件 ${lc.removedEvents || 0} 条`);
       parts.push(`流水 ${lc.removedUsage || 0} 条`);
       parts.push(`签到 ${lc.removedCheckin || 0} 条`);
       if (lc.error) parts.push('错误：' + lc.error);
@@ -1467,12 +1833,14 @@ async function loadSysLogs() {
   }
 }
 
-$('refreshSyslogsBtn').addEventListener('click', async () => {
+$('refreshSyslogsBtn').addEventListener('click', () => {
   $('syslogMsg').textContent = '';
-  await loadSysLogs();
+  EV.facetsLoaded = false;
+  loadSysLogs();
 });
+$('refreshSysStatusBtn').addEventListener('click', () => { $('syslogMsg').textContent = ''; loadSysStatus(); });
 
-$('cleanLogsBtn').addEventListener('click', async () => {
+async function doCleanLogs() {
   if (!confirm('立即按当前策略清理过期日志与流水？')) return;
   $('syslogMsg').textContent = '清理中…';
   try {
@@ -1480,13 +1848,15 @@ $('cleanLogsBtn').addEventListener('click', async () => {
     const x = r.result || {};
     $('syslogMsg').textContent =
       `清理完成：文件 ${x.removedFiles || 0} 个（${fmtSize(x.freedBytes)}），` +
-      `调用流水 ${x.removedUsage || 0} 条，签到记录 ${x.removedCheckin || 0} 条` +
-      (x.error ? `；错误：${x.error}` : '');
-    await loadSysLogs();
+      `运行事件 ${x.removedEvents || 0} 条，调用流水 ${x.removedUsage || 0} 条，` +
+      `签到记录 ${x.removedCheckin || 0} 条` + (x.error ? `；错误：${x.error}` : '');
+    await Promise.all([loadEvents(), loadSysStatus()]);
   } catch (e) {
     $('syslogMsg').textContent = e.message;
   }
-});
+}
+$('cleanLogsBtn').addEventListener('click', doCleanLogs);
+$('cleanLogsBtn2').addEventListener('click', doCleanLogs);
 
 // ---------- 版本更新 ----------
 const UPDATE = { status: null, installing: false };

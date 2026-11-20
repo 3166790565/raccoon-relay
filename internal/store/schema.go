@@ -85,6 +85,27 @@ var schema = []string{
 		key   TEXT PRIMARY KEY,
 		value TEXT NOT NULL DEFAULT ''
 	)`,
+
+	// 运行日志事件流：进程里发生的事（上游失败、换号、限流、签到、续期……）
+	// 结构化落库，面板按级别/范围/来源/账号检索。进程日志文件只负责留原始行，
+	// 排查问题靠这张表——它能按维度筛，也能翻页。
+	`CREATE TABLE IF NOT EXISTS runtime_events (
+		id         INTEGER PRIMARY KEY AUTOINCREMENT,
+		ts         INTEGER NOT NULL,
+		level      TEXT NOT NULL DEFAULT 'info',
+		scope      TEXT NOT NULL DEFAULT '',
+		component  TEXT NOT NULL DEFAULT '',
+		account_id TEXT NOT NULL DEFAULT '',
+		message    TEXT NOT NULL DEFAULT '',
+		detail     TEXT NOT NULL DEFAULT '',
+		-- 相同事件在短时间内重复出现时合并成一条并累加次数，
+		-- 否则一条 429 风暴能把列表刷满，真正的根因反而被埋掉。
+		count      INTEGER NOT NULL DEFAULT 1,
+		last_ts    INTEGER NOT NULL DEFAULT 0
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_event_ts ON runtime_events(ts)`,
+	`CREATE INDEX IF NOT EXISTS idx_event_scope ON runtime_events(scope, id)`,
+	`CREATE INDEX IF NOT EXISTS idx_event_account ON runtime_events(account_id, id)`,
 }
 
 const schemaVersion = 1

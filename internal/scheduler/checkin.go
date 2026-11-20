@@ -47,6 +47,29 @@ type Scheduler struct {
 	lastSweep  time.Time
 	lastResult string
 	lastCount  int
+
+	// onEvent 把签到结果写成运行事件，由装配层注入。
+	onEvent func(store.RuntimeEvent)
+}
+
+// SetEventHook 注入运行事件钩子。
+func (s *Scheduler) SetEventHook(fn func(store.RuntimeEvent)) {
+	s.mu.Lock()
+	s.onEvent = fn
+	s.mu.Unlock()
+}
+
+func (s *Scheduler) emit(ev store.RuntimeEvent) {
+	s.mu.Lock()
+	fn := s.onEvent
+	s.mu.Unlock()
+	if fn == nil {
+		return
+	}
+	if ev.Scope == "" {
+		ev.Scope = store.ScopeCheckin
+	}
+	fn(ev)
 }
 
 func New(cfg *config.Config, st *store.Store, client *raccoon.Client, refresh *relay.Refresher,
@@ -249,6 +272,8 @@ func (s *Scheduler) checkinOne(ctx context.Context, a *store.Account, today stri
 		_ = s.st.UpdateAccount(ctx, a.ID, store.AccountPatch{Meta: a.Meta})
 		for _, m := range msgs {
 			log.Printf("[签到] %s 首登奖 %s", a.Name, m)
+			s.emit(store.RuntimeEvent{Level: store.LevelInfo, Component: "checkin",
+				AccountID: a.ID, Message: "首登奖到账", Detail: a.Name + "：" + m})
 		}
 	}
 
@@ -269,6 +294,8 @@ func (s *Scheduler) checkinOne(ctx context.Context, a *store.Account, today stri
 	s.refreshCredits(ctx, a)
 
 	log.Printf("[签到] %s：%s", a.Name, res.Message)
+	s.emit(store.RuntimeEvent{Level: store.LevelInfo, Component: "checkin",
+		AccountID: a.ID, Message: "签到成功", Detail: a.Name + "：" + res.Message})
 	_ = loc
 	return true
 }
@@ -283,6 +310,8 @@ func (s *Scheduler) fail(ctx context.Context, a *store.Account, today, msg strin
 		AccountID: a.ID, Day: today, Action: "checkin", OK: false, Message: msg,
 	})
 	log.Printf("[签到] %s 失败：%s", a.Name, msg)
+	s.emit(store.RuntimeEvent{Level: store.LevelWarn, Component: "checkin",
+		AccountID: a.ID, Message: "签到失败", Detail: a.Name + "：" + msg})
 }
 
 // plannedTime 计算账号今日的计划签到时刻：基准 + uid 派生的确定性抖动。

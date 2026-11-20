@@ -59,6 +59,10 @@ type Panel struct {
 	facetModels []string
 	facetAPIs   []string
 	facetAt     time.Time
+
+	// 运行日志页筛选下拉的缓存（来源清单）
+	eventScopes  []string
+	eventFacetAt time.Time
 }
 
 func New(cfg *config.Config, st *store.Store, client *raccoon.Client, refresh *relay.Refresher,
@@ -182,6 +186,10 @@ func (p *Panel) Route(w http.ResponseWriter, r *http.Request) {
 		p.handleUpdateInstall(w, r)
 	case path == "/api/update/rollback" && r.Method == http.MethodPost:
 		p.handleUpdateRollback(w, r)
+	case path == "/api/logs/events" && r.Method == http.MethodGet:
+		p.handleLogEvents(w, r)
+	case path == "/api/logs/events/facets" && r.Method == http.MethodGet:
+		p.handleLogEventFacets(w, r)
 	case path == "/api/logs/manage" && r.Method == http.MethodGet:
 		p.handleLogStatus(w, r)
 	case path == "/api/logs/clean" && r.Method == http.MethodPost:
@@ -1374,6 +1382,90 @@ func (p *Panel) handleLogFacets(w http.ResponseWriter, r *http.Request) {
 	}
 	p.facetModels, p.facetAPIs, p.facetAt = models, apis, time.Now()
 	writeJSON(w, 200, map[string]any{"ok": true, "models": models, "apis": apis})
+}
+
+// ---------- 运行日志（事件流） ----------
+
+// eventScopeLabels 是来源的中文名。前端要按来源筛选，标签和值分开返回，
+// 免得前端自己维护一份可能跟后端漂移的字典。
+var eventScopeLabels = map[string]string{
+	store.ScopeRelay:   "转发请求",
+	store.ScopePool:    "号池冷却",
+	store.ScopeCheckin: "自动签到",
+	store.ScopeRenew:   "凭证续期",
+	store.ScopeUpdate:  "版本更新",
+	store.ScopeLog:     "日志管理",
+	store.ScopeAccount: "账号操作",
+	store.ScopeSystem:  "系统",
+}
+
+// handleLogEvents 分页返回运行事件。筛选全部下推到 SQL，和调用日志一致。
+func (p *Panel) handleLogEvents(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	num := func(key string, def int) int {
+		if v, err := strconv.Atoi(q.Get(key)); err == nil {
+			return v
+		}
+		return def
+	}
+	var scopes []string
+	if raw := strings.TrimSpace(q.Get("scopes")); raw != "" {
+		for _, s := range strings.Split(raw, ",") {
+			if s = strings.TrimSpace(s); s != "" {
+				scopes = append(scopes, s)
+			}
+		}
+	}
+	f := store.EventFilter{
+		SinceMS:     int64(num("since", 0)),
+		UntilMS:     int64(num("until", 0)),
+		Level:       q.Get("level"),
+		Scopes:      scopes,
+		AccountID:   q.Get("account"),
+		Query:       q.Get("q"),
+		OnlyProblem: q.Get("problem") == "1",
+		Page:        num("page", 1),
+		PageSize:    num("pageSize", 50),
+	}
+	if f.Page <= 0 {
+		f.Page = 1
+	}
+	if f.PageSize <= 0 {
+		f.PageSize = 50
+	}
+	if f.PageSize > 500 {
+		f.PageSize = 500
+	}
+	events, sum, err := p.st.QueryEvents(r.Context(), f)
+	if err != nil {
+		writeJSON(w, 500, map[string]any{"ok": false, "message": err.Error()})
+		return
+	}
+	pages := int((sum.Total + int64(f.PageSize) - 1) / int64(f.PageSize))
+	writeJSON(w, 200, map[string]any{
+		"ok": true, "events": events, "summary": sum,
+		"page": f.Page, "pageSize": f.PageSize, "pages": pages,
+	})
+}
+
+// handleLogEventFacets 返回来源清单，缓存 30 秒。
+func (p *Panel) handleLogEventFacets(w http.ResponseWriter, r *http.Request) {
+	p.facetMu.Lock()
+	defer p.facetMu.Unlock()
+	if time.Since(p.eventFacetAt) < 30*time.Second && p.eventScopes != nil {
+		writeJSON(w, 200, map[string]any{"ok": true, "scopes": p.eventScopes, "labels": eventScopeLabels})
+		return
+	}
+	scopes, err := p.st.EventFacets(r.Context(), time.Now().AddDate(0, 0, -30).UnixMilli())
+	if err != nil {
+		writeJSON(w, 500, map[string]any{"ok": false, "message": err.Error()})
+		return
+	}
+	if scopes == nil {
+		scopes = []string{}
+	}
+	p.eventScopes, p.eventFacetAt = scopes, time.Now()
+	writeJSON(w, 200, map[string]any{"ok": true, "scopes": scopes, "labels": eventScopeLabels})
 }
 
 // ---------- 日志管理 ----------

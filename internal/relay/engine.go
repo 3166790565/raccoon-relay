@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"sync"
@@ -22,10 +23,25 @@ type Engine struct {
 	Refresher    *Refresher
 	DefaultModel string
 
+	// Event 上报运行事件（换号、上游失败、空响应）。nil 时静默跳过。
+	// 由装配层注入，避免 relay 直接依赖 admin 的写入路径。
+	Event func(store.RuntimeEvent)
+
 	// 重试策略可在运行期从面板修改，用锁保护。
 	mu                  sync.RWMutex
 	maxRetry            int
 	retryUntilExhausted bool
+}
+
+// report 写一条运行事件，失败静默。
+func (e *Engine) report(level, msg, detail string, accountID string) {
+	if e.Event == nil {
+		return
+	}
+	e.Event(store.RuntimeEvent{
+		Level: level, Scope: store.ScopeRelay, Component: "engine",
+		AccountID: accountID, Message: msg, Detail: detail,
+	})
 }
 
 // RetryPolicy 返回当前重试策略。
@@ -86,17 +102,31 @@ func (e *Engine) RunOpenAI(ctx context.Context, req *ChatContext, sink OpenAISin
 		}
 		lastErr = leaseErr
 
-		kind, switchable, _, _ := classify(leaseErr)
+		kind, switchable, code, publicMsg := classify(leaseErr)
+		level := store.LevelWarn
+		if kind == pool.FailRelogin || !switchable {
+			level = store.LevelError
+		}
+		detail := fmt.Sprintf("模型：%s\n返回码：%d\n上游错误：%s\n尝试序号：%d",
+			req.Model, code, strings.TrimSpace(leaseErr.Error()), attemptNo+1)
 		// 429 只罚「这个号 × 这个模型」，不把整个号停掉：同一个号换个模型往往还是好的。
 		// 只有模型级冷却被关闭时才退化为整号短冷却。
 		if isModelScoped(leaseErr) || (kind == pool.FailRate && e.Cool.ModelEnabled()) {
 			e.Cool.CoolModel(ctx, acc.ID, req.Model, leaseErr.Error())
+			e.report(level, "模型级冷却："+req.Model+" · "+publicMsg, detail+"\n处置：仅冷却该模型", acc.ID)
 			if at.Started {
 				return Result{AccountID: acc.ID, Model: req.Model}, leaseErr
 			}
 			continue
 		}
 		e.Cool.Cool(ctx, acc.ID, kind, leaseErr.Error())
+		action := "已换号重试"
+		if at.Started {
+			action = "已向客户端写出内容，无法换号，直接报错"
+		} else if !switchable {
+			action = "该错误不值得换号，直接报错"
+		}
+		e.report(level, "上游失败："+publicMsg, detail+"\n处置："+action, acc.ID)
 		if at.Started {
 			// 已经写出过内容，不能重试，只能如实报错
 			return Result{AccountID: acc.ID, Model: req.Model}, leaseErr
@@ -109,6 +139,9 @@ func (e *Engine) RunOpenAI(ctx context.Context, req *ChatContext, sink OpenAISin
 	if lastErr == nil {
 		lastErr = errNoAccount
 	}
+	// 号池抽干才到这里：这是要人处理的状态，按错误级别记。
+	e.report(store.LevelError, "号池无可用账号，请求失败",
+		"模型："+req.Model+"\n原因："+lastErr.Error(), "")
 	return Result{}, lastErr
 }
 
@@ -141,10 +174,15 @@ func (e *Engine) runOne(ctx context.Context, at *Attempt, req *ChatContext, sink
 		if rerr != nil {
 			var ue *raccoon.UpstreamError
 			if errors.As(rerr, &ue) && ue.Auth {
+				e.report(store.LevelError, "凭证失效，refresh_token 已不可用",
+					"账号："+at.Account.Name+"\n错误："+rerr.Error()+"\n处置：标记需重登", at.Account.ID)
 				return rerr // refresh_token 真的没了，这个号确实要重登
 			}
 			// 刷新接口自己抽风（网络/5xx）：这是临时故障，不能算到账号头上。
 			// 用 Status 0 走 FailServer → 短冷却 + 换号，账号不会被打成 relogin。
+			e.report(store.LevelWarn, "刷新令牌失败（临时故障）",
+				"账号："+at.Account.Name+"\n错误："+rerr.Error()+"\n处置：按上游故障短冷却换号，不改账号状态",
+				at.Account.ID)
 			return &raccoon.UpstreamError{Status: 0, Message: "刷新令牌失败（临时）：" + rerr.Error()}
 		}
 		at.Token = fresh
@@ -184,6 +222,8 @@ func (e *Engine) runOne(ctx context.Context, at *Attempt, req *ChatContext, sink
 	}
 
 	if !stream.Seen() {
+		e.report(store.LevelWarn, "上游返回空响应（502）",
+			"账号："+at.Account.Name+"\n模型："+req.Model+"\n上游已建连但没有任何数据块", at.Account.ID)
 		return &raccoon.UpstreamError{Status: 502, Message: "小浣熊上游返回空响应"}
 	}
 	e.Cool.MarkOnline(ctx, at.Account.ID)

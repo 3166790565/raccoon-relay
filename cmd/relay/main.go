@@ -18,6 +18,7 @@ import (
 	"github.com/3166790565/raccoon-relay/internal/config"
 	"github.com/3166790565/raccoon-relay/internal/creditsync"
 	"github.com/3166790565/raccoon-relay/internal/creds"
+	"github.com/3166790565/raccoon-relay/internal/eventlog"
 	"github.com/3166790565/raccoon-relay/internal/login"
 	"github.com/3166790565/raccoon-relay/internal/logmgr"
 	"github.com/3166790565/raccoon-relay/internal/pool"
@@ -61,10 +62,21 @@ func main() {
 	lmgr.Start(ctx)
 	defer lmgr.Close()
 
+	// 运行事件：上游失败、换号、冷却、签到等结构化落库，面板「运行日志」据此检索。
+	// 异步聚合写入，不阻塞转发热路径。
+	events := eventlog.New(st)
+	go events.Start(ctx)
+
 	client := raccoon.NewClient(cfg.UpstreamBase, time.Duration(cfg.UpstreamTimeoutSec)*time.Second)
 	// 对话流不能套总时限：长回答会被硬掐在超时点。改用上游空闲超时。
 	client.IdleTimeout = cfg.StreamIdleTimeout
 	cool := pool.NewCooldownBook(st, cfg.ModelCooldown)
+	cool.SetEventHook(func(ev pool.Event) {
+		events.Emit(store.RuntimeEvent{
+			Level: ev.Level, Scope: ev.Scope, Component: ev.Component,
+			AccountID: ev.AccountID, Message: ev.Message, Detail: ev.Detail,
+		})
+	})
 	po := pool.New(st, cfg.PoolStrategy, cool)
 	po.SetCreditPolicy(pool.CreditPolicy{
 		Enabled:     cfg.CreditStopEnable,
@@ -74,6 +86,7 @@ func main() {
 	refresher := relay.NewRefresher(st, client, time.Duration(cfg.RefreshWindowSec)*time.Second)
 	catalog := relay.NewCatalog(st, client, relay.DefaultModel)
 	engine := relay.BuildEngine(cfg, st, po, cool, client, refresher)
+	engine.Event = func(ev store.RuntimeEvent) { events.Emit(ev) }
 	srv := relay.NewServer(cfg, st, engine, catalog)
 
 	lm := login.New(st, client, cfg.UpstreamBase, "办公小浣熊客户端", cfg.OAuthRedirectBase)
@@ -85,6 +98,7 @@ func main() {
 
 	// 调度器始终构造：自动循环由 CheckinEnable 决定是否跑，但手动「全部签到」任何时候都要能用。
 	sch := scheduler.New(cfg, st, client, refresher, balancer)
+	sch.SetEventHook(func(ev store.RuntimeEvent) { events.Emit(ev) })
 
 	// 主动续期：面板可热更新，配置改动由 ApplyStoredSettings 盖回。
 	renewer := relay.NewRenewer(refresher, relay.RenewConfig{
@@ -92,6 +106,7 @@ func main() {
 		Interval: time.Duration(cfg.RenewIntervalM) * time.Minute,
 		Gap:      time.Duration(cfg.RenewGapMS) * time.Millisecond,
 	})
+	renewer.SetEventHook(func(ev store.RuntimeEvent) { events.Emit(ev) })
 
 	// 一键更新：版本号来自构建时注入，Release 资产从 GitHub 拉取并做 sha256 校验。
 	up := updater.New(updater.Options{

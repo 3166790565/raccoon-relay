@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"strings"
 	"sync"
@@ -164,6 +165,27 @@ type Renewer struct {
 	last    RenewResult
 	lastAt  int64
 	running bool
+	onEvent func(store.RuntimeEvent)
+}
+
+// SetEventHook 注入运行事件钩子。
+func (r *Renewer) SetEventHook(fn func(store.RuntimeEvent)) {
+	r.mu.Lock()
+	r.onEvent = fn
+	r.mu.Unlock()
+}
+
+func (r *Renewer) Emit(ev store.RuntimeEvent) {
+	r.mu.Lock()
+	fn := r.onEvent
+	r.mu.Unlock()
+	if fn == nil {
+		return
+	}
+	if ev.Scope == "" {
+		ev.Scope = store.ScopeRenew
+	}
+	fn(ev)
 }
 
 // RenewConfig 是 Renewer 的运行参数。Window/Interval 为 0 表示关闭。
@@ -273,6 +295,13 @@ func (r *Renewer) runOnce(ctx context.Context) (RenewResult, bool) {
 	if res.Checked > 0 {
 		log.Printf("[续期] 检查 %d，续期 %d，失败 %d，恢复 %d",
 			res.Checked, res.Renewed, res.Failed, res.Recovered)
+		level := store.LevelInfo
+		if res.Failed > 0 {
+			level = store.LevelWarn
+		}
+		r.Emit(store.RuntimeEvent{Level: level, Component: "renew", Message: "凭证续期一轮完成",
+			Detail: fmt.Sprintf("检查 %d 个，续期 %d 个，失败 %d 个，恢复 %d 个",
+				res.Checked, res.Renewed, res.Failed, res.Recovered)})
 	}
 	return res, true
 }

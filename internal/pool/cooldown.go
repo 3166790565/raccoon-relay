@@ -2,6 +2,7 @@ package pool
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -33,6 +34,41 @@ type CooldownBook struct {
 	modelEnabled bool
 	models       map[string]modelCool
 	hydrated     bool
+
+	// onEvent 由上层（admin/main）注入，用来把冷却动作写进运行日志。
+	// 用回调而不是直接依赖 store 的写入封装，是为了让号池保持无副作用、易测试；
+	// 事件写入失败也不会影响冷却本身（回调内部吞错）。
+	onEvent func(Event)
+}
+
+// Event 是从号池抛给运行日志的一条事件。
+type Event struct {
+	Level     string // info / warn / error
+	Scope     string
+	Component string
+	AccountID string
+	Message   string
+	Detail    string
+}
+
+// SetEventHook 注入事件钩子。传 nil 可关闭。
+func (c *CooldownBook) SetEventHook(fn func(Event)) {
+	c.mu.Lock()
+	c.onEvent = fn
+	c.mu.Unlock()
+}
+
+func (c *CooldownBook) emit(ev Event) {
+	c.mu.Lock()
+	fn := c.onEvent
+	c.mu.Unlock()
+	if fn == nil {
+		return
+	}
+	if ev.Scope == "" {
+		ev.Scope = store.ScopePool
+	}
+	fn(ev)
 }
 
 type modelCool struct {
@@ -224,20 +260,29 @@ const (
 // Cool 按分类写账号冷却。
 func (c *CooldownBook) Cool(ctx context.Context, accID string, kind FailKind, detail string) {
 	now := time.Now().UnixMilli()
+	var until int64
+	var status, msg, level string
 	switch kind {
 	case FailQuota:
-		c.setAccount(ctx, accID, store.StatusExhausted, nextDay4AM(), defaultStr(detail, "积分耗尽"))
+		until = nextDay4AM()
+		status, msg, level = store.StatusExhausted, defaultStr(detail, "积分耗尽"), store.LevelWarn
 	case FailRate:
-		c.setAccount(ctx, accID, store.StatusCooling, now+60_000, defaultStr(detail, "上游限流"))
+		until = now + 60_000
+		status, msg, level = store.StatusCooling, defaultStr(detail, "上游限流"), store.LevelWarn
 	case FailServer:
-		c.setAccount(ctx, accID, store.StatusCooling, now+600_000, defaultStr(detail, "上游异常"))
+		until = now + 600_000
+		status, msg, level = store.StatusCooling, defaultStr(detail, "上游异常"), store.LevelWarn
 	case FailRelogin:
-		c.setAccount(ctx, accID, store.StatusRelogin, 0, defaultStr(detail, "凭证失效，需重新登录"))
+		status, msg, level = store.StatusRelogin, defaultStr(detail, "凭证失效，需重新登录"), store.LevelError
 	case FailBlocked:
-		c.setAccount(ctx, accID, store.StatusCooling, now+2*3_600_000, defaultStr(detail, "账号被上游风控拦截"))
+		until = now + 2*3_600_000
+		status, msg, level = store.StatusCooling, defaultStr(detail, "账号被上游风控拦截"), store.LevelWarn
 	default:
-		c.setAccount(ctx, accID, store.StatusCooling, now+60_000, detail)
+		until = now + 60_000
+		status, msg, level = store.StatusCooling, detail, store.LevelWarn
 	}
+	c.setAccount(ctx, accID, status, until, msg)
+	c.emitWhy(accID, level, "停用账号 "+statusLabel(status), msg, until)
 }
 
 // CoolUntil 按绝对时刻冷却，用于对齐 Retry-After。
@@ -245,7 +290,31 @@ func (c *CooldownBook) CoolUntil(ctx context.Context, accID string, until int64,
 	if until <= time.Now().UnixMilli() {
 		until = time.Now().UnixMilli() + 1000
 	}
-	c.setAccount(ctx, accID, store.StatusCooling, until, defaultStr(detail, "上游限流"))
+	msg := defaultStr(detail, "上游限流")
+	c.setAccount(ctx, accID, store.StatusCooling, until, msg)
+	c.emitWhy(accID, store.LevelWarn, "按 Retry-After 冷却", msg, until)
+}
+
+// emitWhy 把一次冷却写成事件，detail 里带原因与恢复时刻，排查时不用再去号池页倒推。
+func (c *CooldownBook) emitWhy(accID, level, title, reason string, until int64) {
+	detail := reason
+	if until > 0 {
+		detail = fmt.Sprintf("%s\n恢复时间：%s", reason, time.UnixMilli(until).Format("2006-01-02 15:04:05"))
+	}
+	c.emit(Event{Level: level, Component: "cooldown", AccountID: accID, Message: title, Detail: detail})
+}
+
+func statusLabel(status string) string {
+	switch status {
+	case store.StatusExhausted:
+		return "（积分耗尽）"
+	case store.StatusRelogin:
+		return "（需重登）"
+	case store.StatusCooling:
+		return "（冷却）"
+	default:
+		return ""
+	}
 }
 
 func (c *CooldownBook) setAccount(ctx context.Context, accID, status string, until int64, reason string) {
@@ -294,6 +363,8 @@ func (c *CooldownBook) ReviveExpired(ctx context.Context) {
 		_ = c.st.UpdateAccount(ctx, a.ID, store.AccountPatch{
 			Status: &st, CoolUntil: &zero, CoolReason: &empty,
 		})
+		c.emit(Event{Level: store.LevelInfo, Component: "cooldown", AccountID: a.ID,
+			Message: "冷却到期，恢复在线", Detail: "原状态：" + a.Status + "；原原因：" + a.CoolReason})
 	}
 }
 
