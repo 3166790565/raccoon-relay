@@ -248,7 +248,14 @@ cmd_watch() {
 
 # ---------- verify ----------
 cmd_verify() {
-  VERSION="${1:?用法: release.sh verify v1.0.5}"
+  # VERSION 可能已由环境变量预置或由 tag 推导，这里不能直接用 ${1:?}：
+  # `VERSION=v1.0.5 scripts/release.sh verify` 不传参数时 $1 是空的，
+  # 会把已经拿到的版本号当成缺失直接退出。
+  VERSION="${1:-${VERSION:-}}"
+  if [ -z "$VERSION" ]; then
+    red "用法: release.sh verify v1.0.5"
+    exit 1
+  fi
   local os arch ext tmp
   os="$(go env GOOS)"; arch="$(go env GOARCH)"
   ext=""; [ "$os" = "windows" ] && ext=".exe"
@@ -281,13 +288,24 @@ cmd_verify() {
         python -c 'import json,sys;print(json.load(sys.stdin)["status"]["current"])' 2>/dev/null || true)"
   if [ "$cur" = "$VERSION" ]; then ok "版本号正确：$cur"; else problem "版本号显示为 $cur，期望 $VERSION"; fi
   # 等进程真正退出、放开 DB/日志句柄后再删临时目录，否则 Windows 上 rm 会报 busy。
+  # pid 文件里是 `cmd &` 记下的 PID，而 Windows 上真正持有 DB/日志句柄的是它拉起的
+  # 子进程，仅 kill 父进程时 rm 仍会因文件被占用而失败。
   kill "$(cat "$tmp/pid")" 2>/dev/null || true
   for _ in $(seq 1 20); do
     kill -0 "$(cat "$tmp/pid")" 2>/dev/null || break
     sleep 0.25
   done
+  if [ "$os" = "windows" ] && command -v taskkill >/dev/null 2>&1; then
+    taskkill //IM "$name" //F >/dev/null 2>&1 || true
+    sleep 0.5
+  fi
+  # 注意不能用 `[ -d ... ] && yellow` 作最后一条：目录已清干净时它返回 1，
+  # 在 set -e 下整个 verify 会以退出码 1 结束，看起来像校验失败。
   rm -rf "$tmp" 2>/dev/null || true
-  [ -d "$tmp" ] && yellow "  ! 临时目录未清理干净：$tmp"
+  if [ -d "$tmp" ]; then
+    yellow "  ! 临时目录未清理干净：$tmp"
+  fi
+  return 0
 }
 
 # VERSION 可用环境变量预置（方便 check 同一版本号），命令行参数优先。
