@@ -26,6 +26,39 @@ docker compose logs relay
 IMAGE_TAG=2026.11.13 docker compose up -d
 ```
 
+### 换成 Postgres + Redis（多实例 / 更高并发）
+
+默认单容器用 SQLite，读多写少够用；但 SQLite 只有一个写连接，
+高并发时所有请求会排队等写锁。需要更高并发或多副本时用全栈编排：
+
+```bash
+# .env 里额外填 POSTGRES_PASSWORD、REDIS_PASSWORD
+docker compose -f docker-compose.yml -f docker-compose.stack.yml up -d
+```
+
+这一套会一起拉起：
+
+| 服务 | 作用 |
+|---|---|
+| `relay` | 应用本身 |
+| `postgres` | 业务数据（账号、Key、流水、冷却、事件） |
+| `redis` | 后台任务分布式锁（签到/巡检/清理/续期只跑一份）+ Key 校验缓存 |
+
+已有 SQLite 数据时按原样把 `./data/relay.db*` 放好再启动：relay 会自动
+checkpoint WAL、把数据导入 Postgres，并把旧库改名为
+`relay.db.migrated-<时间戳>`。迁移会逐条校验 `SECRET_KEY` 与行数，
+任何不一致都会中止启动并回滚，不会静默起一个空库。
+
+也可以只连外部 Postgres / Redis，不启用这个文件，在 `.env` 里设置：
+
+```bash
+DATABASE_URL=postgres://user:pass@host:5432/relay?sslmode=disable
+REDIS_URL=redis://:pass@host:6379/0
+```
+
+`DATABASE_URL` 留空仍是 SQLite。想回滚到 SQLite：清空 `DATABASE_URL`
+并把 `relay.db.migrated-*` 改回 `relay.db` 即可。
+
 ### 从源码构建
 
 ```bash
@@ -377,17 +410,28 @@ uid / 备注）筛选，筛选结果可一键全选后批量启用、停用、�
 
 ## 数据
 
-`DATA_DIR` 下一个 `relay.db`（SQLite）：
+默认存在 `DATA_DIR` 下的 `relay.db`（SQLite）；配置 `DATABASE_URL` 后存在 Postgres。
+两种后端的表结构一致：
 
 | 表 | 内容 |
 |---|---|
 | `accounts` | 账号、凭据（加密）、状态、冷却、签到台账 |
 | `api_keys` | 数据面 Key（只存 sha256） |
 | `model_cooldowns` | 模型级负缓存 |
+| `account_cooldowns` | 账号级失败链（200108 等） |
 | `checkin_history` | 每次签到的结果（含触发来源 auto / manual / onboard） |
 | `usage_logs` | 调用流水 |
+| `runtime_events` | 结构化运行事件（面板「运行日志」） |
+| `settings` | 面板保存的运行期设置 |
+| `schema_migrations` | schema 版本记录 |
 
-备份直接拷 `data/` 目录即可。注意里面是加密后的凭据，`SECRET_KEY` 丢了就恢复不了。
+备份方式：
+
+- SQLite：拷 `data/` 目录。
+- Postgres：`docker compose -f docker-compose.yml -f docker-compose.stack.yml exec postgres pg_dump -U relay relay > backup.sql`
+
+无论哪种后端，里面都是加密后的凭据，`SECRET_KEY` 丢了就恢复不了；
+SQLite 迁到 Postgres 也必须使用同一个 `SECRET_KEY`。
 
 ---
 

@@ -376,7 +376,32 @@ func verifyDumpCipher(c *Cipher, d *sqliteDump) error {
 
 // importDump 把整份数据写入当前库。调用方负责事务、行数校验与标记。
 // 使用 multi-row VALUES 批量插入；usage_logs 可能几十万行，逐行 Exec 太慢。
+//
+// 最后的 setval 只对 Postgres 有意义（SQLite 的 AUTOINCREMENT 会跟着显式 id 走）。
 func (s *Store) importDump(ctx context.Context, tx *sql.Tx, d *sqliteDump) error {
+	if err := s.insertDumpRows(ctx, tx, d); err != nil {
+		return err
+	}
+	// 显式插入 id 不会推进 IDENTITY 序列，必须手动 setval，
+	// 否则新数据会从 1 开始撞主键。
+	for _, t := range []string{"checkin_history", "usage_logs", "runtime_events"} {
+		q := fmt.Sprintf(
+			`SELECT setval(pg_get_serial_sequence('%s','id'),
+				COALESCE((SELECT MAX(id) FROM %s), 0) + 1, false)`, t, t)
+		if _, err := s.execTx(ctx, tx, q); err != nil {
+			return fmt.Errorf("重置 %s 序列: %w", t, err)
+		}
+	}
+	return nil
+}
+
+// importDumpForTest 与 importDump 相同，但跳过 Postgres 的序列重置，
+// 让导入逻辑能在 SQLite 上被单测覆盖。
+func (s *Store) importDumpForTest(ctx context.Context, tx *sql.Tx, d *sqliteDump) error {
+	return s.insertDumpRows(ctx, tx, d)
+}
+
+func (s *Store) insertDumpRows(ctx context.Context, tx *sql.Tx, d *sqliteDump) error {
 	const batch = 500
 
 	for i := 0; i < len(d.Accounts); i += batch {
@@ -511,17 +536,6 @@ func (s *Store) importDump(ctx context.Context, tx *sql.Tx, d *sqliteDump) error
 		q := `INSERT INTO runtime_events (id, ts, level, scope, component, account_id, message, detail, "count", last_ts) VALUES ` + joinStrings(ph, ",")
 		if _, err := s.execTx(ctx, tx, q, args...); err != nil {
 			return fmt.Errorf("导入 runtime_events: %w", err)
-		}
-	}
-
-	// 显式插入 id 不会推进 IDENTITY 序列，必须手动 setval，
-	// 否则新数据会从 1 开始撞主键。
-	for _, t := range []string{"checkin_history", "usage_logs", "runtime_events"} {
-		q := fmt.Sprintf(
-			`SELECT setval(pg_get_serial_sequence('%s','id'),
-				COALESCE((SELECT MAX(id) FROM %s), 0) + 1, false)`, t, t)
-		if _, err := s.execTx(ctx, tx, q); err != nil {
-			return fmt.Errorf("重置 %s 序列: %w", t, err)
 		}
 	}
 	return nil
