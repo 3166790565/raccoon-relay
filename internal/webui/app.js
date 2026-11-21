@@ -1571,8 +1571,29 @@ function openLogDetail(anchor) {
       ${l.error ? `<div class="ld-row col"><span class="ld-k">错误</span><pre class="ld-err">${esc(l.error)}</pre></div>` : ''}
     </div>
     <div class="pop-foot"><span class="hint">#${esc(l.id)}</span>
-      <button class="ghost tiny" id="ldClose">关闭</button></div>`, { width: 380 });
+      ${l.error ? '<button class="ghost tiny" id="ldCopy">复制错误</button>' : ''}
+      <button class="ghost tiny" id="ldClose">关闭</button></div>`, { width: 560 });
   document.getElementById('ldClose').addEventListener('click', closePop);
+  const copyBtn = document.getElementById('ldCopy');
+  if (copyBtn) {
+    copyBtn.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(String(l.error || ''));
+        toast('错误信息已复制');
+      } catch {
+        // 非安全上下文（http 访问）没有 clipboard API，退回选中文本让用户手动复制
+        const pre = document.querySelector('.pop .ld-err');
+        if (pre) {
+          const range = document.createRange();
+          range.selectNodeContents(pre);
+          const sel = window.getSelection();
+          sel.removeAllRanges();
+          sel.addRange(range);
+        }
+        toast('已选中错误文本，请手动复制', true);
+      }
+    });
+  }
 }
 
 // ---------- 运行日志（结构化事件流 + 文件与清理） ----------

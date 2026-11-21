@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -132,13 +133,46 @@ func (s *Server) logUsage(ctx context.Context, res Result, err error, start time
 	if err != nil {
 		code, msg := publicError(err)
 		u.Status = code
-		u.Error = msg
+		// 流水是事后排查用的，存完整错误；对外响应仍用 publicError 的短文案。
+		// 长串在列表里由前端折叠显示，详情弹窗能看到全文。
+		u.Error = fullErrorMessage(err, msg)
 	}
 	if usage != nil {
 		u.PromptTokens, u.CompletionTokens, u.TotalTokens = usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens
 	}
 	// 异步写：每个请求同步 INSERT 在单连接 SQLite 上会排队等写锁。
 	s.st.AddUsageAsync(u)
+}
+
+// fullErrorMessage 返回写入流水的完整错误文本。
+//
+// 对外响应必须短且干净（客户端会展示给终端用户），但流水是排查记录：
+// 上游返回的 JSON 里往往带 request_id、param 等字段，截断后就查不了。
+// 这里保留上游原文，只做长度上限保护。
+func fullErrorMessage(err error, fallback string) string {
+	var ue *raccoon.UpstreamError
+	if errors.As(err, &ue) {
+		// Raw 是上游原始响应体，信息最全（含 request_id、param 等）。
+		// Message 可能被上游自己截过，只在 Raw 为空时兜底。
+		if raw := strings.TrimSpace(ue.Raw); raw != "" {
+			return truncateRunes(raw, 4000)
+		}
+		if msg := strings.TrimSpace(ue.Message); msg != "" {
+			return truncateRunes(msg, 4000)
+		}
+	}
+	if msg := strings.TrimSpace(err.Error()); msg != "" {
+		return truncateRunes(msg, 4000)
+	}
+	return fallback
+}
+
+func truncateRunes(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max]) + "…"
 }
 
 // Route 是数据面的顶层分发。

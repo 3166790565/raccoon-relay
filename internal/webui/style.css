@@ -419,9 +419,12 @@ button.tiny { padding: 4px 9px; font-size: 12px; }
 .log-acc .acc-sub { font-size: 11px; }
 .log-model { font-size: 12px; color: #c9d1e0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .log-ms { font-size: 12px; color: var(--dim); font-variant-numeric: tabular-nums; }
+/* 错误文案常见的是整段上游 JSON，单行省略会把关键信息切掉。
+   这里放成最多三行，鼠标悬停仍可看到完整内容（title）。 */
 .log-err {
-  font-size: 12px; color: #e58b8b; overflow: hidden; text-overflow: ellipsis;
-  white-space: nowrap; max-width: 360px;
+  font-size: 12px; color: #e58b8b; max-width: 460px;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+  overflow: hidden; word-break: break-word; line-height: 1.4;
 }
 .log-table tr:not(.is-fail) .log-err { color: var(--dim); }
 
@@ -462,7 +465,9 @@ button.tiny { padding: 4px 9px; font-size: 12px; }
 .ld-err {
   margin: 0; padding: 8px 10px; background: #0c0e12; border: 1px solid #3a2326;
   border-radius: 6px; font-size: 12px; color: #e58b8b; white-space: pre-wrap;
-  word-break: break-all; max-height: 200px; overflow: auto;
+  /* break-all 会把 JSON 的键名从中间切断，长串优先在标点/空格处换行 */
+  word-break: break-word; overflow-wrap: anywhere;
+  max-height: 320px; overflow: auto;
 }
 
 /* 列隐藏：表头和数据列同步隐藏（日志页特有的开关，不影响别处表格） */
