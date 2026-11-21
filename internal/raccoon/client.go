@@ -556,6 +556,13 @@ type UpstreamError struct {
 	Auth    bool
 	Message string
 
+	// RetryAfter 是上游建议的重试等待时长。来源按优先级：
+	// Retry-After 头（秒数或 HTTP 日期）、x-ratelimit-reset 头、
+	// 响应体里的 reset_time / retry_after 字段（秒数、秒级或毫秒级时间戳）。
+	// 0 表示上游没有给出；转发层据此把冷却对齐到上游真正解除限制的时刻，
+	// 而不是一律按本地阶梯等 3 分钟后再撞一次 429。
+	RetryAfter time.Duration
+
 	// 以下字段只用于面板的「错误详情」排查，不参与分类、冷却与对外文案。
 	// 403 的真实原因几乎都在响应头或响应体里（风控命中、权限不足、网关拦截），
 	// 只留一句「HTTP 403」用户无从判断，所以把现场完整带出来。

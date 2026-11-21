@@ -38,7 +38,19 @@ var sqliteSchema = []string{
 		created_at      INTEGER NOT NULL DEFAULT 0,
 		updated_at      INTEGER NOT NULL DEFAULT 0,
 		last_used       INTEGER NOT NULL DEFAULT 0,
-		max_concurrent  INTEGER NOT NULL DEFAULT 0
+		max_concurrent  INTEGER NOT NULL DEFAULT 0,
+		-- provider 区分上游：raccoon（小浣熊）与 sensenova（商汤日日新 Token Plan）。
+		-- 两种号在同一张表里，但凭据形态、额度接口、选号模型都不同，靠这一列分流。
+		provider        TEXT NOT NULL DEFAULT 'raccoon',
+		-- 商汤日日新专用：控制台账号密码用来换登录票、建 API Key、读积分池。
+		-- 密码与令牌走同一套 AES 加密；API Key 复用 token 列。
+		sn_username      TEXT NOT NULL DEFAULT '',
+		sn_password      TEXT NOT NULL DEFAULT '',
+		sn_token         TEXT NOT NULL DEFAULT '',
+		sn_token_exp     INTEGER NOT NULL DEFAULT 0,
+		sn_refresh_token TEXT NOT NULL DEFAULT '',
+		sn_pool          TEXT NOT NULL DEFAULT '',
+		sn_pool_at       INTEGER NOT NULL DEFAULT 0
 	)`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_uid ON accounts(uid)`,
 
@@ -104,6 +116,41 @@ var sqliteSchema = []string{
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_usage_ts ON usage_logs(ts)`,
 	`CREATE INDEX IF NOT EXISTS idx_usage_account ON usage_logs(account_id, id)`,
+
+	// 报表页的日聚合。报表要显示一年热力图与长区间趋势，直接对 usage_logs
+	// 做 GROUP BY 会在大表上扫几十万行；这里在写流水的同时按天累加，
+	// 报表只读这张小表。流水被清理（保留天数）后，历史日统计仍然保留。
+	`CREATE TABLE IF NOT EXISTS request_daily (
+		day               TEXT PRIMARY KEY,
+		requests          INTEGER NOT NULL DEFAULT 0,
+		successful        INTEGER NOT NULL DEFAULT 0,
+		tokens            INTEGER NOT NULL DEFAULT 0,
+		prompt_tokens     INTEGER NOT NULL DEFAULT 0,
+		completion_tokens INTEGER NOT NULL DEFAULT 0
+	)`,
+	// 按「天 × 模型」的分解，报表的模型 Top N 与趋势图选维度都读它。
+	`CREATE TABLE IF NOT EXISTS request_daily_model (
+		day               TEXT NOT NULL,
+		model             TEXT NOT NULL DEFAULT '',
+		requests          INTEGER NOT NULL DEFAULT 0,
+		successful        INTEGER NOT NULL DEFAULT 0,
+		tokens            INTEGER NOT NULL DEFAULT 0,
+		prompt_tokens     INTEGER NOT NULL DEFAULT 0,
+		completion_tokens INTEGER NOT NULL DEFAULT 0,
+		PRIMARY KEY (day, model)
+	)`,
+	// 按「天 × 出站协议」的分解（openai / anthropic / responses），
+	// 报表的「协议统计」与趋势图按协议选维度都读它。
+	`CREATE TABLE IF NOT EXISTS request_daily_api (
+		day               TEXT NOT NULL,
+		api               TEXT NOT NULL DEFAULT '',
+		requests          INTEGER NOT NULL DEFAULT 0,
+		successful        INTEGER NOT NULL DEFAULT 0,
+		tokens            INTEGER NOT NULL DEFAULT 0,
+		prompt_tokens     INTEGER NOT NULL DEFAULT 0,
+		completion_tokens INTEGER NOT NULL DEFAULT 0,
+		PRIMARY KEY (day, api)
+	)`,
 
 	`CREATE TABLE IF NOT EXISTS settings (
 		key   TEXT PRIMARY KEY,
@@ -171,7 +218,15 @@ var pgSchema = []string{
 		created_at      BIGINT NOT NULL DEFAULT 0,
 		updated_at      BIGINT NOT NULL DEFAULT 0,
 		last_used       BIGINT NOT NULL DEFAULT 0,
-		max_concurrent  BIGINT NOT NULL DEFAULT 0
+		max_concurrent  BIGINT NOT NULL DEFAULT 0,
+		provider        TEXT NOT NULL DEFAULT 'raccoon',
+		sn_username      TEXT NOT NULL DEFAULT '',
+		sn_password      TEXT NOT NULL DEFAULT '',
+		sn_token         TEXT NOT NULL DEFAULT '',
+		sn_token_exp     BIGINT NOT NULL DEFAULT 0,
+		sn_refresh_token TEXT NOT NULL DEFAULT '',
+		sn_pool          TEXT NOT NULL DEFAULT '',
+		sn_pool_at       BIGINT NOT NULL DEFAULT 0
 	)`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_uid ON accounts(uid)`,
 
@@ -235,6 +290,36 @@ var pgSchema = []string{
 	`CREATE INDEX IF NOT EXISTS idx_usage_ts ON usage_logs(ts)`,
 	`CREATE INDEX IF NOT EXISTS idx_usage_account ON usage_logs(account_id, id)`,
 
+	// 与 SQLite 版一一对应的报表日聚合表。
+	`CREATE TABLE IF NOT EXISTS request_daily (
+		day               TEXT PRIMARY KEY,
+		requests          BIGINT NOT NULL DEFAULT 0,
+		successful        BIGINT NOT NULL DEFAULT 0,
+		tokens            BIGINT NOT NULL DEFAULT 0,
+		prompt_tokens     BIGINT NOT NULL DEFAULT 0,
+		completion_tokens BIGINT NOT NULL DEFAULT 0
+	)`,
+	`CREATE TABLE IF NOT EXISTS request_daily_model (
+		day               TEXT NOT NULL,
+		model             TEXT NOT NULL DEFAULT '',
+		requests          BIGINT NOT NULL DEFAULT 0,
+		successful        BIGINT NOT NULL DEFAULT 0,
+		tokens            BIGINT NOT NULL DEFAULT 0,
+		prompt_tokens     BIGINT NOT NULL DEFAULT 0,
+		completion_tokens BIGINT NOT NULL DEFAULT 0,
+		PRIMARY KEY (day, model)
+	)`,
+	`CREATE TABLE IF NOT EXISTS request_daily_api (
+		day               TEXT NOT NULL,
+		api               TEXT NOT NULL DEFAULT '',
+		requests          BIGINT NOT NULL DEFAULT 0,
+		successful        BIGINT NOT NULL DEFAULT 0,
+		tokens            BIGINT NOT NULL DEFAULT 0,
+		prompt_tokens     BIGINT NOT NULL DEFAULT 0,
+		completion_tokens BIGINT NOT NULL DEFAULT 0,
+		PRIMARY KEY (day, api)
+	)`,
+
 	`CREATE TABLE IF NOT EXISTS settings (
 		key   TEXT PRIMARY KEY,
 		value TEXT NOT NULL DEFAULT ''
@@ -257,4 +342,4 @@ var pgSchema = []string{
 	`CREATE INDEX IF NOT EXISTS idx_event_account ON runtime_events(account_id, id)`,
 }
 
-const schemaVersion = 3
+const schemaVersion = 4

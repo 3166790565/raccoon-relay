@@ -15,6 +15,26 @@ import (
 	"github.com/3166790565/raccoon-relay/internal/store"
 )
 
+// SNUpstream 是日日新上游需要转发层具备的最小能力。用接口注入可以避免
+// relay 直接依赖 internal/sensenova（那个包反过来要拼请求头与错误，
+// 不依赖 relay）。nil 表示本部署没有接入日日新。
+type SNUpstream interface {
+	// OpenChat 发起一次日日新对话，返回与小浣熊同形的流。
+	OpenChat(ctx context.Context, apiKey string, apiBody map[string]any) (*raccoon.ChatStream, error)
+	// EnsureToken 保证账号的控制台登录票可用，必要时用账号密码重登。
+	// 返回新签发的凭据（空字段表示不需要写回）。
+	EnsureToken(ctx context.Context, acc *store.Account) (*SNCredential, error)
+	// ProvisionKey 用控制台登录票新建一枚推理 API Key。
+	ProvisionKey(ctx context.Context, acc *store.Account) (string, error)
+}
+
+// SNCredential 是 EnsureToken 的回写结果：nil 表示凭据未变。
+type SNCredential struct {
+	ConsoleToken string
+	ExpiresAt    int64 // 毫秒
+	Username     string
+}
+
 // Engine 把「选号 → 刷新 → 上游请求 → 失败换号」串起来，三条协议共用。
 type Engine struct {
 	ST           *store.Store
@@ -23,6 +43,8 @@ type Engine struct {
 	Client       *raccoon.Client
 	Refresher    *Refresher
 	DefaultModel string
+	// SN 是日日新上游，nil 表示未接入（只跑小浣熊）。
+	SN SNUpstream
 
 	// Event 上报运行事件（换号、上游失败、空响应）。nil 时静默跳过。
 	// 由装配层注入，避免 relay 直接依赖 admin 的写入路径。
@@ -89,17 +111,31 @@ func (e *Engine) RunOpenAI(ctx context.Context, req *ChatContext, sink OpenAISin
 	// 事后至少知道「最后卡在哪个号上」。
 	var lastAcc string
 
+	provider := providerForModel(req.Model)
+	var probed bool
 	for attemptNo := 0; ; attemptNo++ {
 		untilExhausted, maxRetry := e.RetryPolicy()
 		if !untilExhausted && attemptNo > maxRetry {
 			break
 		}
-		lease, err := e.Pool.Pick(ctx, req.Model, excluded)
+		lease, err := e.Pool.PickProvider(ctx, req.Model, provider, excluded)
 		if err != nil {
 			return Result{}, err
 		}
 		if lease == nil {
-			break
+			// 号池暂时抽干（全在冷却里）时，别直接回一句「没有可用账号」：
+			// 那是我们自己的推断，可能已经过时。挑一个最早恢复的号真打一次，
+			// 让调用方拿到上游的真实错误（含 429 的重置时间），而不是通用的 502/503。
+			// 只探一次，且只在还没向客户端写出任何内容时做——写过了就没法重来。
+			if attemptNo == 0 && !probed {
+				probed = true
+				if probe := e.Pool.PickProbeProvider(ctx, req.Model, provider, excluded); probe != nil {
+					lease = probe
+				}
+			}
+			if lease == nil {
+				break
+			}
 		}
 		acc := lease.Account
 		excluded[acc.ID] = true
@@ -175,8 +211,15 @@ func (e *Engine) RunOpenAI(ctx context.Context, req *ChatContext, sink OpenAISin
 		// 429 只罚「这个号 × 这个模型」，不把整个号停掉：同一个号换个模型往往还是好的。
 		if isModelScoped(leaseErr) || kind == pool.FailRate {
 			if e.Cool.ModelEnabled() {
-				e.Cool.CoolModel(ctx, acc.ID, req.Model, leaseErr.Error())
-				e.report(level, "模型级冷却："+req.Model+" · "+publicMsg, detail+"\n处置：仅冷却该模型", acc.ID)
+				// 上游给了 Retry-After 就对齐到它的重置时刻；没给才用本地阶梯。
+				// 面板事件里写明这次冷却依据，排查时不用猜为什么等了这么久。
+				hint := retryAfterOf(leaseErr)
+				e.Cool.CoolModelRetryAfter(ctx, acc.ID, req.Model, leaseErr.Error(), hint)
+				action := "仅冷却该模型"
+				if hint > 0 {
+					action = "仅冷却该模型 · 对齐上游重置时间（" + fmtSeconds(hint) + "）"
+				}
+				e.report(level, "模型级冷却："+req.Model+" · "+publicMsg, detail+"\n处置："+action, acc.ID)
 				if at.Started {
 					return Result{AccountID: acc.ID, Model: req.Model}, leaseErr
 				}
@@ -230,8 +273,16 @@ func (e *Engine) RunOpenAI(ctx context.Context, req *ChatContext, sink OpenAISin
 
 var errNoAccount = errors.New("号池没有可用账号（全部冷却、积分耗尽或凭证失效）")
 
-// runOne 是对单个账号的一次尝试。
+// runOne 是对单个账号的一次尝试。按账号来源分流到小浣熊或日日新上游。
 func (e *Engine) runOne(ctx context.Context, at *Attempt, req *ChatContext, sink OpenAISink) error {
+	if at.Account.IsSenseNova() {
+		return e.runOneSenseNova(ctx, at, req, sink)
+	}
+	return e.runOneRaccoon(ctx, at, req, sink)
+}
+
+// runOneRaccoon 是小浣熊的原有路径。
+func (e *Engine) runOneRaccoon(ctx context.Context, at *Attempt, req *ChatContext, sink OpenAISink) error {
 	token, err := e.Refresher.EnsureFresh(ctx, at.Account)
 	if err != nil {
 		return err
@@ -320,6 +371,94 @@ func (e *Engine) runOne(ctx context.Context, at *Attempt, req *ChatContext, sink
 	e.Cool.ClearModel(ctx, at.Account.ID, req.Model)
 	sink.Complete()
 	return nil
+}
+
+// runOneSenseNova 是日日新路径：推理用账号自己的 API Key，控制台登录票只用于
+// 额度与续期，不在请求路径上。成功的收尾（MarkOnline/清冷却）与小浣熊一致。
+func (e *Engine) runOneSenseNova(ctx context.Context, at *Attempt, req *ChatContext, sink OpenAISink) error {
+	if e.SN == nil {
+		return &raccoon.UpstreamError{Status: 500, Message: "日日新上游未配置"}
+	}
+	acc := at.Account
+	apiKey := strings.TrimSpace(acc.Token)
+	if apiKey == "" {
+		// 只有控制台凭据、没有推理 Key：现场用登录票补建一枚。
+		key, err := e.ensureSNKey(ctx, acc)
+		if err != nil {
+			return err
+		}
+		apiKey = key
+	}
+	at.Token = apiKey
+
+	stream, err := e.SN.OpenChat(ctx, apiKey, req.Body)
+	if err != nil {
+		return err
+	}
+	defer stream.Close()
+
+	if err := sink.Begin(); err != nil {
+		return err
+	}
+	if c, ok := sink.(committingSink); ok && c.Commitment() {
+		at.Started = true
+	}
+	for {
+		ev, err := stream.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		if ev.Delta != nil {
+			if err := sink.Delta(*ev.Delta); err != nil {
+				return err
+			}
+		}
+		if ev.Usage != nil {
+			sink.Usage(*ev.Usage)
+		}
+		if ev.FinishReason != "" {
+			sink.Finish(ev.FinishReason)
+		}
+	}
+	if !stream.Seen() {
+		e.report(store.LevelWarn, "上游返回空响应（502）",
+			"账号："+acc.Name+"\n模型："+req.Model+"\n上游已建连但没有任何数据块", acc.ID)
+		return &raccoon.UpstreamError{Status: 502, Message: "日日新上游返回空响应"}
+	}
+	e.Cool.MarkOnline(ctx, acc.ID)
+	e.Cool.ClearModel(ctx, acc.ID, req.Model)
+	sink.Complete()
+	return nil
+}
+
+// ensureSNKey 给只有控制台凭据的日日新账号补建一枚推理 API Key 并写回库。
+func (e *Engine) ensureSNKey(ctx context.Context, acc *store.Account) (string, error) {
+	cred, err := e.SN.EnsureToken(ctx, acc)
+	if err != nil {
+		return "", err
+	}
+	if cred != nil {
+		exp := cred.ExpiresAt
+		patch := store.AccountPatch{SNToken: &cred.ConsoleToken, SNTokenExp: &exp}
+		if cred.Username != "" {
+			patch.SNUsername = &cred.Username
+		}
+		_ = e.ST.UpdateAccount(ctx, acc.ID, patch)
+	}
+	key, err := e.SN.ProvisionKey(ctx, acc)
+	if err != nil {
+		return "", err
+	}
+	if err := e.ST.UpdateAccount(ctx, acc.ID, store.AccountPatch{
+		Token: &key, RefreshToken: &key,
+	}); err != nil {
+		return "", err
+	}
+	acc.Token, acc.RefreshToken = key, key
+	return key, nil
 }
 
 // ChatContext 是一次请求的输入。

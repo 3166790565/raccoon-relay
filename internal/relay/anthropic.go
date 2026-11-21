@@ -60,7 +60,7 @@ func (s *Server) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 		case http.StatusBadRequest:
 			typ = "invalid_request_error"
 		}
-		writeJSON(w, code, anthropicError(typ, msg))
+		writeErrorWithRetry(w, code, anthropicError(typ, msg), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, sink.Message())

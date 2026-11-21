@@ -65,16 +65,49 @@ func (c *Catalog) fetch(ctx context.Context) []raccoon.Model {
 	if err != nil {
 		return nil
 	}
+	// 两台供应商的模型并集：小浣熊走它的目录，日日新用内置快照 + 实时清单。
+	var raccoonModels, snModels []raccoon.Model
 	for _, a := range accounts {
-		if !a.Enabled || a.Status != store.StatusOnline || a.Token == "" {
+		if !a.Enabled || a.Status != store.StatusOnline {
 			continue
 		}
-		models, err := c.Client.Catalog(ctx, a.Token, identityOf(a))
-		if err == nil && len(models) > 0 {
-			return models
+		if a.IsSenseNova() {
+			if len(snModels) == 0 {
+				snModels = senseNovaModels()
+			}
+			continue
+		}
+		if a.Token == "" || len(raccoonModels) > 0 {
+			continue
+		}
+		if models, err := c.Client.Catalog(ctx, a.Token, identityOf(a)); err == nil && len(models) > 0 {
+			raccoonModels = models
 		}
 	}
-	return nil
+	if len(snModels) == 0 {
+		// 没有任何日日新账号时，若库里只有日日新模型可选（例如只导入了账号
+		// 但被停用），也让 /v1/models 至少能看到它们，方便客户端先配置。
+		if hasAnySenseNovaSeat(accounts) {
+			snModels = senseNovaModels()
+		}
+	}
+	return append(raccoonModels, snModels...)
+}
+
+func hasAnySenseNovaSeat(accounts []*store.Account) bool {
+	for _, a := range accounts {
+		if a.IsSenseNova() {
+			return true
+		}
+	}
+	return false
+}
+
+// senseNovaModels 返回日日新模型清单（内置快照，保证离线也有）。
+func senseNovaModels() []raccoon.Model {
+	out := make([]raccoon.Model, len(sensenovaModels))
+	copy(out, sensenovaModels)
+	return out
 }
 
 // Server 是数据面 HTTP 处理器。

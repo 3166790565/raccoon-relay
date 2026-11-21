@@ -17,6 +17,12 @@ const (
 	StatusRelogin   = "relogin"
 )
 
+// 上游供应商。两种号的凭据、额度接口与模型清单都不同，号池按它分流。
+const (
+	ProviderRaccoon   = "raccoon"   // 商汤小浣熊（xiaohuanxiong.com）
+	ProviderSenseNova = "sensenova" // 商汤日日新 Token Plan（platform.sensenova.cn）
+)
+
 // Account 是对外的完整账号视图。Token 字段在 List/Get 时会解密好返回。
 type Account struct {
 	ID             string
@@ -48,12 +54,36 @@ type Account struct {
 	LastUsed       int64
 	// MaxConcurrent 是该账号同时可承接的请求上限；0 表示跟随全局或视为不限。
 	MaxConcurrent int64
+
+	// Provider 为空等价 raccoon（老库的号都是小浣熊），见 Provider* 常量。
+	Provider string
+	// SN* 是商汤日日新专用字段：控制台账号密码换登录票，登录票读积分池，
+	// 推理用 API Key（存在 Token 里）。小浣熊账号这些字段恒为空。
+	SNUsername     string
+	SNPassword     string
+	SNToken        string // 控制台 OAuth access_token（JWT）
+	SNTokenExp     int64
+	SNRefreshToken string
+	SNPool         string // 最近一次读到的 5 小时池剩余量（JSON，供面板显示）
+	SNPoolAt       int64
+}
+
+// IsSenseNova 判断是否商汤日日新账号。空 provider 按小浣熊处理。
+func (a *Account) IsSenseNova() bool { return a.Provider == ProviderSenseNova }
+
+// ProviderName 返回展示用的供应商名。
+func (a *Account) ProviderName() string {
+	if a.IsSenseNova() {
+		return "日日新"
+	}
+	return "小浣熊"
 }
 
 const accountCols = `id, uid, name, note, token, refresh_token, token_exp, credits, credits_at,
 	status, cool_until, cool_reason, expires_at, device_id, device_name, os_version,
 	office_identity, platform, client_channel, language, meta, priority, enabled,
-	last_checkin_day, created_at, updated_at, last_used, max_concurrent`
+	last_checkin_day, created_at, updated_at, last_used, max_concurrent,
+	provider, sn_username, sn_password, sn_token, sn_token_exp, sn_refresh_token, sn_pool, sn_pool_at`
 
 // 写入用的字段补丁：nil 表示不改。
 type AccountPatch struct {
@@ -81,21 +111,36 @@ type AccountPatch struct {
 	LastCheckinDay *string
 	LastUsed       *int64
 	MaxConcurrent  *int64
+
+	// Provider 一般只在新建时给；通用补丁里保留，便于测试与纠错。
+	Provider       *string
+	SNUsername     *string
+	SNPassword     *string
+	SNToken        *string
+	SNTokenExp     *int64
+	SNRefreshToken *string
+	SNPool         *string
+	SNPoolAt       *int64
 }
 
 func (s *Store) scanAccount(sc interface{ Scan(...any) error }) (*Account, error) {
 	var a Account
 	var tok, ref, meta string
+	var snUser, snPass, snTok, snRef, snPool string
 	var enabled int64
 	err := sc.Scan(&a.ID, &a.UID, &a.Name, &a.Note, &tok, &ref, &a.TokenExp,
 		&a.Credits, &a.CreditsAt, &a.Status, &a.CoolUntil, &a.CoolReason, &a.ExpiresAt,
 		&a.DeviceID, &a.DeviceName, &a.OSVersion, &a.OfficeIdentity, &a.Platform,
 		&a.ClientChannel, &a.Language, &meta, &a.Priority, &enabled,
-		&a.LastCheckinDay, &a.CreatedAt, &a.UpdatedAt, &a.LastUsed, &a.MaxConcurrent)
+		&a.LastCheckinDay, &a.CreatedAt, &a.UpdatedAt, &a.LastUsed, &a.MaxConcurrent,
+		&a.Provider, &snUser, &snPass, &snTok, &a.SNTokenExp, &snRef, &snPool, &a.SNPoolAt)
 	if err != nil {
 		return nil, err
 	}
 	a.Enabled = enabled != 0
+	if a.Provider == "" {
+		a.Provider = ProviderRaccoon
+	}
 	a.Token, err = s.cipher.Decrypt(tok)
 	if err != nil {
 		return nil, err
@@ -104,6 +149,19 @@ func (s *Store) scanAccount(sc interface{ Scan(...any) error }) (*Account, error
 	if err != nil {
 		return nil, err
 	}
+	if a.SNUsername, err = s.cipher.Decrypt(snUser); err != nil {
+		return nil, err
+	}
+	if a.SNPassword, err = s.cipher.Decrypt(snPass); err != nil {
+		return nil, err
+	}
+	if a.SNToken, err = s.cipher.Decrypt(snTok); err != nil {
+		return nil, err
+	}
+	if a.SNRefreshToken, err = s.cipher.Decrypt(snRef); err != nil {
+		return nil, err
+	}
+	a.SNPool, _ = s.cipher.Decrypt(snPool)
 	if meta != "" {
 		_ = json.Unmarshal([]byte(meta), &a.Meta)
 	}
@@ -174,6 +232,9 @@ func (s *Store) CreateAccount(ctx context.Context, a *Account) error {
 	if a.Meta == nil {
 		a.Meta = map[string]any{}
 	}
+	if a.Provider == "" {
+		a.Provider = ProviderRaccoon
+	}
 	meta, _ := json.Marshal(a.Meta)
 	a.CreatedAt, a.UpdatedAt = now, now
 	enabled := 0
@@ -181,12 +242,15 @@ func (s *Store) CreateAccount(ctx context.Context, a *Account) error {
 		enabled = 1
 	}
 	_, err := s.exec(ctx, `INSERT INTO accounts (`+accountCols+`)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		a.ID, a.UID, a.Name, a.Note, s.cipher.Encrypt(a.Token), s.cipher.Encrypt(a.RefreshToken),
 		a.TokenExp, a.Credits, a.CreditsAt, a.Status, a.CoolUntil, a.CoolReason, a.ExpiresAt,
 		a.DeviceID, a.DeviceName, a.OSVersion, a.OfficeIdentity, a.Platform, a.ClientChannel,
 		a.Language, string(meta), a.Priority, enabled, a.LastCheckinDay,
-		a.CreatedAt, a.UpdatedAt, a.LastUsed, a.MaxConcurrent)
+		a.CreatedAt, a.UpdatedAt, a.LastUsed, a.MaxConcurrent,
+		a.Provider, s.cipher.Encrypt(a.SNUsername), s.cipher.Encrypt(a.SNPassword),
+		s.cipher.Encrypt(a.SNToken), a.SNTokenExp, s.cipher.Encrypt(a.SNRefreshToken),
+		s.cipher.Encrypt(a.SNPool), a.SNPoolAt)
 	if err == nil {
 		s.invalidateAccounts()
 	}
@@ -277,12 +341,50 @@ func (s *Store) UpdateAccount(ctx context.Context, id string, p AccountPatch) er
 	if p.MaxConcurrent != nil {
 		add("max_concurrent", *p.MaxConcurrent)
 	}
+	if p.Provider != nil {
+		add("provider", *p.Provider)
+	}
+	if p.SNUsername != nil {
+		add("sn_username", s.cipher.Encrypt(*p.SNUsername))
+	}
+	if p.SNPassword != nil {
+		add("sn_password", s.cipher.Encrypt(*p.SNPassword))
+	}
+	if p.SNToken != nil {
+		add("sn_token", s.cipher.Encrypt(*p.SNToken))
+	}
+	if p.SNTokenExp != nil {
+		add("sn_token_exp", *p.SNTokenExp)
+	}
+	if p.SNRefreshToken != nil {
+		add("sn_refresh_token", s.cipher.Encrypt(*p.SNRefreshToken))
+	}
+	if p.SNPool != nil {
+		add("sn_pool", s.cipher.Encrypt(*p.SNPool))
+	}
+	if p.SNPoolAt != nil {
+		add("sn_pool_at", *p.SNPoolAt)
+	}
 	args = append(args, id)
 	_, err := s.exec(ctx, `UPDATE accounts SET `+joinComma(sets)+` WHERE id = ?`, args...)
 	if err == nil {
 		s.invalidateAccounts()
 	}
 	return err
+}
+
+// GetByProviderUID 按「供应商 + uid」查重。小浣熊与日日新可能有同形 uid
+// （例如邮箱），分开查才不会把一个号当成另一个来覆盖。
+func (s *Store) GetByProviderUID(ctx context.Context, provider, uid string) (*Account, error) {
+	if provider == "" {
+		provider = ProviderRaccoon
+	}
+	row := s.queryRow(ctx, `SELECT `+accountCols+` FROM accounts WHERE provider = ? AND uid = ?`, provider, uid)
+	a, err := s.scanAccount(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	return a, err
 }
 
 func (s *Store) DeleteAccount(ctx context.Context, id string) error {

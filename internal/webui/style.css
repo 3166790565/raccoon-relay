@@ -281,6 +281,44 @@ button.tiny { padding: 4px 9px; font-size: 12px; }
 .mini-bar i { display: block; height: 100%; background: #2f6fd0; border-radius: 3px; }
 .mini-bar.low i { background: var(--bad); }
 
+/* ---------- 号池：按供应商分组 ---------- */
+/* 分组头仿参考图：一条横向的浅色条，带折叠箭头、供应商名与账号数。
+   它不是数据行，所以用 colspan 撑满并粘贴在滚动容器内。 */
+.pool-table tbody tr.group-row td { padding: 0; background: #161a21; }
+.pool-table tbody tr.group-row:hover { background: #161a21; }
+.group-head {
+  display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+  cursor: pointer; user-select: none; border-top: 1px solid var(--line);
+}
+.pool-table tbody tr.group-row:first-child .group-head { border-top: none; }
+.group-head:hover { background: #1b2029; }
+.group-head .gh-caret { color: var(--dim); font-size: 11px; width: 12px; }
+.group-head .gh-emoji { font-size: 14px; }
+.group-head .gh-name { font-weight: 600; color: #dfe4ee; font-size: 13px; }
+.group-head .gh-count {
+  font-size: 11px; color: var(--dim); padding: 1px 7px; border-radius: 10px;
+  background: #232936;
+}
+.group-head .gh-sub { font-size: 11px; color: #5d6579; margin-left: 2px; }
+
+/* 日日新额度列：每个窗口一行（池名 · 窗口 | 细条 | 剩余） */
+.sn-quota { gap: 3px; }
+.sn-win { display: flex; align-items: center; gap: 6px; }
+.sn-win-name {
+  font-size: 11px; color: var(--dim); width: 108px; flex: none;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sn-win-bar {
+  flex: 1; height: 5px; border-radius: 3px; background: #262b36; overflow: hidden;
+  min-width: 40px;
+}
+.sn-win-bar i { display: block; height: 100%; background: #2f6fd0; border-radius: 3px; }
+.sn-win-bar i.low { background: var(--bad); }
+.sn-win-val {
+  font-size: 11px; font-variant-numeric: tabular-nums; width: 46px; flex: none;
+  text-align: right;
+}
+
 .pool-foot {
   display: flex; align-items: center; justify-content: space-between;
   padding: 8px 12px; border-top: 1px solid var(--line); background: #14171d;
@@ -679,3 +717,90 @@ body.modal-open { overflow: hidden; }
 .update-notes .out { max-height: 320px; }
 #updateHint { margin-top: 12px; }
 button[disabled] { opacity: .5; cursor: not-allowed; }
+
+/* ---------- 报表 ---------- */
+.report-head { align-items: flex-start; }
+.rp-kpis {
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px; margin-bottom: 18px;
+}
+.rp-kpi {
+  background: #12151b; border: 1px solid var(--line); border-radius: 9px;
+  padding: 12px 14px; min-width: 0;
+}
+.rp-kpi .k { font-size: 12px; color: var(--dim); }
+.rp-kpi .v {
+  font-size: 22px; font-weight: 700; margin-top: 4px; line-height: 1.2;
+  font-variant-numeric: tabular-nums; word-break: break-all;
+}
+.rp-kpi .v small { font-size: 13px; font-weight: 500; color: var(--dim); margin-left: 2px; }
+.rp-kpi .sub { font-size: 11px; color: var(--dim); margin-top: 5px; }
+.rp-kpi.accent .v { color: var(--accent); }
+.rp-kpi.ok .v { color: var(--ok); }
+.rp-kpi.warn .v { color: var(--warn); }
+
+.rp-panel {
+  background: #12151b; border: 1px solid var(--line); border-radius: 9px;
+  padding: 14px 16px; margin-bottom: 16px;
+}
+.rp-panel-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; margin-bottom: 10px;
+}
+.rp-panel-head h3 { margin: 0; font-size: 13px; font-weight: 600; }
+.rp-grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
+.rp-grid2 .rp-panel { margin-bottom: 16px; }
+
+/* 趋势图：用内联 SVG 画，柱/线都随容器宽度自适应 */
+.rp-chart { position: relative; width: 100%; min-height: 190px; }
+.rp-chart svg { display: block; width: 100%; height: 190px; overflow: visible; }
+.rp-chart .bar { fill: var(--accent); opacity: .85; }
+.rp-chart .bar:hover { opacity: 1; }
+.rp-chart .axis-text { fill: var(--dim); font-size: 10px; }
+.rp-chart .gridline { stroke: var(--line); stroke-width: 1; }
+.rp-chart .empty { text-align: center; color: var(--dim); padding: 60px 0; }
+
+/* 排行：名称 + 条 + 数字。条用 grid subgrid 对齐，数字列右对齐不抖 */
+.rp-rank { display: flex; flex-direction: column; gap: 9px; max-height: 300px; overflow-y: auto; scrollbar-gutter: stable; }
+.rp-rank-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) 92px 64px;
+  align-items: center; gap: 10px;
+}
+.rp-rank-row .name {
+  font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.rp-rank-row .meter { height: 7px; border-radius: 4px; background: #232833; overflow: hidden; }
+.rp-rank-row .meter i { display: block; height: 100%; background: var(--accent); border-radius: 4px; }
+.rp-rank-row .num {
+  font-size: 12px; text-align: right; font-variant-numeric: tabular-nums; color: var(--fg);
+}
+.rp-rank-row .num small { display: block; font-size: 10px; color: var(--dim); }
+.rp-rank .empty { color: var(--dim); font-size: 12px; padding: 14px 0; text-align: center; }
+
+/* 热力图：365 天，一行 53 列（按周），每格 11px + 3px 间距 */
+.rp-heat { overflow-x: auto; padding-bottom: 4px; }
+.rp-heat .heat-grid {
+  display: grid; grid-auto-flow: column; grid-template-rows: repeat(7, 12px);
+  grid-auto-columns: 12px; gap: 3px; width: max-content;
+}
+.rp-heat .cell {
+  width: 12px; height: 12px; border-radius: 3px; background: #1c2028;
+  outline: 1px solid transparent;
+}
+.rp-heat .cell:hover { outline-color: var(--accent); }
+.rp-heat .cell.l1 { background: #513624; }
+.rp-heat .cell.l2 { background: #7c4f2b; }
+.rp-heat .cell.l3 { background: #b5672f; }
+.rp-heat .cell.l4 { background: var(--accent); }
+.rp-heat .heat-legend {
+  display: flex; align-items: center; gap: 5px; justify-content: flex-end;
+  margin-top: 8px; font-size: 11px; color: var(--dim);
+}
+.rp-heat .heat-legend .cell { width: 11px; height: 11px; }
+.rp-heat .heat-empty { color: var(--dim); font-size: 12px; padding: 16px 0; }
+
+@media (max-width: 900px) {
+  .rp-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .rp-grid2 { grid-template-columns: 1fr; }
+  .rp-rank-row { grid-template-columns: minmax(0, 1fr) 70px 56px; }
+}

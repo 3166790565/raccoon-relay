@@ -261,6 +261,9 @@ func (s *Store) migrate() error {
 				return fmt.Errorf("建表失败: %w", err)
 			}
 		}
+		if err := s.ensureAccountColumnsTx(ctx, tx); err != nil {
+			return err
+		}
 		if err := s.applySchemaVersionTx(ctx, tx); err != nil {
 			return err
 		}
@@ -278,19 +281,62 @@ func (s *Store) migrate() error {
 	return s.applySchemaVersion()
 }
 
-// ensureAccountColumns 给历史版本的 accounts 表补上后来新增的列。
-// SQLite 用 PRAGMA 判断；Postgres 在 pgSchema 里已包含，无需处理。
+// accountAddedColumns 是 accounts 表后来新增、需要给老库补齐的列。
+// 顺序固定、只追加不改名：SQLite 的 ALTER 与 Postgres 的 ADD COLUMN 都是增量操作。
+var accountAddedColumns = []struct{ name, ddl string }{
+	{"max_concurrent", `ALTER TABLE accounts ADD COLUMN max_concurrent %INTEGER_OR_BIGINT% NOT NULL DEFAULT 0`},
+	{"provider", `ALTER TABLE accounts ADD COLUMN provider TEXT NOT NULL DEFAULT 'raccoon'`},
+	{"sn_username", `ALTER TABLE accounts ADD COLUMN sn_username TEXT NOT NULL DEFAULT ''`},
+	{"sn_password", `ALTER TABLE accounts ADD COLUMN sn_password TEXT NOT NULL DEFAULT ''`},
+	{"sn_token", `ALTER TABLE accounts ADD COLUMN sn_token TEXT NOT NULL DEFAULT ''`},
+	{"sn_token_exp", `ALTER TABLE accounts ADD COLUMN sn_token_exp %INTEGER_OR_BIGINT% NOT NULL DEFAULT 0`},
+	{"sn_refresh_token", `ALTER TABLE accounts ADD COLUMN sn_refresh_token TEXT NOT NULL DEFAULT ''`},
+	{"sn_pool", `ALTER TABLE accounts ADD COLUMN sn_pool TEXT NOT NULL DEFAULT ''`},
+	{"sn_pool_at", `ALTER TABLE accounts ADD COLUMN sn_pool_at %INTEGER_OR_BIGINT% NOT NULL DEFAULT 0`},
+}
+
+// intType 按方言给时间戳类型：Postgres 必须 BIGINT，SQLite 用 INTEGER 即可。
+func (s *Store) intType() string {
+	if s.dialect == dialectPostgres {
+		return "BIGINT"
+	}
+	return "INTEGER"
+}
+
 func (s *Store) ensureAccountColumns() error {
-	has, err := columnExists(s.db, "accounts", "max_concurrent")
-	if err != nil {
-		return fmt.Errorf("检查 accounts 列失败: %w", err)
+	for _, col := range accountAddedColumns {
+		has, err := columnExists(s.db, "accounts", col.name)
+		if err != nil {
+			return fmt.Errorf("检查 accounts.%s 失败: %w", col.name, err)
+		}
+		if has {
+			continue
+		}
+		ddl := strings.ReplaceAll(col.ddl, "%INTEGER_OR_BIGINT%", s.intType())
+		if _, err := s.db.Exec(ddl); err != nil {
+			return fmt.Errorf("补充 accounts.%s 失败: %w", col.name, err)
+		}
 	}
-	if has {
-		return nil
-	}
-	_, err = s.db.Exec(`ALTER TABLE accounts ADD COLUMN max_concurrent INTEGER NOT NULL DEFAULT 0`)
-	if err != nil {
-		return fmt.Errorf("补充 accounts.max_concurrent 失败: %w", err)
+	return nil
+}
+
+// ensureAccountColumnsTx 是 Postgres 迁移事务里的同一逻辑，必须走 tx 才能在
+// advisory lock 内串行化，避免多副本同时 ALTER 撞 errDuplicateColumn。
+func (s *Store) ensureAccountColumnsTx(ctx context.Context, tx *sql.Tx) error {
+	for _, col := range accountAddedColumns {
+		has, err := columnExistsTx(ctx, tx, "accounts", col.name)
+		if err != nil {
+			return fmt.Errorf("检查 accounts.%s 失败: %w", col.name, err)
+		}
+		if has {
+			continue
+		}
+		// 这里的 DDL 不含占位符（表名/列名是代码里的常量），不能走 rebind：
+		// PG 的 rebind 会把 DDL 里的 ? 当占位符处理，虽然当前没有 ?，但语义上不该经过它。
+		ddl := strings.ReplaceAll(col.ddl, "%INTEGER_OR_BIGINT%", s.intType())
+		if _, err := tx.ExecContext(ctx, ddl); err != nil {
+			return fmt.Errorf("补充 accounts.%s 失败: %w", col.name, err)
+		}
 	}
 	return nil
 }

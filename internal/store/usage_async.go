@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -107,7 +108,7 @@ func (s *Store) usageLoop() {
 	}
 }
 
-// insertUsageBatch 用一条 multi-row INSERT 写入一批流水。
+// insertUsageBatch 用一条 multi-row INSERT 写入一批流水，并同步累加日聚合。
 func (s *Store) insertUsageBatch(ctx context.Context, batch []UsageLog) error {
 	ph := make([]string, 0, len(batch))
 	args := make([]any, 0, len(batch)*10)
@@ -121,9 +122,127 @@ func (s *Store) insertUsageBatch(ctx context.Context, batch []UsageLog) error {
 	}
 	q := `INSERT INTO usage_logs (ts, account_id, model, api, status,
 		prompt_tokens, completion_tokens, total_tokens, ms, error) VALUES ` + joinStrings(ph, ",")
-	_, err := s.exec(ctx, q, args...)
-	if err != nil {
+	if _, err := s.exec(ctx, q, args...); err != nil {
 		return fmt.Errorf("insert usage batch: %w", err)
 	}
+	s.foldDaily(ctx, batch)
 	return nil
+}
+
+// foldDaily 把一批流水累加进 request_daily / request_daily_model。
+//
+// 报表只读这两张小表：一年热力图、长区间趋势都不必扫 usage_logs 大表。
+// 聚合失败只记日志、不回滚流水——流水是账，聚合只是报表缓存，不能让它挡住记账。
+func (s *Store) foldDaily(ctx context.Context, batch []UsageLog) {
+	if len(batch) == 0 {
+		return
+	}
+	loc := dailyLocation()
+	type agg struct{ req, ok, tok, prompt, completion int64 }
+	add := func(a *agg, u UsageLog) {
+		a.req++
+		if u.Status >= 200 && u.Status < 400 {
+			a.ok++
+		}
+		a.tok += u.TotalTokens
+		a.prompt += u.PromptTokens
+		a.completion += u.CompletionTokens
+	}
+	days := map[string]*agg{}
+	type mkey struct{ day, model string }
+	models := map[mkey]*agg{}
+	type akey struct{ day, api string }
+	apis := map[akey]*agg{}
+	for _, u := range batch {
+		ts := u.TS
+		if ts == 0 {
+			ts = time.Now().UnixMilli()
+		}
+		day := time.UnixMilli(ts).In(loc).Format("2006-01-02")
+		d := days[day]
+		if d == nil {
+			d = &agg{}
+			days[day] = d
+		}
+		add(d, u)
+		mk := mkey{day, u.Model}
+		m := models[mk]
+		if m == nil {
+			m = &agg{}
+			models[mk] = m
+		}
+		add(m, u)
+		ak := akey{day, u.API}
+		a := apis[ak]
+		if a == nil {
+			a = &agg{}
+			apis[ak] = a
+		}
+		add(a, u)
+	}
+	const dayQuery = `INSERT INTO request_daily
+			(day, requests, successful, tokens, prompt_tokens, completion_tokens) VALUES (?,?,?,?,?,?)
+		ON CONFLICT(day) DO UPDATE SET
+			requests = request_daily.requests + excluded.requests,
+			successful = request_daily.successful + excluded.successful,
+			tokens = request_daily.tokens + excluded.tokens,
+			prompt_tokens = request_daily.prompt_tokens + excluded.prompt_tokens,
+			completion_tokens = request_daily.completion_tokens + excluded.completion_tokens`
+	for day, a := range days {
+		if _, err := s.exec(ctx, dayQuery, day, a.req, a.ok, a.tok, a.prompt, a.completion); err != nil {
+			log.Printf("[报表] 累加日统计失败（%s）: %v", day, err)
+			return
+		}
+	}
+	const modelQuery = `INSERT INTO request_daily_model
+			(day, model, requests, successful, tokens, prompt_tokens, completion_tokens) VALUES (?,?,?,?,?,?,?)
+		ON CONFLICT(day, model) DO UPDATE SET
+			requests = request_daily_model.requests + excluded.requests,
+			successful = request_daily_model.successful + excluded.successful,
+			tokens = request_daily_model.tokens + excluded.tokens,
+			prompt_tokens = request_daily_model.prompt_tokens + excluded.prompt_tokens,
+			completion_tokens = request_daily_model.completion_tokens + excluded.completion_tokens`
+	for k, a := range models {
+		if _, err := s.exec(ctx, modelQuery, k.day, k.model, a.req, a.ok, a.tok, a.prompt, a.completion); err != nil {
+			log.Printf("[报表] 累加模型统计失败（%s/%s）: %v", k.day, k.model, err)
+			return
+		}
+	}
+	const apiQuery = `INSERT INTO request_daily_api
+			(day, api, requests, successful, tokens, prompt_tokens, completion_tokens) VALUES (?,?,?,?,?,?,?)
+		ON CONFLICT(day, api) DO UPDATE SET
+			requests = request_daily_api.requests + excluded.requests,
+			successful = request_daily_api.successful + excluded.successful,
+			tokens = request_daily_api.tokens + excluded.tokens,
+			prompt_tokens = request_daily_api.prompt_tokens + excluded.prompt_tokens,
+			completion_tokens = request_daily_api.completion_tokens + excluded.completion_tokens`
+	for k, a := range apis {
+		if _, err := s.exec(ctx, apiQuery, k.day, k.api, a.req, a.ok, a.tok, a.prompt, a.completion); err != nil {
+			log.Printf("[报表] 累加协议统计失败（%s/%s）: %v", k.day, k.api, err)
+			return
+		}
+	}
+}
+
+// dailyLocation 是日聚合使用的时区。报表按自然日分组，必须与用户看到的
+// 日期一致；没有显式设置时按本地时区（容器里通常由 TZ 决定）。
+var (
+	dailyLocMu sync.RWMutex
+	dailyLoc   = time.Local
+)
+
+// SetDailyLocation 供装配层按 TZ 配置注入时区。
+func SetDailyLocation(loc *time.Location) {
+	if loc == nil {
+		return
+	}
+	dailyLocMu.Lock()
+	dailyLoc = loc
+	dailyLocMu.Unlock()
+}
+
+func dailyLocation() *time.Location {
+	dailyLocMu.RLock()
+	defer dailyLocMu.RUnlock()
+	return dailyLoc
 }

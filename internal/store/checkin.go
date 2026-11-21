@@ -157,6 +157,7 @@ type CheckinCenterAccount struct {
 	Enabled        bool   `json:"enabled"`
 	Status         string `json:"status"`
 	Credits        int64  `json:"credits"`
+	Provider       string `json:"provider"`
 	LastCheckinDay string `json:"lastCheckinDay"`
 	// 今日最近一条签到记录（没有则为空）
 	TodayOK      bool   `json:"todayOk"`
@@ -171,7 +172,7 @@ type CheckinCenterAccount struct {
 // 一次 SQL 取齐，避免面板逐号查询；LEFT JOIN 到今日最新一条记录。
 func (s *Store) CheckinCenterAccounts(ctx context.Context, day string) ([]CheckinCenterAccount, error) {
 	rows, err := s.query(ctx, `
-		SELECT a.id, a.name, a.uid, a.note, a.enabled, a.status, a.credits, a.last_checkin_day,
+		SELECT a.id, a.name, a.uid, a.note, a.enabled, a.status, a.credits, a.provider, a.last_checkin_day,
 			c.id, COALESCE(c.ok, 0), COALESCE(c.already, 0), COALESCE(c.message, ''),
 			COALESCE(c.at, 0), COALESCE(c.source, '')
 		FROM accounts a
@@ -191,7 +192,7 @@ func (s *Store) CheckinCenterAccounts(ctx context.Context, day string) ([]Checki
 		var enabled, ok, already int
 		var recID sql.NullInt64
 		if err := rows.Scan(&a.ID, &a.Name, &a.UID, &a.Note, &enabled, &a.Status,
-			&a.Credits, &a.LastCheckinDay, &recID, &ok, &already, &a.TodayMessage,
+			&a.Credits, &a.Provider, &a.LastCheckinDay, &recID, &ok, &already, &a.TodayMessage,
 			&a.TodayAt, &a.TodaySource); err != nil {
 			return nil, err
 		}

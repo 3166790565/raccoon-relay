@@ -199,6 +199,11 @@ func (s *Scheduler) sweep(ctx context.Context) {
 
 	var due []*store.Account
 	for _, a := range accounts {
+		// 日日新没有「每日签到领积分」这一步（额度按 5 小时/本周窗口滚动），
+		// 强行签到只会打无意义的接口。它们的额度靠余额同步拉取。
+		if a.IsSenseNova() {
+			continue
+		}
 		if !a.Enabled || a.Token == "" {
 			continue
 		}
@@ -436,6 +441,15 @@ func (s *Scheduler) Onboard(ctx context.Context, accountID string) (map[string]a
 	loc := s.cfg.Location()
 	today := time.Now().In(loc).Format("2006-01-02")
 
+	// 日日新没有签到：新号落地只同步额度；同时尽量补建一枚推理 Key，
+	// 这样第一次请求就不必在转发路径上等一次建 Key。
+	if acc.IsSenseNova() {
+		if c, err := s.balancer.Refresh(ctx, acc); err == nil {
+			acc.Credits = c
+		}
+		return map[string]any{"checkinDay": "", "credits": acc.Credits}, nil
+	}
+
 	// 签到（内部会顺带刷余额）
 	s.checkinOne(ctx, acc, today, loc, store.CheckinSourceOnboard)
 
@@ -463,6 +477,15 @@ func (s *Scheduler) RunAll(ctx context.Context) map[string]any {
 	for _, a := range accounts {
 		if !a.Enabled {
 			results = append(results, map[string]any{"id": a.ID, "name": a.Name, "ok": false, "message": "账号已禁用"})
+			continue
+		}
+		if a.IsSenseNova() {
+			// 日日新没有签到；只刷新额度，结果照常回填一行，用户能看到它在跑。
+			_, _ = s.balancer.Refresh(ctx, a)
+			results = append(results, map[string]any{
+				"id": a.ID, "name": a.Name, "ok": true, "message": "日日新账号：已同步额度（无签到）",
+			})
+			done++
 			continue
 		}
 		ok := s.checkinOne(ctx, a, today, loc, store.CheckinSourceManual)
