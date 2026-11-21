@@ -15,6 +15,7 @@ import (
 	_ "time/tzdata"
 
 	"github.com/3166790565/raccoon-relay/internal/admin"
+	"github.com/3166790565/raccoon-relay/internal/cache"
 	"github.com/3166790565/raccoon-relay/internal/config"
 	"github.com/3166790565/raccoon-relay/internal/creditsync"
 	"github.com/3166790565/raccoon-relay/internal/creds"
@@ -84,7 +85,21 @@ func main() {
 	// 它自己也受面板控制，所以生命周期跟着主 ctx 走。
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	// 分布式协调：REDIS_URL 为空时是进程内实现，单实例行为不变。
+	rds := cache.New(cfg.RedisURL, cfg.RedisPrefix)
+	if err := rds.Start(ctx, cfg.RedisRequired); err != nil {
+		log.Fatalf("REDIS_REQUIRED=1 但 Redis 不可用: %v", err)
+	}
+	if cfg.RedisURL == "" {
+		log.Printf("分布式协调: 本地实现（未配置 REDIS_URL）")
+	} else if rds.Enabled() {
+		log.Printf("分布式协调: redis")
+	} else {
+		log.Printf("分布式协调: 已配置 Redis 但暂不可用，降级为本地实现")
+	}
+
 	lmgr := logmgr.New(logmgr.ConfigOf(cfg), st)
+	lmgr.SetLocker(rds)
 	lmgr.Start(ctx)
 	defer lmgr.Close()
 
@@ -125,6 +140,7 @@ func main() {
 	// 调度器始终构造：自动循环由 CheckinEnable 决定是否跑，但手动「全部签到」任何时候都要能用。
 	sch := scheduler.New(cfg, st, client, refresher, balancer)
 	sch.SetEventHook(func(ev store.RuntimeEvent) { events.Emit(ev) })
+	sch.SetLocker(rds)
 
 	// 主动续期：面板可热更新，配置改动由 ApplyStoredSettings 盖回。
 	renewer := relay.NewRenewer(refresher, relay.RenewConfig{
@@ -133,6 +149,7 @@ func main() {
 		Gap:      time.Duration(cfg.RenewGapMS) * time.Millisecond,
 	})
 	renewer.SetEventHook(func(ev store.RuntimeEvent) { events.Emit(ev) })
+	refresher.SetLocker(rds)
 
 	// 一键更新：版本号来自构建时注入，Release 资产从 GitHub 拉取并做 sha256 校验。
 	up := updater.New(updater.Options{
@@ -190,10 +207,17 @@ func main() {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+				// 多副本下只让一个实例巡检；两项操作都是幂等的，
+				// 拿不到锁直接跳过本轮。
+				release, ok := rds.Lock(ctx, "pool-tick", 2*time.Minute)
+				if !ok {
+					continue
+				}
 				cool.ReviveExpired(ctx)
 				// 积分阈值规则按余额巡检：余额是异步变化的（签到、手动查余额），
 				// 在选号时硬过滤之外再定期落一次状态，面板上才看得到谁被暂停了。
 				po.ApplyCreditPolicy(ctx)
+				release()
 			}
 		}
 	}()

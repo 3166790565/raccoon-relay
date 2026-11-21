@@ -26,6 +26,12 @@ type Config struct {
 	DBMaxIdle int
 	// MigrateSQLite：auto（默认）/ off / require，控制启动时是否把旧 relay.db 导入 Postgres。
 	MigrateSQLite string
+	// RedisURL 为空时使用进程内实现；有值时为多实例提供分布式锁与共享缓存。
+	RedisURL    string
+	RedisPrefix string
+	// RedisRequired：true 时 Redis 连不上就拒绝启动。
+	// 多副本部署建议开启——锁静默失效比启动失败更难排查。
+	RedisRequired bool
 	PoolStrategy   string
 	MaxRetries     int
 	// RetryUntilExhausted 为 true 时，遇到可换号的错误会按序试完整个号池
@@ -142,6 +148,9 @@ func Load() (*Config, error) {
 		DBMaxOpen:           envInt("DB_MAX_OPEN_CONNS", 0),
 		DBMaxIdle:           envInt("DB_MAX_IDLE_CONNS", 0),
 		MigrateSQLite:       env("MIGRATE_SQLITE", "auto"),
+		RedisURL:            strings.TrimSpace(os.Getenv("REDIS_URL")),
+		RedisPrefix:         env("REDIS_PREFIX", "raccoon:"),
+		RedisRequired:       envBool("REDIS_REQUIRED", false),
 		PoolStrategy:        env("POOL_STRATEGY", "load_balance"),
 		MaxRetries:          envInt("MAX_RETRIES", 3),
 		RetryUntilExhausted: envBool("RETRY_UNTIL_EXHAUSTED", false),

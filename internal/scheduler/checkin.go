@@ -50,6 +50,35 @@ type Scheduler struct {
 
 	// onEvent 把签到结果写成运行事件，由装配层注入。
 	onEvent func(store.RuntimeEvent)
+
+	// locker 用于多实例协调。nil 表示单实例，行为与改造前一致。
+	// 锁的粒度是「每个账号」，而不是整轮 sweep：一轮可能持续数分钟，
+	// 整轮加锁要么 TTL 太短被别人重入，要么太长导致崩溃后长期不恢复。
+	locker Locker
+}
+
+// Locker 是分布式锁的最小接口，由 internal/cache 实现。
+type Locker interface {
+	Lock(ctx context.Context, name string, ttl time.Duration) (release func(), ok bool)
+}
+
+// SetLocker 注入分布式锁。传 nil 恢复单实例行为。
+func (s *Scheduler) SetLocker(l Locker) {
+	s.mu.Lock()
+	s.locker = l
+	s.mu.Unlock()
+}
+
+// tryLockCheckin 尝试锁住某个账号的当日签到。返回的 release 必须在结束后调用。
+// 无 locker 时恒成功。
+func (s *Scheduler) tryLockCheckin(ctx context.Context, day, accountID string) (func(), bool) {
+	s.mu.Lock()
+	l := s.locker
+	s.mu.Unlock()
+	if l == nil {
+		return func() {}, true
+	}
+	return l.Lock(ctx, "checkin:"+day+":"+accountID, 5*time.Minute)
 }
 
 // SetEventHook 注入运行事件钩子。
@@ -194,7 +223,14 @@ func (s *Scheduler) sweep(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
+		// 每个账号单独加锁：多实例下只有一个实例会签这个号，
+		// 其余实例本轮跳过。
+		release, locked := s.tryLockCheckin(ctx, today, a.ID)
+		if !locked {
+			continue
+		}
 		ok := s.checkinOne(ctx, a, today, loc, store.CheckinSourceAuto)
+		release()
 		if ok {
 			done++
 		} else {
