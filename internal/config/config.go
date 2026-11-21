@@ -24,6 +24,8 @@ type Config struct {
 	// 连接池上限，0 表示按方言取默认（SQLite 1/1，Postgres 20/10）。
 	DBMaxOpen int
 	DBMaxIdle int
+	// MigrateSQLite：auto（默认）/ off / require，控制启动时是否把旧 relay.db 导入 Postgres。
+	MigrateSQLite string
 	PoolStrategy   string
 	MaxRetries     int
 	// RetryUntilExhausted 为 true 时，遇到可换号的错误会按序试完整个号池
@@ -139,6 +141,7 @@ func Load() (*Config, error) {
 		DatabaseURL:         strings.TrimSpace(os.Getenv("DATABASE_URL")),
 		DBMaxOpen:           envInt("DB_MAX_OPEN_CONNS", 0),
 		DBMaxIdle:           envInt("DB_MAX_IDLE_CONNS", 0),
+		MigrateSQLite:       env("MIGRATE_SQLITE", "auto"),
 		PoolStrategy:        env("POOL_STRATEGY", "load_balance"),
 		MaxRetries:          envInt("MAX_RETRIES", 3),
 		RetryUntilExhausted: envBool("RETRY_UNTIL_EXHAUSTED", false),

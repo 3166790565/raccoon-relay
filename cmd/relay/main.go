@@ -60,6 +60,19 @@ func main() {
 	// 启动日志只说后端类型与池大小，绝不打印带密码的 DSN。
 	if cfg.DatabaseURL != "" {
 		log.Printf("数据库后端: postgres")
+		// 首次切到 Postgres 时把旧 relay.db 搬过去。失败必须中止启动：
+		// 静默起一个空库会让面板显示「账号全没了」，比启动失败更难排查。
+		res, err := st.MigrateSQLite(context.Background(), cfg.DataDir,
+			store.ParseMigrateMode(cfg.MigrateSQLite))
+		if err != nil {
+			log.Fatalf("旧库迁移失败（已回滚，relay.db 保持原样）: %v", err)
+		}
+		switch {
+		case res.Ran:
+			log.Printf("已从 SQLite 迁移 %d 个账号；旧库备份在 %s", res.Counts["accounts"], res.Backup)
+		case res.Reason != "":
+			log.Printf("跳过 SQLite 迁移: %s", res.Reason)
+		}
 	} else {
 		log.Printf("数据库后端: sqlite (%s)", cfg.DataDir)
 	}
