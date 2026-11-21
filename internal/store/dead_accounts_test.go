@@ -89,20 +89,20 @@ func TestPurgeDeadAccountsCleansDependents(t *testing.T) {
 	}
 
 	var cools, checkins int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM model_cooldowns WHERE account_id = ?`, dead.ID).Scan(&cools); err != nil {
+	if err := s.QueryRowContext(ctx, `SELECT COUNT(*) FROM model_cooldowns WHERE account_id = ?`, dead.ID).Scan(&cools); err != nil {
 		t.Fatal(err)
 	}
 	if cools != 0 {
 		t.Fatalf("冷却记录应一并删除，实际剩 %d 条", cools)
 	}
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM checkin_history WHERE account_id = ?`, dead.ID).Scan(&checkins); err != nil {
+	if err := s.QueryRowContext(ctx, `SELECT COUNT(*) FROM checkin_history WHERE account_id = ?`, dead.ID).Scan(&checkins); err != nil {
 		t.Fatal(err)
 	}
 	if checkins != 0 {
 		t.Fatalf("签到记录应一并删除，实际剩 %d 条", checkins)
 	}
 	// 没有命中失效条件的号，数据必须原样保留
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM checkin_history WHERE account_id = ?`, alive.ID).Scan(&checkins); err != nil {
+	if err := s.QueryRowContext(ctx, `SELECT COUNT(*) FROM checkin_history WHERE account_id = ?`, alive.ID).Scan(&checkins); err != nil {
 		t.Fatal(err)
 	}
 	if checkins != 1 {

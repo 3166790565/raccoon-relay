@@ -11,10 +11,28 @@ import (
 // 只存命中：miss 不缓存，新建的 Key 立刻可用。
 // 删除 Key 时通过 invalidateKey 主动失效。
 const (
-	keyCacheTTL  = 30 * time.Second
-	keyTouchGap  = 60 * time.Second
+	keyCacheTTL    = 30 * time.Second
+	keyTouchGap    = 60 * time.Second
 	accountSnapTTL = 1 * time.Second
 )
+
+// KV 是跨实例缓存的最小接口，由 internal/cache 实现。
+// 不注入时只用进程内缓存，行为与单机一致。
+type KV interface {
+	Get(ctx context.Context, key string) (string, bool)
+	Set(ctx context.Context, key, val string, ttl time.Duration)
+	Del(ctx context.Context, key string)
+}
+
+// SetKV 注入跨实例缓存。传 nil 关闭。
+func (s *Store) SetKV(kv KV) {
+	s.keys.mu.Lock()
+	s.keys.kv = kv
+	s.keys.mu.Unlock()
+}
+
+// keyCacheName 是 Redis 里 Key 校验结果的键名前缀。
+func keyCacheName(hash string) string { return "key:" + hash }
 
 type keyCacheEntry struct {
 	id string
@@ -22,35 +40,55 @@ type keyCacheEntry struct {
 }
 
 type keyCacheState struct {
-	mu       sync.Mutex
-	hits     map[string]keyCacheEntry
-	touched  map[string]time.Time
+	mu      sync.Mutex
+	hits    map[string]keyCacheEntry
+	touched map[string]time.Time
+	kv      KV
 }
 
-func (s *Store) cacheKey(hash, id string) {
+func (s *Store) cacheKey(ctx context.Context, hash, id string) {
 	s.keys.mu.Lock()
 	s.keys.hits[hash] = keyCacheEntry{id: id, at: time.Now()}
+	kv := s.keys.kv
 	s.keys.mu.Unlock()
+	if kv != nil {
+		kv.Set(ctx, keyCacheName(hash), id, keyCacheTTL)
+	}
 }
 
-func (s *Store) cachedKey(hash string) (string, bool) {
+func (s *Store) cachedKey(ctx context.Context, hash string) (string, bool) {
 	s.keys.mu.Lock()
-	defer s.keys.mu.Unlock()
 	e, ok := s.keys.hits[hash]
-	if !ok || time.Since(e.at) > keyCacheTTL {
-		if ok {
-			delete(s.keys.hits, hash)
-		}
-		return "", false
+	kv := s.keys.kv
+	if ok && time.Since(e.at) > keyCacheTTL {
+		delete(s.keys.hits, hash)
+		ok = false
 	}
-	return e.id, true
+	s.keys.mu.Unlock()
+	if ok {
+		return e.id, true
+	}
+	// 本进程没有，再问一次共享缓存：另一个副本刚校验过。
+	if kv != nil {
+		if id, hit := kv.Get(ctx, keyCacheName(hash)); hit && id != "" {
+			s.keys.mu.Lock()
+			s.keys.hits[hash] = keyCacheEntry{id: id, at: time.Now()}
+			s.keys.mu.Unlock()
+			return id, true
+		}
+	}
+	return "", false
 }
 
 func (s *Store) invalidateKey(hash string) {
 	s.keys.mu.Lock()
 	delete(s.keys.hits, hash)
 	delete(s.keys.touched, hash)
+	kv := s.keys.kv
 	s.keys.mu.Unlock()
+	if kv != nil {
+		kv.Del(context.Background(), keyCacheName(hash))
+	}
 }
 
 // markKeyUsed 返回 true 表示这次应该真正写库。

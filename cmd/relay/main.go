@@ -97,6 +97,9 @@ func main() {
 	} else {
 		log.Printf("分布式协调: 已配置 Redis 但暂不可用，降级为本地实现")
 	}
+	// Key 校验结果跨实例共享：多副本下每个副本都要认识同一把 Key，
+	// 否则新副本要各自查一遍库。
+	st.SetKV(rds)
 
 	lmgr := logmgr.New(logmgr.ConfigOf(cfg), st)
 	lmgr.SetLocker(rds)

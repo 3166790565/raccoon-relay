@@ -80,7 +80,7 @@ func (s *Store) VerifyKey(ctx context.Context, plain string) bool {
 	}
 	h := KeyHash(plain)
 
-	if id, ok := s.cachedKey(h); ok {
+	if id, ok := s.cachedKey(ctx, h); ok {
 		// 缓存里存的是已验证过的 id；disabled 的 Key 不会进缓存。
 		s.touchKey(ctx, id, h)
 		return true
@@ -97,7 +97,7 @@ func (s *Store) VerifyKey(ctx context.Context, plain string) bool {
 	if subtle.ConstantTimeCompare([]byte(stored), []byte(h)) != 1 {
 		return false
 	}
-	s.cacheKey(h, id)
+	s.cacheKey(ctx, h, id)
 	s.touchKey(ctx, id, h)
 	return true
 }

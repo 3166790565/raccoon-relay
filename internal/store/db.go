@@ -173,6 +173,11 @@ func (s *Store) QueryRowContext(ctx context.Context, q string, args ...any) *sql
 	return s.queryRow(ctx, q, args...)
 }
 
+// Exec 是 context.Background 的便捷版本，供测试使用。
+func (s *Store) Exec(q string, args ...any) (sql.Result, error) {
+	return s.exec(context.Background(), q, args...)
+}
+
 // beginTx 开启事务。事务内的语句必须走 execTx/queryTx/queryRowTx。
 func (s *Store) beginTx(ctx context.Context) (*sql.Tx, error) {
 	return s.db.BeginTx(ctx, nil)

@@ -37,7 +37,7 @@ func TestAddEventMergesRepeats(t *testing.T) {
 	}
 
 	// 把这条事件的时间推到窗口之外，再写一次应产生新行。
-	if _, err := st.db.Exec(`UPDATE runtime_events SET ts = ?`, time.Now().Add(-2*eventMergeWindow).UnixMilli()); err != nil {
+	if _, err := st.Exec(`UPDATE runtime_events SET ts = ?`, time.Now().Add(-2*eventMergeWindow).UnixMilli()); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.AddEvent(ctx, ev); err != nil {
@@ -92,7 +92,7 @@ func TestLatestEventsOrdersByLastSeen(t *testing.T) {
 	ctx := context.Background()
 	st := newEventStore(t)
 	now := time.Now().UnixMilli()
-	if _, err := st.db.Exec(
+	if _, err := st.Exec(
 		`INSERT INTO runtime_events (ts, level, scope, component, account_id, message, detail, count, last_ts)
 		 VALUES (?,?,?,?,?,?,?,?,?), (?,?,?,?,?,?,?,?,?)`,
 		now-3600_000, LevelWarn, ScopeRelay, "engine", "acc1", "反复失败", "repeated", 9, now,
@@ -108,7 +108,7 @@ func TestLatestEventsOrdersByLastSeen(t *testing.T) {
 		t.Fatalf("应按最后发生时间倒序，实际 %+v", rows)
 	}
 	// 老数据（last_ts=0）回落到 ts，不能因为缺失列值被排到最后。
-	if _, err := st.db.Exec(
+	if _, err := st.Exec(
 		`INSERT INTO runtime_events (ts, level, scope, component, account_id, message, detail, count, last_ts)
 		 VALUES (?,?,?,?,?,?,?,?,?)`,
 		now-10_000, LevelWarn, ScopeRelay, "engine", "acc1", "老数据", "legacy", 1, 0,
