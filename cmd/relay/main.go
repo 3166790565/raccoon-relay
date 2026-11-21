@@ -119,6 +119,17 @@ func main() {
 	events := eventlog.New(st)
 	go events.Start(ctx)
 
+	// 报表按自然日聚合，必须与用户看到的日期同一天：把配置时区注入 store。
+	store.SetDailyLocation(cfg.Location())
+	// 老库升级：日聚合表是新建的，用现有流水补算一次历史，报表才不会显示空白。
+	go func() {
+		if n, err := st.BackfillDailyIfEmpty(ctx); err != nil {
+			log.Printf("[报表] 历史日聚合补算失败: %v", err)
+		} else if n > 0 {
+			log.Printf("[报表] 已从历史流水补算日聚合：%d 条", n)
+		}
+	}()
+
 	client := raccoon.NewClient(cfg.UpstreamBase, time.Duration(cfg.UpstreamTimeoutSec)*time.Second)
 	// 对话流不能套总时限：长回答会被硬掐在超时点。改用上游空闲超时。
 	client.IdleTimeout = cfg.StreamIdleTimeout

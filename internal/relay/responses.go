@@ -426,7 +426,7 @@ func (s *Server) HandleResponses(w http.ResponseWriter, r *http.Request) {
 	s.logUsage(r.Context(), res, err, start, "responses", &sink.usage)
 	if err != nil {
 		code, msg := publicError(err)
-		writeJSON(w, code, errorBody(code, msg))
+		writeErrorWithRetry(w, code, errorBody(code, msg), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, sink.Message())

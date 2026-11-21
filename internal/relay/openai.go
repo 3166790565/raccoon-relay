@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -334,7 +335,7 @@ func (s *Server) HandleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	s.logUsage(r.Context(), res, err, start, "openai", sink.usage)
 	if err != nil {
 		code, msg := publicError(err)
-		writeJSON(w, code, errorBody(code, msg))
+		writeErrorWithRetry(w, code, errorBody(code, msg), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, sink.Message())
@@ -348,6 +349,21 @@ func publicError(err error) (int, string) {
 		code = http.StatusBadGateway
 	}
 	return code, cleanMessage(msg)
+}
+
+// writeErrorWithRetry 写出错误体，并在上游给了重置时刻时附上 Retry-After 头。
+//
+// 客户端（尤其会读 Retry-After 的 SDK / 网关）据此可以准确退避，
+// 而不是立刻重试、再撞一次同样的 429。
+func writeErrorWithRetry(w http.ResponseWriter, status int, body any, err error) {
+	if d := retryAfterOf(err); d > 0 {
+		secs := int(d / time.Second)
+		if secs < 1 {
+			secs = 1
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(secs))
+	}
+	writeJSON(w, status, body)
 }
 
 // HandleModels 处理 /v1/models。

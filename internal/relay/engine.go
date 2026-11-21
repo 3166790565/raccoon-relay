@@ -89,6 +89,7 @@ func (e *Engine) RunOpenAI(ctx context.Context, req *ChatContext, sink OpenAISin
 	// 事后至少知道「最后卡在哪个号上」。
 	var lastAcc string
 
+	var probed bool
 	for attemptNo := 0; ; attemptNo++ {
 		untilExhausted, maxRetry := e.RetryPolicy()
 		if !untilExhausted && attemptNo > maxRetry {
@@ -99,7 +100,19 @@ func (e *Engine) RunOpenAI(ctx context.Context, req *ChatContext, sink OpenAISin
 			return Result{}, err
 		}
 		if lease == nil {
-			break
+			// 号池暂时抽干（全在冷却里）时，别直接回一句「没有可用账号」：
+			// 那是我们自己的推断，可能已经过时。挑一个最早恢复的号真打一次，
+			// 让调用方拿到上游的真实错误（含 429 的重置时间），而不是通用的 502/503。
+			// 只探一次，且只在还没向客户端写出任何内容时做——写过了就没法重来。
+			if attemptNo == 0 && !probed {
+				probed = true
+				if probe := e.Pool.PickProbe(ctx, req.Model, excluded); probe != nil {
+					lease = probe
+				}
+			}
+			if lease == nil {
+				break
+			}
 		}
 		acc := lease.Account
 		excluded[acc.ID] = true
@@ -175,8 +188,15 @@ func (e *Engine) RunOpenAI(ctx context.Context, req *ChatContext, sink OpenAISin
 		// 429 只罚「这个号 × 这个模型」，不把整个号停掉：同一个号换个模型往往还是好的。
 		if isModelScoped(leaseErr) || kind == pool.FailRate {
 			if e.Cool.ModelEnabled() {
-				e.Cool.CoolModel(ctx, acc.ID, req.Model, leaseErr.Error())
-				e.report(level, "模型级冷却："+req.Model+" · "+publicMsg, detail+"\n处置：仅冷却该模型", acc.ID)
+				// 上游给了 Retry-After 就对齐到它的重置时刻；没给才用本地阶梯。
+				// 面板事件里写明这次冷却依据，排查时不用猜为什么等了这么久。
+				hint := retryAfterOf(leaseErr)
+				e.Cool.CoolModelRetryAfter(ctx, acc.ID, req.Model, leaseErr.Error(), hint)
+				action := "仅冷却该模型"
+				if hint > 0 {
+					action = "仅冷却该模型 · 对齐上游重置时间（" + fmtSeconds(hint) + "）"
+				}
+				e.report(level, "模型级冷却："+req.Model+" · "+publicMsg, detail+"\n处置："+action, acc.ID)
 				if at.Started {
 					return Result{AccountID: acc.ID, Model: req.Model}, leaseErr
 				}

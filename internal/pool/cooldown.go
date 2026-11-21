@@ -267,6 +267,20 @@ func modelCoolDelay(hits int64) time.Duration { return coolDelay(hits) }
 // 逐次拉长冷却；冷却到期后再失败会继续上一档，不会退回 3 分钟。
 // 成功返回时由 ClearModel 清零。
 func (c *CooldownBook) CoolModel(ctx context.Context, accID, model, reason string) {
+	c.coolModelWithHint(ctx, accID, model, reason, 0)
+}
+
+// CoolModelRetryAfter 记一次带上游重置时刻的模型级失败。
+//
+// 上游对 429 常常给出 Retry-After（或响应体里的 reset_time）：那个时间比本地
+// 阶梯更准确——按本地 3 分钟冷却，到期后必然再撞一次同样的 429，白白多打一次
+// 上游、还让调用方多等一轮。这里取「阶梯」与「上游给的重置时刻」中较长的一个：
+// 短于阶梯时仍按阶梯走，避免上游给个 1 秒让号反复进出冷却。
+func (c *CooldownBook) CoolModelRetryAfter(ctx context.Context, accID, model, reason string, retryAfter time.Duration) {
+	c.coolModelWithHint(ctx, accID, model, reason, retryAfter)
+}
+
+func (c *CooldownBook) coolModelWithHint(ctx context.Context, accID, model, reason string, hint time.Duration) {
 	if model == "" || !c.ModelEnabled() {
 		return
 	}
@@ -282,6 +296,12 @@ func (c *CooldownBook) CoolModel(ctx context.Context, accID, model, reason strin
 		}
 	}
 	delay := modelCoolDelay(hits)
+	if hint > delay {
+		delay = hint
+	}
+	if delay > coolMax {
+		delay = coolMax
+	}
 	m := modelCool{accID: accID, model: model, until: now + delay.Milliseconds(), hits: hits + 1, reason: reason}
 	c.models[k] = m
 	// 过期的失败链在这里顺手清掉，免得 map 只增不减。

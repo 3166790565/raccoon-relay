@@ -105,6 +105,24 @@ var sqliteSchema = []string{
 	`CREATE INDEX IF NOT EXISTS idx_usage_ts ON usage_logs(ts)`,
 	`CREATE INDEX IF NOT EXISTS idx_usage_account ON usage_logs(account_id, id)`,
 
+	// 报表页的日聚合。报表要显示一年热力图与长区间趋势，直接对 usage_logs
+	// 做 GROUP BY 会在大表上扫几十万行；这里在写流水的同时按天累加，
+	// 报表只读这张小表。流水被清理（保留天数）后，历史日统计仍然保留。
+	`CREATE TABLE IF NOT EXISTS request_daily (
+		day        TEXT PRIMARY KEY,
+		requests   INTEGER NOT NULL DEFAULT 0,
+		successful INTEGER NOT NULL DEFAULT 0,
+		tokens     INTEGER NOT NULL DEFAULT 0
+	)`,
+	// 按「天 × 模型」的分解，报表的模型 Top N 与趋势图选维度都读它。
+	`CREATE TABLE IF NOT EXISTS request_daily_model (
+		day      TEXT NOT NULL,
+		model    TEXT NOT NULL DEFAULT '',
+		requests INTEGER NOT NULL DEFAULT 0,
+		tokens   INTEGER NOT NULL DEFAULT 0,
+		PRIMARY KEY (day, model)
+	)`,
+
 	`CREATE TABLE IF NOT EXISTS settings (
 		key   TEXT PRIMARY KEY,
 		value TEXT NOT NULL DEFAULT ''
@@ -234,6 +252,21 @@ var pgSchema = []string{
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_usage_ts ON usage_logs(ts)`,
 	`CREATE INDEX IF NOT EXISTS idx_usage_account ON usage_logs(account_id, id)`,
+
+	// 与 SQLite 版一一对应的报表日聚合表。
+	`CREATE TABLE IF NOT EXISTS request_daily (
+		day        TEXT PRIMARY KEY,
+		requests   BIGINT NOT NULL DEFAULT 0,
+		successful BIGINT NOT NULL DEFAULT 0,
+		tokens     BIGINT NOT NULL DEFAULT 0
+	)`,
+	`CREATE TABLE IF NOT EXISTS request_daily_model (
+		day      TEXT NOT NULL,
+		model    TEXT NOT NULL DEFAULT '',
+		requests BIGINT NOT NULL DEFAULT 0,
+		tokens   BIGINT NOT NULL DEFAULT 0,
+		PRIMARY KEY (day, model)
+	)`,
 
 	`CREATE TABLE IF NOT EXISTS settings (
 		key   TEXT PRIMARY KEY,

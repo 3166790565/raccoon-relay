@@ -32,6 +32,17 @@ func classify(err error) (pool.FailKind, bool, int, string) {
 	}
 	msg := cleanMessage(ue.Error())
 	switch {
+	// 请求本身的毛病（上下文超长、请求体过大、参数/Schema 不合法）：
+	// 换号、等冷却都不会好，重试只会白打上游。最容易踩的坑是它们在流里以
+	// 「HTTP 200 + 错误帧」出现、Status 恒为 0——不显式识别就会掉进下面的
+	// 「Status 为 0 → 上游波动，换号重试」分支，把一条请求侧错误当成账号故障，
+	// 连打几次还可能把健康号一起卷进重试风暴。
+	case isContextTooLong(ue):
+		return pool.FailOther, false, http.StatusBadRequest, msg
+	case isPayloadTooLarge(ue):
+		return pool.FailOther, false, http.StatusRequestEntityTooLarge, msg
+	case isInvalidRequestCode(ue.Code):
+		return pool.FailOther, false, http.StatusBadRequest, msg
 	case isContentRejectedCode(ue.Code):
 		// 100041 / 100042 是上游对内容本身的拒答（命中敏感词），跟账号无关：
 		// 换号重试只会拿另一个号再问一遍同样的话，必然还是拒答。
@@ -70,6 +81,31 @@ func classify(err error) (pool.FailKind, bool, int, string) {
 		return pool.FailTransient, true, http.StatusBadGateway, msg
 	}
 	return pool.FailOther, false, http.StatusBadRequest, msg
+}
+
+// retryAfterOf 取出上游给出的重试等待时长；没有则返回 0。
+func retryAfterOf(err error) time.Duration {
+	var ue *raccoon.UpstreamError
+	if errors.As(err, &ue) {
+		return ue.RetryAfter
+	}
+	return 0
+}
+
+// fmtSeconds 把时长写成「N 分 M 秒」，用于事件详情。
+func fmtSeconds(d time.Duration) string {
+	if d < time.Second {
+		return "0 秒"
+	}
+	s := int(d / time.Second)
+	if s < 60 {
+		return fmt.Sprintf("%d 秒", s)
+	}
+	m, r := s/60, s%60
+	if r == 0 {
+		return fmt.Sprintf("%d 分钟", m)
+	}
+	return fmt.Sprintf("%d 分 %d 秒", m, r)
 }
 
 // isTokenExpiredErr 判断错误是否在说「这枚 access 过期了 / 不认这枚 access」。
@@ -117,12 +153,60 @@ const (
 	// codePointsInsufficient = 1000007：上游「积分余额不足，请充值后重试」。
 	// 这条错误经常以 HTTP 400 返回，必须按业务码识别，否则会被当成请求本身有问题。
 	codePointsInsufficient = 1000007
+	// codeContextTooLong = 11115：上下文/提示词超过模型上限。
+	// 换号无意义（是请求内容的问题），直接回 400 让调用方精简。
+	codeContextTooLong = 11115
+	// codeInvalidRequest = 4027：工具/参数 Schema 非法等请求格式问题。
+	codeInvalidRequest = 4027
 )
 
 // isContentRejectedCode 判断业务码是否属于「请求内容被上游拒答」。
 // 这类错误只取决于下游发来的内容，与账号无关，因此永不冷却、永不换号。
 func isContentRejectedCode(code int) bool {
 	return code == codeContentRejected || code == codeSensitiveContent
+}
+
+// isInvalidRequestCode 判断业务码是否属于「请求格式本身不合法」。
+// 换号、冷却都不会好，只该原样回 400 让调用方改请求。
+//
+// 判据刻意收窄成 4027（工具/参数 Schema 非法）：4001 在别的上游里是
+// 「模型配置为空」，那类问题换号或修正配置后可能恢复，不能当成请求侧错误吞掉。
+func isInvalidRequestCode(code int) bool {
+	return code == codeInvalidRequest
+}
+
+// isContextTooLong 判断错误是否是「上下文/提示词超过模型上限」。
+// 上游两种下发方式都有：HTTP 400 + 业务码，以及 200 流里的错误帧（Status 为 0）。
+func isContextTooLong(ue *raccoon.UpstreamError) bool {
+	if ue.Code == codeContextTooLong {
+		return true
+	}
+	low := strings.ToLower(ue.Message)
+	for _, w := range []string{
+		"context_length_exceeded", "context length", "maximum context",
+		"prompt is too long", "too many tokens", "input is too long",
+		"上下文超长", "上下文长度", "超出最大长度", "请求过长",
+	} {
+		if strings.Contains(low, w) {
+			return true
+		}
+	}
+	return false
+}
+
+// isPayloadTooLarge 判断错误是否是「请求体太大」。
+// 同样与账号无关：换号、换模型都不会好，只该回 413 让调用方精简请求。
+func isPayloadTooLarge(ue *raccoon.UpstreamError) bool {
+	if ue.Status == http.StatusRequestEntityTooLarge {
+		return true
+	}
+	low := strings.ToLower(ue.Message)
+	for _, w := range []string{"request entity too large", "payload too large", "请求体过大", "请求实体过大"} {
+		if strings.Contains(low, w) {
+			return true
+		}
+	}
+	return false
 }
 
 // isModelScoped 判断错误是否只针对「账号 × 模型」：换号无用，罚模型即可。

@@ -45,6 +45,12 @@ type Panel struct {
 	balancer *creditsync.Balancer
 	logs     *logmgr.Manager
 	renewer  *relay.Renewer
+	// report 是报表聚合的短时缓存：面板会按几秒一次的节奏自动刷新，
+	// 每次都重新跑一遍聚合没必要，缓存 5 秒足够。
+	reportMu   sync.Mutex
+	reportAt   time.Time
+	reportKey  string
+	reportBody map[string]any
 	// srv 是数据面处理器，用于热更新并发上限；可为 nil（测试）。
 	srv   *relay.Server
 	webFS func(name string) ([]byte, error)
@@ -180,6 +186,8 @@ func (p *Panel) Route(w http.ResponseWriter, r *http.Request) {
 		p.handleGetSettings(w, r)
 	case path == "/api/settings" && r.Method == http.MethodPut:
 		p.handlePutSettings(w, r)
+	case path == "/api/report" && r.Method == http.MethodGet:
+		p.handleReport(w, r)
 	case path == "/api/logs":
 		p.handleLogs(w, r)
 	case path == "/api/logs/facets" && r.Method == http.MethodGet:

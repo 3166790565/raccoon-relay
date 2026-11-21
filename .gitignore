@@ -19,3 +19,6 @@ internal/creds/testdata/
 /relay.exe
 bin/
 dist/
+
+# 子代理临时工作树
+.claude/worktrees/

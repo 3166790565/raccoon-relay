@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -193,8 +194,9 @@ func (c *Client) OpenChat(ctx context.Context, req ChatRequest) (*ChatStream, er
 		// 业务错误码必须带出来：200108（账号异常）、6004（模型限流）这些
 		// 都挂在响应体的 {code,message} 上，只看 HTTP 状态会全部退化成 429/4xx。
 		ue := &UpstreamError{Status: resp.StatusCode, Code: codeFromBody(body),
-			Message:  upstreamErrText(resp.StatusCode, body),
-			Endpoint: PathChat, TurnID: turnID, RequestSummary: req.summary(turnID)}
+			Message:    upstreamErrText(resp.StatusCode, body),
+			RetryAfter: RetryAfter(resp.Header, body),
+			Endpoint:   PathChat, TurnID: turnID, RequestSummary: req.summary(turnID)}
 		ue.attachDiagnostics(resp.Header, body)
 		return nil, ue
 	}
@@ -257,34 +259,12 @@ func (s *ChatStream) Next() (*ChatEvent, error) {
 		if payload == "" || payload == "[DONE]" {
 			continue
 		}
-		var frame struct {
-			Error *struct {
-				Code    int    `json:"code"`
-				Message string `json:"message"`
-			} `json:"error"`
-			Code    int    `json:"code"`
-			Message string `json:"message"`
-			Choices []struct {
-				Delta        map[string]any `json:"delta"`
-				Message      map[string]any `json:"message"`
-				FinishReason *string        `json:"finish_reason"`
-			} `json:"choices"`
-			Usage *struct {
-				PromptTokens     int64 `json:"prompt_tokens"`
-				CompletionTokens int64 `json:"completion_tokens"`
-				TotalTokens      int64 `json:"total_tokens"`
-				InputTokens      int64 `json:"input_tokens"`
-				OutputTokens     int64 `json:"output_tokens"`
-			} `json:"usage"`
-		}
+		var frame streamFrame
 		if err := json.Unmarshal([]byte(payload), &frame); err != nil {
 			continue // 坏帧跳过，不中断整条流
 		}
-		if frame.Error != nil && (frame.Error.Code != 0 || frame.Error.Message != "") {
-			return nil, &UpstreamError{Status: 502, Code: frame.Error.Code, Message: frame.Error.Message}
-		}
-		if frame.Code != 0 && frame.Code != 200 && len(frame.Choices) == 0 {
-			return nil, &UpstreamError{Status: 502, Code: frame.Code, Message: firstNonEmpty(frame.Message, "上游返回错误帧")}
+		if ue := frame.errorOf(); ue != nil {
+			return nil, ue
 		}
 
 		ev := &ChatEvent{}
@@ -327,6 +307,54 @@ func (s *ChatStream) Next() (*ChatEvent, error) {
 		return nil, s.err
 	}
 	return nil, io.EOF
+}
+
+// streamFrame 是上游流里的一帧。两种错误形态都要认：
+//
+//   - OpenAI 形态：{"error":{code,message}}，或顶层 {code,message}
+//   - Anthropic 形态：{"type":"error","error":{type,message}}
+//
+// 上游在流中途才判定失败时会发这种帧，HTTP 仍是 200；不识别就只能当坏帧跳过，
+// 最后表现为「上游返回空响应」，把一条明确的限流/拒答错报成网络问题。
+type streamFrame struct {
+	Type  string `json:"type"`
+	Error *struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	} `json:"error"`
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+
+	Choices []struct {
+		Delta        map[string]any `json:"delta"`
+		Message      map[string]any `json:"message"`
+		FinishReason *string        `json:"finish_reason"`
+	} `json:"choices"`
+	Usage *struct {
+		PromptTokens     int64 `json:"prompt_tokens"`
+		CompletionTokens int64 `json:"completion_tokens"`
+		TotalTokens      int64 `json:"total_tokens"`
+		InputTokens      int64 `json:"input_tokens"`
+		OutputTokens     int64 `json:"output_tokens"`
+	} `json:"usage"`
+}
+
+// errorOf 把一帧判成上游错误，返回 nil 表示这是正常数据帧。
+func (f *streamFrame) errorOf() *UpstreamError {
+	if f.Type == "error" && f.Error != nil {
+		return &UpstreamError{
+			Status:  502,
+			Message: firstNonEmpty(f.Error.Message, "上游返回错误帧"),
+			Code:    f.Error.Code,
+		}
+	}
+	if f.Error != nil && (f.Error.Code != 0 || f.Error.Message != "") {
+		return &UpstreamError{Status: 502, Code: f.Error.Code, Message: f.Error.Message}
+	}
+	if f.Code != 0 && f.Code != 200 && len(f.Choices) == 0 {
+		return &UpstreamError{Status: 502, Code: f.Code, Message: firstNonEmpty(f.Message, "上游返回错误帧")}
+	}
+	return nil
 }
 
 func extractDelta(d map[string]any) *Delta {
@@ -392,23 +420,67 @@ func firstNonZero(vals ...int64) int64 {
 
 // codeFromBody 从错误体里取业务错误码。
 //
-// 上游两种形态都有：{code,message} 信封，以及 {error:{code,message}} 嵌套体；
+// 上游的信封形态不止一种，实测出现过：
+//
+//	{code, message}
+//	{error:{code, message}}
+//	{error_code, error_msg}
+//	{data:{code, message}}
+//	{ResponseMetadata:{Error:{Code}}}
+//
 // HTTP 状态码只是传输层的结果，200108 这类业务码才是分类依据。
+// 数字与数字字符串都认（有些实现把 code 序列化成字符串）。
 func codeFromBody(body []byte) int {
-	var outer struct {
-		Code  int `json:"code"`
-		Error *struct {
-			Code int `json:"code"`
-		} `json:"error"`
-	}
+	var outer map[string]json.RawMessage
 	if err := json.Unmarshal(body, &outer); err != nil {
 		return 0
 	}
-	if outer.Code != 0 {
-		return outer.Code
+	for _, key := range []string{"code", "error_code", "errorCode"} {
+		if v := codeValue(outer[key]); v != 0 {
+			return v
+		}
 	}
-	if outer.Error != nil {
-		return outer.Error.Code
+	for _, key := range []string{"error", "data"} {
+		raw, ok := outer[key]
+		if !ok {
+			continue
+		}
+		var nested map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &nested); err != nil {
+			continue
+		}
+		if v := codeValue(nested["code"]); v != 0 {
+			return v
+		}
+	}
+	if raw, ok := outer["ResponseMetadata"]; ok {
+		var meta map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &meta); err == nil {
+			var e map[string]json.RawMessage
+			if err := json.Unmarshal(meta["Error"], &e); err == nil {
+				if v := codeValue(e["Code"]); v != 0 {
+					return v
+				}
+			}
+		}
+	}
+	return 0
+}
+
+// codeValue 把 JSON 数字或数字字符串转成 int；其它形态返回 0。
+func codeValue(raw json.RawMessage) int {
+	if len(raw) == 0 {
+		return 0
+	}
+	var n int
+	if err := json.Unmarshal(raw, &n); err == nil {
+		return n
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		if v, err := strconv.Atoi(strings.TrimSpace(s)); err == nil {
+			return v
+		}
 	}
 	return 0
 }

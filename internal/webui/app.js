@@ -87,6 +87,7 @@ document.querySelectorAll('#addTabs .tab').forEach((btn) => {
 // 每个标签首次进入时才拉取数据；哈希记录当前页，刷新后停在原页。
 const PAGE_LOADERS = {
   overview: () => Promise.resolve(),
+  report: () => loadReport(),
   accounts: () => loadAccounts(),
   checkin: () => loadCheckinCenter(),
   add: () => Promise.resolve(),
@@ -100,6 +101,9 @@ const PAGE_LOADERS = {
 function switchPage(page, { force = false } = {}) {
   if (!PAGE_LOADERS[page]) page = 'overview';
   STATE.page = page;
+  // 报表标签页每次进入都重新取数：用户切回来时想看到的是最新用量，
+  // 不是上次离开时的旧图。滚动位置也会重置（switchPage 里已统一处理）。
+  if (page === 'report') STATE.loaded.delete('report');
 
   document.querySelectorAll('.navtab').forEach((b) => b.classList.toggle('active', b.dataset.page === page));
   document.querySelectorAll('.page').forEach((p) => p.classList.toggle('active', p.id === 'page-' + page));
@@ -700,7 +704,8 @@ function openAccountSettings(id) {
       <div class="field"><label>并发上限（0 = 不单独限制）</label><input id="asMaxConcurrent" type="number" step="1" min="0" value="${Number(acc.maxConcurrent) || 0}"></div>
       <p class="hint">uid：${esc(acc.uid)}<br>最近一次使用：${acc.lastUsed ? fmtTime(acc.lastUsed) : '从未'}<br>
         今日签到：${STATE.today && acc.lastCheckinDay === STATE.today ? '已签到' : esc(acc.lastCheckinDay || '未签到')}<br>
-        并发上限：该号同时最多接几个请求，达到后新请求会落到别的号；0 表示不单独限制。</p>
+        并发上限：该号同时最多接几个请求，达到后新请求会落到别的号；0 表示不单独限制。<br>
+        优先级：数值大的先被选中（两种选号策略都生效）。想让主力号先用光再切备用号，就给主力号设更高的值。</p>
     </div>
     <div class="pop-foot">
       <button class="ghost tiny" id="asCancel">取消</button>
@@ -2548,3 +2553,216 @@ $('ckAccTable').addEventListener('click', async (e) => {
     showLogin();
   }
 })();
+
+// ---------- 报表 ----------
+// 读后端 /api/report：日聚合 + 账号分解 + 耗时分布。
+// 图表全部用内联 SVG 画（项目没有第三方图表库，也不打算为此引入）。
+const REPORT = { range: '7', metric: 'tokens', data: null, loading: false };
+
+function rpFmtInt(n) {
+  const v = Number(n) || 0;
+  if (v >= 1e8) return (v / 1e8).toFixed(2).replace(/\.?0+$/, '') + ' 亿';
+  if (v >= 1e4) return (v / 1e4).toFixed(1).replace(/\.0$/, '') + ' 万';
+  return String(v);
+}
+
+function rpFmtMs(ms) {
+  const v = Number(ms) || 0;
+  if (v >= 1000) return (v / 1000).toFixed(2) + 's';
+  return v + 'ms';
+}
+
+function rpPct(v) {
+  const n = Number(v) || 0;
+  return n.toFixed(1) + '%';
+}
+
+async function loadReport() {
+  if (REPORT.loading) return;
+  REPORT.loading = true;
+  $('rpMsg').textContent = '';
+  try {
+    const q = new URLSearchParams({ range: REPORT.range });
+    const r = await api('/api/report?' + q.toString());
+    REPORT.data = (r && r.summary) || null;
+    renderReport();
+  } catch (e) {
+    $('rpMsg').textContent = e.message;
+    if (e.status === 401) showLogin();
+  } finally {
+    REPORT.loading = false;
+  }
+}
+
+function renderReport() {
+  const s = REPORT.data;
+  if (!s) {
+    $('rpKpis').innerHTML = '';
+    $('rpTrend').innerHTML = '<div class="empty">暂无数据</div>';
+    $('rpModels').innerHTML = '';
+    $('rpAccounts').innerHTML = '';
+    $('rpHeat').innerHTML = '';
+    return;
+  }
+  const o = s.overview || {};
+  $('rpRangeLabel').textContent = `${s.label || ''} · ${s.startDate || ''} ~ ${s.endDate || ''}`;
+
+  const lat = s.latency || {};
+  const kpis = [
+    ['总 Token', rpFmtInt(o.tokens), '输入 + 输出', 'accent'],
+    ['请求数', rpFmtInt(o.requests), s.label || '', ''],
+    ['成功率', rpPct(o.successRate), `成功 ${rpFmtInt(o.successful)} 次`, Number(o.successRate) >= 99 ? 'ok' : 'warn'],
+    ['活跃天数', String(o.activeDays || 0), `${s.trend ? s.trend.length : 0} 天区间`, ''],
+    ['连续天数', String(o.streak || 0), '含今天往前数', ''],
+    ['Top 模型', o.topModel || '-', o.topModel ? rpFmtInt(o.topModelTokens) + ' token' : '暂无', ''],
+    ['平均耗时', rpFmtMs(lat.avgMs), 'P95 ' + rpFmtMs(lat.p95Ms), ''],
+    ['输出速度', (lat.tokenPerSec || 0) + ' tok/s', '峰值 ' + rpFmtMs(lat.maxMs), ''],
+  ];
+  $('rpKpis').innerHTML = kpis.map(([k, v, sub, cls]) =>
+    `<div class="rp-kpi ${cls}"><div class="k">${esc(k)}</div>` +
+    `<div class="v" title="${esc(v)}">${esc(v)}</div>` +
+    `<div class="sub">${esc(sub)}</div></div>`).join('');
+
+  renderRpTrend(s.trend || []);
+  renderRpRank('rpModels', (s.models || []).map((m) => ({
+    name: m.model || '未知模型', value: m.tokens, sub: rpFmtInt(m.requests) + ' 次', share: m.share,
+  })));
+  renderRpRank('rpAccounts', (s.accounts || []).map((a) => ({
+    name: a.name || shortUID(a.uid || a.id) || '未知账号',
+    value: a.tokens, sub: rpFmtInt(a.requests) + ' 次', share: a.share,
+  })));
+  renderRpHeat(s.heatmap || []);
+}
+
+// renderRpTrend 画每日趋势。柱状图比折线更直观地表达「每天用了多少」；
+// 只有 1 天时也画成单根柱，不会出现空白图。
+function renderRpTrend(trend) {
+  const el = $('rpTrend');
+  if (!trend.length) {
+    el.innerHTML = '<div class="empty">所选区间没有请求</div>';
+    return;
+  }
+  const metric = REPORT.metric;
+  const vals = trend.map((d) => Number(d[metric]) || 0);
+  const max = Math.max(1, ...vals);
+  const W = Math.max(320, el.clientWidth || 720);
+  const H = 190;
+  const padL = 48, padR = 10, padT = 12, padB = 26;
+  const plotW = W - padL - padR;
+  const plotH = H - padT - padB;
+  const n = trend.length;
+  const gap = n > 1 ? Math.min(6, (plotW / n) * 0.3) : 0;
+  const bw = Math.max(2, (plotW - gap * (n - 1)) / n);
+
+  const fmtAxis = metric === 'tokens' ? rpFmtInt : (v) => String(v);
+  const ySteps = 4;
+  let svg = '';
+  for (let i = 0; i <= ySteps; i++) {
+    const y = padT + plotH - (plotH * i) / ySteps;
+    const val = Math.round((max * i) / ySteps);
+    svg += `<line class="gridline" x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}"/>`;
+    svg += `<text class="axis-text" x="${padL - 6}" y="${y + 3}" text-anchor="end">${esc(fmtAxis(val))}</text>`;
+  }
+  const labelEvery = Math.max(1, Math.ceil(n / 10));
+  trend.forEach((d, i) => {
+    const v = vals[i];
+    const h = v > 0 ? Math.max(2, (v / max) * plotH) : 0;
+    const x = padL + i * (bw + gap);
+    const y = padT + plotH - h;
+    const tip = `${d.day} · ${rpFmtInt(d.tokens)} token · ${d.requests} 次`;
+    svg += `<rect class="bar" x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${bw.toFixed(1)}" ` +
+      `height="${h.toFixed(1)}" rx="2"><title>${esc(tip)}</title></rect>`;
+    if (i % labelEvery === 0 || i === n - 1) {
+      const lbl = d.day ? d.day.slice(5) : '';
+      svg += `<text class="axis-text" x="${(x + bw / 2).toFixed(1)}" y="${H - 8}" ` +
+        `text-anchor="middle">${esc(lbl)}</text>`;
+    }
+  });
+  el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img">${svg}</svg>`;
+}
+
+// renderRpRank 画排行条：名称 / 进度条 / 数值。
+function renderRpRank(id, rows) {
+  const el = $(id);
+  if (!rows.length) {
+    el.innerHTML = '<div class="empty">暂无数据</div>';
+    return;
+  }
+  const max = Math.max(1, ...rows.map((r) => Number(r.value) || 0));
+  el.innerHTML = rows.slice(0, 30).map((r) => {
+    const v = Number(r.value) || 0;
+    const w = Math.max(v > 0 ? 2 : 0, (v / max) * 100);
+    const share = r.share != null ? ` · ${Number(r.share).toFixed(1)}%` : '';
+    return `<div class="rp-rank-row">` +
+      `<div class="name" title="${esc(r.name)}">${esc(r.name)}</div>` +
+      `<div class="meter"><i style="width:${w.toFixed(1)}%"></i></div>` +
+      `<div class="num">${esc(rpFmtInt(v))}<small>${esc(r.sub || '')}${esc(share)}</small></div>` +
+      `</div>`;
+  }).join('');
+}
+
+// renderRpHeat 画近一年热力图：按周排成 53 列 × 7 行。
+// 空白日也占格——热力图的价值就在于「哪段时间没用」也一眼可见。
+function renderRpHeat(cells) {
+  const el = $('rpHeat');
+  const byDay = {};
+  (cells || []).forEach((c) => { byDay[c.day] = Number(c.requests) || 0; });
+  const today = new Date();
+  const end = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  const start = new Date(end);
+  start.setDate(start.getDate() - 364);
+  // 从 start 所在周的周一算起，保证列对齐星期
+  const offset = (start.getDay() + 6) % 7; // 周一 = 0
+  start.setDate(start.getDate() - offset);
+  end.setDate(end.getDate() + (6 - ((end.getDay() + 6) % 7)));
+
+  const pad = (n) => String(n).padStart(2, '0');
+  const keyOf = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  const days = [];
+  for (const d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+    const key = keyOf(d);
+    days.push({ key, req: byDay[key] || 0 });
+  }
+  const max = Math.max(1, ...days.map((d) => d.req));
+  const level = (v) => {
+    if (!v) return '';
+    const q = v / max;
+    if (q > 0.66) return 'l4';
+    if (q > 0.33) return 'l3';
+    if (q > 0.1) return 'l2';
+    return 'l1';
+  };
+  const grid = days.map((d) => {
+    const tip = `${d.key} · ${d.req} 次请求`;
+    return `<div class="cell ${level(d.req)}" title="${esc(tip)}"></div>`;
+  }).join('');
+  el.innerHTML = `<div class="heat-grid">${grid}</div>` +
+    `<div class="heat-legend">少` +
+    `<div class="cell"></div><div class="cell l1"></div><div class="cell l2"></div>` +
+    `<div class="cell l3"></div><div class="cell l4"></div>多</div>`;
+}
+
+document.querySelectorAll('#rpRange button').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('#rpRange button').forEach((b) => b.classList.toggle('on', b === btn));
+    REPORT.range = btn.dataset.v;
+    loadReport();
+  });
+});
+document.querySelectorAll('#rpMetric button').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('#rpMetric button').forEach((b) => b.classList.toggle('on', b === btn));
+    REPORT.metric = btn.dataset.v;
+    if (REPORT.data) renderRpTrend(REPORT.data.trend || []);
+  });
+});
+const rpRefreshBtn = document.getElementById('rpRefreshBtn');
+if (rpRefreshBtn) rpRefreshBtn.addEventListener('click', () => loadReport());
+
+// 窗口变化时重画趋势图（SVG 按容器宽度计算列宽）
+let rpResizeTimer = null;
+window.addEventListener('resize', () => {
+  if (STATE.page !== 'report' || !REPORT.data) return;
+  clearTimeout(rpResizeTimer);
+  rpResizeTimer = setTimeout(() => renderRpTrend(REPORT.data.trend || []), 150);
+});

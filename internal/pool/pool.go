@@ -214,6 +214,11 @@ func (p *Pool) Pick(ctx context.Context, model string, excluded map[string]bool)
 
 	sort.SliceStable(cands, func(i, j int) bool {
 		a, b := cands[i], cands[j]
+		// 优先级最高且跨策略生效：数值大的先用（0 为默认，互不影响）。
+		// 跑干几个号再切到备用号是运维上的常见需求，不该被选号策略覆盖。
+		if a.acc.Priority != b.acc.Priority {
+			return a.acc.Priority > b.acc.Priority
+		}
 		switch strategy {
 		case StrategyRoundRobin:
 			// 轮询：最久没被选中的优先，让请求均匀摊到每个号上。
@@ -255,6 +260,52 @@ func (p *Pool) Pick(ctx context.Context, model string, excluded map[string]bool)
 }
 
 func (l *Lease) Release() {}
+
+// PickProbe 是「号池抽干」时的兜底探测：在所有账号都因冷却/积分/凭证不可用时，
+// 挑一个最早恢复的号强制试一次，让调用方拿到上游的真实错误（例如 429 的重置时间），
+// 而不是我们推断出来的「没有可用账号」。返回 nil 表示连一个能探测的号都没有。
+//
+// 只放宽「状态与冷却」这一类条件：停用、无 token、订阅过期的号连试都不该试，
+// 探测它们只会制造无意义的失败。
+func (p *Pool) PickProbe(ctx context.Context, model string, excluded map[string]bool) *Lease {
+	accounts, err := p.st.ListAccounts(ctx)
+	if err != nil {
+		return nil
+	}
+	now := time.Now().UnixMilli()
+	var best *store.Account
+	bestUntil := int64(0)
+	for _, a := range accounts {
+		if !a.Enabled || excluded[a.ID] || strings.TrimSpace(a.Token) == "" {
+			continue
+		}
+		if a.ExpiresAt > 0 && a.ExpiresAt <= now {
+			continue
+		}
+		switch a.Status {
+		case store.StatusOnline, store.StatusCooling, store.StatusExhausted:
+		default:
+			continue // relogin 等：重试不会成功
+		}
+		// 订阅到期/积分阈值的判断与其他路径一致，避免探测注定失败的号
+		if p.CreditPolicy().Pauses(a.Credits) {
+			continue
+		}
+		// 冷却中的号按恢复时刻排序，最早恢复的最可能刚刚恢复可用
+		if best == nil || (a.CoolUntil > 0 && (bestUntil == 0 || a.CoolUntil < bestUntil)) {
+			best, bestUntil = a, a.CoolUntil
+		}
+	}
+	if best == nil {
+		return nil
+	}
+	p.acquireInFlight(best.ID)
+	p.mu.Lock()
+	p.pickTick++
+	p.pickSeq[best.ID] = p.pickTick
+	p.mu.Unlock()
+	return &Lease{Account: best}
+}
 
 // ReleaseLease 由调用方在请求结束后调用，释放并发计数。
 func (p *Pool) ReleaseLease(l *Lease) {
