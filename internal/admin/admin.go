@@ -245,6 +245,7 @@ func (p *Panel) handleListAccounts(w http.ResponseWriter, r *http.Request) {
 			"tokenExp":   a.TokenExp, "expiresAt": a.ExpiresAt,
 			"enabled": a.Enabled, "lastCheckinDay": a.LastCheckinDay,
 			"priority": a.Priority, "lastUsed": a.LastUsed,
+			"maxConcurrent": a.MaxConcurrent,
 			"deviceId": a.DeviceID, "officeIdentity": a.OfficeIdentity,
 			"hasRefresh":  a.RefreshToken != "",
 			"platformUid": platformUIDOf(a.Meta),
@@ -375,6 +376,33 @@ func (p *Panel) handlePurgeDead(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"ok": true, "deleted": n, "skipped": skipped})
 }
 
+// applyMaxConcurrent 批量（或全部）设置单号并发上限。
+// ids 为空表示对全部账号生效；0 表示不单独限制。
+func (p *Panel) applyMaxConcurrent(ctx context.Context, w http.ResponseWriter,
+	ids []string, value int64) {
+	targets := ids
+	if len(targets) == 0 {
+		accounts, err := p.st.ListAccounts(ctx)
+		if err != nil {
+			writeJSON(w, 500, map[string]any{"ok": false, "message": err.Error()})
+			return
+		}
+		for _, a := range accounts {
+			targets = append(targets, a.ID)
+		}
+	}
+	done, failed := 0, 0
+	for _, id := range targets {
+		v := value
+		if err := p.st.UpdateAccount(ctx, id, store.AccountPatch{MaxConcurrent: &v}); err != nil {
+			failed++
+			continue
+		}
+		done++
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "done": done, "failed": failed})
+}
+
 // handleRefreshBalances 批量查余额（面板「查询余额」按钮）。
 //
 // 顺序执行而不是并发：上游同一出口 IP 并发查余额更容易触发风控，
@@ -433,9 +461,19 @@ func (p *Panel) handleBatchAccounts(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Action string   `json:"action"`
 		IDs    []string `json:"ids"`
+		Value  *int64   `json:"value"` // setMaxConcurrent 使用
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, 400, map[string]any{"ok": false, "message": err.Error()})
+		return
+	}
+	// 批量设置并发上限允许不传 ids：那表示对全部账号生效。
+	if body.Action == "setMaxConcurrent" {
+		if body.Value == nil || *body.Value < 0 {
+			writeJSON(w, 400, map[string]any{"ok": false, "message": "并发上限需为 0 或正整数"})
+			return
+		}
+		p.applyMaxConcurrent(r.Context(), w, body.IDs, *body.Value)
 		return
 	}
 	if len(body.IDs) == 0 {
@@ -545,16 +583,22 @@ func (p *Panel) handleAccountAction(w http.ResponseWriter, r *http.Request) {
 
 func (p *Panel) handlePatchAccount(w http.ResponseWriter, r *http.Request, acc *store.Account) {
 	var body struct {
-		Name     *string `json:"name"`
-		Note     *string `json:"note"`
-		Enabled  *bool   `json:"enabled"`
-		Priority *int64  `json:"priority"`
+		Name          *string `json:"name"`
+		Note          *string `json:"note"`
+		Enabled       *bool   `json:"enabled"`
+		Priority      *int64  `json:"priority"`
+		MaxConcurrent *int64  `json:"maxConcurrent"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, 400, map[string]any{"ok": false, "message": err.Error()})
 		return
 	}
-	patch := store.AccountPatch{Name: body.Name, Note: body.Note, Enabled: body.Enabled, Priority: body.Priority}
+	if body.MaxConcurrent != nil && *body.MaxConcurrent < 0 {
+		writeJSON(w, 400, map[string]any{"ok": false, "message": "单号并发上限不能为负"})
+		return
+	}
+	patch := store.AccountPatch{Name: body.Name, Note: body.Note, Enabled: body.Enabled,
+		Priority: body.Priority, MaxConcurrent: body.MaxConcurrent}
 	if err := p.st.UpdateAccount(r.Context(), acc.ID, patch); err != nil {
 		writeJSON(w, 500, map[string]any{"ok": false, "message": err.Error()})
 		return

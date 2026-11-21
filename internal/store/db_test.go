@@ -1,6 +1,8 @@
 package store
 
 import (
+	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
 	"strings"
@@ -67,5 +69,53 @@ func TestOpenReportsFriendlyError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "不可写") {
 		t.Fatalf("应是可读的权限错误: %v", err)
+	}
+}
+
+// 老库升级：accounts 表没有 max_concurrent 时，Open 应自动补列且保留原有数据。
+func TestOpenAddsMaxConcurrentToOldDB(t *testing.T) {
+	dir := t.TempDir()
+	// 用原生驱动建一个「旧版」accounts 表（列与 v1.2 一致）。
+	raw, err := sql.Open("sqlite", filepath.Join(dir, "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`CREATE TABLE accounts (
+		id TEXT PRIMARY KEY, uid TEXT NOT NULL, name TEXT NOT NULL DEFAULT '',
+		note TEXT NOT NULL DEFAULT '', token TEXT NOT NULL DEFAULT '',
+		refresh_token TEXT NOT NULL DEFAULT '', token_exp INTEGER NOT NULL DEFAULT 0,
+		credits INTEGER NOT NULL DEFAULT -1, credits_at INTEGER NOT NULL DEFAULT 0,
+		status TEXT NOT NULL DEFAULT 'online', cool_until INTEGER NOT NULL DEFAULT 0,
+		cool_reason TEXT NOT NULL DEFAULT '', expires_at INTEGER NOT NULL DEFAULT 0,
+		device_id TEXT NOT NULL DEFAULT '', device_name TEXT NOT NULL DEFAULT '',
+		os_version TEXT NOT NULL DEFAULT '', office_identity TEXT NOT NULL DEFAULT '',
+		platform TEXT NOT NULL DEFAULT '', client_channel TEXT NOT NULL DEFAULT '',
+		language TEXT NOT NULL DEFAULT 'zh', meta TEXT NOT NULL DEFAULT '{}',
+		priority INTEGER NOT NULL DEFAULT 0, enabled INTEGER NOT NULL DEFAULT 1,
+		last_checkin_day TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL DEFAULT 0,
+		updated_at INTEGER NOT NULL DEFAULT 0, last_used INTEGER NOT NULL DEFAULT 0)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`INSERT INTO accounts (id, uid, token) VALUES ('a1','u1','enc:plain:tok')`); err != nil {
+		t.Fatal(err)
+	}
+	_ = raw.Close()
+
+	s, err := Open(dir, "", true)
+	if err != nil {
+		t.Fatalf("老库升级失败: %v", err)
+	}
+	defer s.Close()
+
+	got, err := s.GetAccount(context.Background(), "a1")
+	if err != nil || got == nil {
+		t.Fatalf("旧数据应保留: %v", err)
+	}
+	if got.MaxConcurrent != 0 {
+		t.Fatalf("新列默认应为 0，实际 %d", got.MaxConcurrent)
+	}
+	v := int64(4)
+	if err := s.UpdateAccount(context.Background(), "a1", AccountPatch{MaxConcurrent: &v}); err != nil {
+		t.Fatalf("补列后应可写入: %v", err)
 	}
 }

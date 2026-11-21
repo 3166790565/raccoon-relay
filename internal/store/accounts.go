@@ -46,12 +46,14 @@ type Account struct {
 	CreatedAt      int64
 	UpdatedAt      int64
 	LastUsed       int64
+	// MaxConcurrent 是该账号同时可承接的请求上限；0 表示跟随全局或视为不限。
+	MaxConcurrent int64
 }
 
 const accountCols = `id, uid, name, note, token, refresh_token, token_exp, credits, credits_at,
 	status, cool_until, cool_reason, expires_at, device_id, device_name, os_version,
 	office_identity, platform, client_channel, language, meta, priority, enabled,
-	last_checkin_day, created_at, updated_at, last_used`
+	last_checkin_day, created_at, updated_at, last_used, max_concurrent`
 
 // 写入用的字段补丁：nil 表示不改。
 type AccountPatch struct {
@@ -78,6 +80,7 @@ type AccountPatch struct {
 	Enabled        *bool
 	LastCheckinDay *string
 	LastUsed       *int64
+	MaxConcurrent  *int64
 }
 
 func (s *Store) scanAccount(sc interface{ Scan(...any) error }) (*Account, error) {
@@ -88,7 +91,7 @@ func (s *Store) scanAccount(sc interface{ Scan(...any) error }) (*Account, error
 		&a.Credits, &a.CreditsAt, &a.Status, &a.CoolUntil, &a.CoolReason, &a.ExpiresAt,
 		&a.DeviceID, &a.DeviceName, &a.OSVersion, &a.OfficeIdentity, &a.Platform,
 		&a.ClientChannel, &a.Language, &meta, &a.Priority, &enabled,
-		&a.LastCheckinDay, &a.CreatedAt, &a.UpdatedAt, &a.LastUsed)
+		&a.LastCheckinDay, &a.CreatedAt, &a.UpdatedAt, &a.LastUsed, &a.MaxConcurrent)
 	if err != nil {
 		return nil, err
 	}
@@ -178,12 +181,12 @@ func (s *Store) CreateAccount(ctx context.Context, a *Account) error {
 		enabled = 1
 	}
 	_, err := s.exec(ctx, `INSERT INTO accounts (`+accountCols+`)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		a.ID, a.UID, a.Name, a.Note, s.cipher.Encrypt(a.Token), s.cipher.Encrypt(a.RefreshToken),
 		a.TokenExp, a.Credits, a.CreditsAt, a.Status, a.CoolUntil, a.CoolReason, a.ExpiresAt,
 		a.DeviceID, a.DeviceName, a.OSVersion, a.OfficeIdentity, a.Platform, a.ClientChannel,
 		a.Language, string(meta), a.Priority, enabled, a.LastCheckinDay,
-		a.CreatedAt, a.UpdatedAt, a.LastUsed)
+		a.CreatedAt, a.UpdatedAt, a.LastUsed, a.MaxConcurrent)
 	if err == nil {
 		s.invalidateAccounts()
 	}
@@ -270,6 +273,9 @@ func (s *Store) UpdateAccount(ctx context.Context, id string, p AccountPatch) er
 	}
 	if p.LastUsed != nil {
 		add("last_used", *p.LastUsed)
+	}
+	if p.MaxConcurrent != nil {
+		add("max_concurrent", *p.MaxConcurrent)
 	}
 	args = append(args, id)
 	_, err := s.exec(ctx, `UPDATE accounts SET `+joinComma(sets)+` WHERE id = ?`, args...)

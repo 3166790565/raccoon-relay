@@ -194,6 +194,11 @@ func (p *Pool) Pick(ctx context.Context, model string, excluded map[string]bool)
 		if model != "" && p.cooldown.IsModelCooled(a.ID, model) {
 			continue
 		}
+		// 单号并发上限：该号在跑满后就跳过，让请求落到别的号上。
+		// 0 表示不单独限制（跟随全局并发上限）。
+		if a.MaxConcurrent > 0 && int64(loads[a.ID]) >= a.MaxConcurrent {
+			continue
+		}
 		cands = append(cands, cand{
 			acc:    a,
 			cred:   creditRank(a),

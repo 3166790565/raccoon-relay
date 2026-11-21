@@ -567,3 +567,66 @@ func TestModelCooldownsOfAfterHydrate(t *testing.T) {
 		t.Fatalf("重启后应保留原因，实际 %q", got[0].Reason)
 	}
 }
+
+// 单号并发上限：某号在途达到上限后，Pick 应跳过它、落到其它号上。
+func TestPickSkipsAccountAtMaxConcurrent(t *testing.T) {
+	st := newStore(t)
+	cool := NewCooldownBook(st, true)
+	p := New(st, StrategyLoadBalance, cool)
+	ctx := context.Background()
+
+	// a 上限 1，b 不限。给 a 更高优先级，确保正常情况下它会被优先选中。
+	addAcc(t, st, "a", 100, func(x *store.Account) { x.MaxConcurrent = 1 })
+	addAcc(t, st, "b", 1)
+
+	first, err := p.Pick(ctx, "", map[string]bool{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == nil || first.Account.UID != "a" {
+		t.Fatalf("第一次应选到 a，实际 %+v", first)
+	}
+	// 不释放 a，再选一次：a 已满载，应落到 b。
+	second, err := p.Pick(ctx, "", map[string]bool{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second == nil || second.Account.UID != "b" {
+		t.Fatalf("a 满载后应选到 b，实际 %+v", second)
+	}
+
+	// 释放 a（同时释放 b），a 应重新可选。
+	p.ReleaseLease(first)
+	p.ReleaseLease(second)
+
+	// 两个号都空载，但 a 余额更高，优先选 a——说明上限只在满载时生效，
+	// 不会把这个号永久排除。
+	third, err := p.Pick(ctx, "", map[string]bool{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third == nil || third.Account.UID != "a" {
+		t.Fatalf("释放后 a 应重新可选，实际 %+v", third)
+	}
+}
+
+// 全部号都满载时返回 nil，让上层排队/换号，而不是越限。
+func TestPickReturnsNilWhenAllFull(t *testing.T) {
+	st := newStore(t)
+	cool := NewCooldownBook(st, true)
+	p := New(st, StrategyLoadBalance, cool)
+	ctx := context.Background()
+	addAcc(t, st, "a", 1, func(x *store.Account) { x.MaxConcurrent = 1 })
+
+	lease, err := p.Pick(ctx, "", map[string]bool{})
+	if err != nil || lease == nil {
+		t.Fatalf("第一次应选中: %v", err)
+	}
+	got, err := p.Pick(ctx, "", map[string]bool{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != nil {
+		t.Fatalf("全部满载应返回 nil，实际选中 %s", got.Account.UID)
+	}
+}

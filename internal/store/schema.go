@@ -37,7 +37,8 @@ var sqliteSchema = []string{
 		last_checkin_day TEXT NOT NULL DEFAULT '',
 		created_at      INTEGER NOT NULL DEFAULT 0,
 		updated_at      INTEGER NOT NULL DEFAULT 0,
-		last_used       INTEGER NOT NULL DEFAULT 0
+		last_used       INTEGER NOT NULL DEFAULT 0,
+		max_concurrent  INTEGER NOT NULL DEFAULT 0
 	)`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_uid ON accounts(uid)`,
 
@@ -169,7 +170,8 @@ var pgSchema = []string{
 		last_checkin_day TEXT NOT NULL DEFAULT '',
 		created_at      BIGINT NOT NULL DEFAULT 0,
 		updated_at      BIGINT NOT NULL DEFAULT 0,
-		last_used       BIGINT NOT NULL DEFAULT 0
+		last_used       BIGINT NOT NULL DEFAULT 0,
+		max_concurrent  BIGINT NOT NULL DEFAULT 0
 	)`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_uid ON accounts(uid)`,
 
@@ -255,4 +257,4 @@ var pgSchema = []string{
 	`CREATE INDEX IF NOT EXISTS idx_event_account ON runtime_events(account_id, id)`,
 }
 
-const schemaVersion = 2
+const schemaVersion = 3

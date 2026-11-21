@@ -47,7 +47,7 @@ type accountRow struct {
 	CoolReason                                                                                                 string
 	ExpiresAt                                                                                                  int64
 	DeviceID, DeviceName, OSVersion, OfficeIdentity, Platform, ClientChannel, Language, Meta, LastCheckinDay    string
-	Priority, Enabled, CreatedAt, UpdatedAt, LastUsed                                                          int64
+	Priority, Enabled, CreatedAt, UpdatedAt, LastUsed, MaxConcurrent                                            int64
 }
 
 type keyRow struct {
@@ -229,7 +229,16 @@ func readIfExists[T any](db *sql.DB, what string, fn func(*sql.DB) ([]T, error))
 }
 
 func readAccounts(db *sql.DB) ([]accountRow, error) {
-	rows, err := db.Query(`SELECT ` + accountCols + ` FROM accounts ORDER BY id`)
+	// max_concurrent 是 v1.3 新增列，旧库没有时按 0（跟随全局）处理。
+	hasMax, err := columnExists(db, "accounts", "max_concurrent")
+	if err != nil {
+		return nil, err
+	}
+	cols := accountCols
+	if !hasMax {
+		cols = strings.Replace(accountCols, ", max_concurrent", "", 1)
+	}
+	rows, err := db.Query(`SELECT ` + cols + ` FROM accounts ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -237,11 +246,15 @@ func readAccounts(db *sql.DB) ([]accountRow, error) {
 	var out []accountRow
 	for rows.Next() {
 		var a accountRow
-		if err := rows.Scan(&a.ID, &a.UID, &a.Name, &a.Note, &a.Token, &a.RefreshToken, &a.TokenExp,
+		dest := []any{&a.ID, &a.UID, &a.Name, &a.Note, &a.Token, &a.RefreshToken, &a.TokenExp,
 			&a.Credits, &a.CreditsAt, &a.Status, &a.CoolUntil, &a.CoolReason, &a.ExpiresAt,
 			&a.DeviceID, &a.DeviceName, &a.OSVersion, &a.OfficeIdentity, &a.Platform,
 			&a.ClientChannel, &a.Language, &a.Meta, &a.Priority, &a.Enabled,
-			&a.LastCheckinDay, &a.CreatedAt, &a.UpdatedAt, &a.LastUsed); err != nil {
+			&a.LastCheckinDay, &a.CreatedAt, &a.UpdatedAt, &a.LastUsed}
+		if hasMax {
+			dest = append(dest, &a.MaxConcurrent)
+		}
+		if err := rows.Scan(dest...); err != nil {
 			return nil, err
 		}
 		out = append(out, a)
@@ -469,12 +482,12 @@ func (s *Store) insertDumpRows(ctx context.Context, tx *sql.Tx, d *sqliteDump) e
 			ph   []string
 		)
 		for _, a := range d.Accounts[i:end] {
-			ph = append(ph, "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+			ph = append(ph, "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
 			args = append(args, a.ID, a.UID, a.Name, a.Note, a.Token, a.RefreshToken, a.TokenExp,
 				a.Credits, a.CreditsAt, a.Status, a.CoolUntil, a.CoolReason, a.ExpiresAt,
 				a.DeviceID, a.DeviceName, a.OSVersion, a.OfficeIdentity, a.Platform,
 				a.ClientChannel, a.Language, a.Meta, a.Priority, a.Enabled,
-				a.LastCheckinDay, a.CreatedAt, a.UpdatedAt, a.LastUsed)
+				a.LastCheckinDay, a.CreatedAt, a.UpdatedAt, a.LastUsed, a.MaxConcurrent)
 		}
 		q := `INSERT INTO accounts (` + accountCols + `) VALUES ` + joinStrings(ph, ",")
 		if _, err := s.execTx(ctx, tx, q, args...); err != nil {

@@ -271,7 +271,28 @@ func (s *Store) migrate() error {
 			return fmt.Errorf("建表失败: %w", err)
 		}
 	}
+	// CREATE TABLE IF NOT EXISTS 不会给已存在的表补列，老库升级要单独处理。
+	if err := s.ensureAccountColumns(); err != nil {
+		return err
+	}
 	return s.applySchemaVersion()
+}
+
+// ensureAccountColumns 给历史版本的 accounts 表补上后来新增的列。
+// SQLite 用 PRAGMA 判断；Postgres 在 pgSchema 里已包含，无需处理。
+func (s *Store) ensureAccountColumns() error {
+	has, err := columnExists(s.db, "accounts", "max_concurrent")
+	if err != nil {
+		return fmt.Errorf("检查 accounts 列失败: %w", err)
+	}
+	if has {
+		return nil
+	}
+	_, err = s.db.Exec(`ALTER TABLE accounts ADD COLUMN max_concurrent INTEGER NOT NULL DEFAULT 0`)
+	if err != nil {
+		return fmt.Errorf("补充 accounts.max_concurrent 失败: %w", err)
+	}
+	return nil
 }
 
 // applySchemaVersion 记录 schema 版本（SQLite 路径）。
