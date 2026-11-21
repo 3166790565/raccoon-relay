@@ -145,6 +145,17 @@ func (p *Pool) inFlightOf(id string) int {
 // Pick 选一个可用账号。excluded 是本轮已试过的 id；model 用于模型级冷却过滤。
 // 返回 nil 表示全池无可选。
 func (p *Pool) Pick(ctx context.Context, model string, excluded map[string]bool) (*Lease, error) {
+	return p.pick(ctx, model, "", excluded)
+}
+
+// PickProvider 只在指定供应商的账号里选。provider 为空等价不限制。
+// 日日新与小浣熊的模型不通用，按模型名分流后必须用这个入口，否则会拿
+// deepseek-flash 去打小浣熊、或拿 raccoon-chat 去打日日新。
+func (p *Pool) PickProvider(ctx context.Context, model, provider string, excluded map[string]bool) (*Lease, error) {
+	return p.pick(ctx, model, provider, excluded)
+}
+
+func (p *Pool) pick(ctx context.Context, model, wantProvider string, excluded map[string]bool) (*Lease, error) {
 	accounts, err := p.st.ListAccounts(ctx)
 	if err != nil {
 		return nil, err
@@ -176,10 +187,15 @@ func (p *Pool) Pick(ctx context.Context, model string, excluded map[string]bool)
 		if !a.Enabled || excluded[a.ID] {
 			continue
 		}
+		if wantProvider != "" && aProvider(a) != wantProvider {
+			continue
+		}
 		if a.Status != store.StatusOnline {
 			continue
 		}
-		if strings.TrimSpace(a.Token) == "" {
+		// 推理凭据：小浣熊是 access_token；日日新的 API Key 存在 Token 里，
+		// 只有控制台账号密码时可以在首次转发时现场补建，所以这里允许空 Token。
+		if strings.TrimSpace(a.Token) == "" && !hasSenseNovaCreds(a) {
 			continue
 		}
 		if a.Credits == 0 && a.CreditsAt > 0 {
@@ -268,6 +284,15 @@ func (l *Lease) Release() {}
 // 只放宽「状态与冷却」这一类条件：停用、无 token、订阅过期的号连试都不该试，
 // 探测它们只会制造无意义的失败。
 func (p *Pool) PickProbe(ctx context.Context, model string, excluded map[string]bool) *Lease {
+	return p.pickProbe(ctx, model, "", excluded)
+}
+
+// PickProbeProvider 是带供应商过滤的 PickProbe。
+func (p *Pool) PickProbeProvider(ctx context.Context, model, provider string, excluded map[string]bool) *Lease {
+	return p.pickProbe(ctx, model, provider, excluded)
+}
+
+func (p *Pool) pickProbe(ctx context.Context, model, wantProvider string, excluded map[string]bool) *Lease {
 	accounts, err := p.st.ListAccounts(ctx)
 	if err != nil {
 		return nil
@@ -276,7 +301,13 @@ func (p *Pool) PickProbe(ctx context.Context, model string, excluded map[string]
 	var best *store.Account
 	bestUntil := int64(0)
 	for _, a := range accounts {
-		if !a.Enabled || excluded[a.ID] || strings.TrimSpace(a.Token) == "" {
+		if !a.Enabled || excluded[a.ID] {
+			continue
+		}
+		if wantProvider != "" && aProvider(a) != wantProvider {
+			continue
+		}
+		if strings.TrimSpace(a.Token) == "" && !hasSenseNovaCreds(a) {
 			continue
 		}
 		if a.ExpiresAt > 0 && a.ExpiresAt <= now {
@@ -350,6 +381,27 @@ func (p *Pool) ApplyCreditPolicy(ctx context.Context) {
 			})
 		}
 	}
+}
+
+// aProvider 返回账号的供应商，空值按小浣熊。
+func aProvider(a *store.Account) string {
+	if a == nil || a.Provider == "" {
+		return store.ProviderRaccoon
+	}
+	return a.Provider
+}
+
+// hasSenseNovaCreds 判断日日新账号是否具备可用的推理路径：已有 API Key，
+// 或有控制台登录票 / 账号密码（可现场换 Key）。
+func hasSenseNovaCreds(a *store.Account) bool {
+	if !a.IsSenseNova() {
+		return false
+	}
+	if strings.TrimSpace(a.Token) != "" {
+		return true
+	}
+	return (strings.TrimSpace(a.SNUsername) != "" && a.SNPassword != "") ||
+		strings.TrimSpace(a.SNToken) != ""
 }
 
 func creditRank(a *store.Account) int64 {

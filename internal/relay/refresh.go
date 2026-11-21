@@ -73,6 +73,10 @@ func (r *Refresher) lockAccount(ctx context.Context, id string) (release func(),
 
 // EnsureFresh 在 access 临期时刷新，返回可用的 token。刷新被拒则返回错误。
 func (r *Refresher) EnsureFresh(ctx context.Context, acc *store.Account) (string, error) {
+	// 日日新的推理 Key 直接返回；控制台登录票的续期在额度/建 Key 路径里做。
+	if acc.IsSenseNova() {
+		return acc.Token, nil
+	}
 	if !needsRefresh(acc, r.Window) {
 		return acc.Token, nil
 	}
@@ -109,6 +113,10 @@ func (r *Refresher) EnsureFresh(ctx context.Context, acc *store.Account) (string
 // 按账号单飞：续期循环、签到、转发 401 重试、面板「刷新」都会走到这里，
 // 并发刷新会让 refresh_token 轮换互相覆盖，后写库的旧值把号打成 relogin。
 func (r *Refresher) RefreshNow(ctx context.Context, acc *store.Account) (string, error) {
+	// 日日新没有小浣熊那种 refresh_token 端点；强制刷新对它没有意义。
+	if acc.IsSenseNova() {
+		return acc.Token, nil
+	}
 	l := r.lockFor(acc.ID)
 	l.Lock()
 	defer l.Unlock()
@@ -402,6 +410,11 @@ func (r *Refresher) RenewDue(ctx context.Context, window time.Duration, gap time
 	for _, a := range accounts {
 		if ctx.Err() != nil {
 			return out
+		}
+		// 日日新的推理 Key 不过期，控制台登录票由额度同步/转发路径按需续期，
+		// 不走小浣熊的 refresh 端点。
+		if a.IsSenseNova() {
+			continue
 		}
 		if !a.Enabled && a.Status != store.StatusRelogin {
 			continue

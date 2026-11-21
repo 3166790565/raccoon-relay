@@ -26,6 +26,7 @@ import (
 	"github.com/3166790565/raccoon-relay/internal/raccoon"
 	"github.com/3166790565/raccoon-relay/internal/relay"
 	"github.com/3166790565/raccoon-relay/internal/scheduler"
+	"github.com/3166790565/raccoon-relay/internal/sensenova"
 	"github.com/3166790565/raccoon-relay/internal/store"
 	"github.com/3166790565/raccoon-relay/internal/updater"
 	"github.com/3166790565/raccoon-relay/internal/webui"
@@ -131,6 +132,9 @@ func main() {
 	}()
 
 	client := raccoon.NewClient(cfg.UpstreamBase, time.Duration(cfg.UpstreamTimeoutSec)*time.Second)
+	// 日日新（商汤）是第二套上游：token-plan 的 OpenAI 兼容端点 + 控制台登录票。
+	snClient := sensenova.NewClient(time.Duration(cfg.UpstreamTimeoutSec) * time.Second)
+	snUpstream := sensenova.NewUpstream(snClient, st)
 	// 对话流不能套总时限：长回答会被硬掐在超时点。改用上游空闲超时。
 	client.IdleTimeout = cfg.StreamIdleTimeout
 	cool := pool.NewCooldownBookWithOptions(st, cfg.ModelCooldown, cfg.AccountAbnormalCool)
@@ -149,6 +153,7 @@ func main() {
 	refresher := relay.NewRefresher(st, client, time.Duration(cfg.RefreshWindowSec)*time.Second)
 	catalog := relay.NewCatalog(st, client, relay.DefaultModel)
 	engine := relay.BuildEngine(cfg, st, po, cool, client, refresher)
+	engine.SN = snUpstream
 	engine.Event = func(ev store.RuntimeEvent) { events.Emit(ev) }
 	srv := relay.NewServer(cfg, st, engine, catalog)
 	// 并发闸门始终注入：面板里可能随时把上限从 0 改成非 0，
@@ -156,11 +161,12 @@ func main() {
 	srv.SetSemaphore(rds.NewSemaphore("relay"))
 
 	lm := login.New(st, client, cfg.UpstreamBase, "办公小浣熊客户端", cfg.OAuthRedirectBase)
+	snImporter := login.NewSenseNovaImporter(st, snClient)
 
 	// 余额同步是三个位置共用的：新号初始化、自动签到、手动签到。
 	// 余额写入后立刻重算积分阈值状态：新签到补上的积分要能马上解除暂停，
 	// 否则要等到下一次巡检才恢复，用户会以为号还是坏的。
-	balancer := &creditsync.Balancer{ST: st, Client: client, Auth: refresher, OnUpdated: po.ApplyCreditPolicy}
+	balancer := &creditsync.Balancer{ST: st, Client: client, Auth: refresher, SN: snUpstream, OnUpdated: po.ApplyCreditPolicy}
 
 	// 调度器始终构造：自动循环由 CheckinEnable 决定是否跑，但手动「全部签到」任何时候都要能用。
 	sch := scheduler.New(cfg, st, client, refresher, balancer)
@@ -211,6 +217,7 @@ func main() {
 	}
 
 	panel := admin.New(cfg, st, client, refresher, po, cool, engine, lm, sch, balancer, lmgr, renewer, srv, up, version, requestRestart, webFS)
+	panel.SetSenseNovaImporter(snImporter)
 	// 面板里改过的选号策略/重试策略优先于环境变量，保证重启后仍然生效
 	panel.ApplyStoredSettings(context.Background())
 

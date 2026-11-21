@@ -187,6 +187,21 @@ DATA_DIR=./data SECRET_KEY=dev ADMIN_TOKEN=dev ./relay
 独立的 `refresh_token` 字段；小浣熊这两个本来就是同一枚凭据，导入时直接用 `accessToken`
 回填 `refreshToken`，所以导入的号一样能自动续期。
 
+### 添加商汤日日新（Token Plan）账号
+
+除小浣熊外，本项目也支持**商汤日日新 Token Plan**（`platform.sensenova.cn`）。
+它是另一套上游：推理走 `https://token.sensenova.cn/v1`（OpenAI 兼容、API Key 鉴权），
+额度则挂在控制台的 OAuth 登录票后面。所以导入方式是**控制台账号密码**：
+
+- 面板「添加账号 → 日日新账号」填控制台账号（手机号/邮箱）与密码；
+- 服务端用账号密码走 OAuth2 授权码 + PKCE 登录，换到控制台登录票，再在控制台
+  「API-Key 管理」同一接口下自动创建一枚推理 API Key，和账号一起入库；
+- 已经有 Key 的话也可以在「API Key（可选）」里直接填，跳过创建。
+
+账号密码用于换登录票、读积分池与补建 Key，日常转发只用 API Key。号池页把两种账号
+**分开成两个分组**（🦝 小浣熊 / 🌊 日日新），日日新行展示的是「池 × 窗口」的额度条，
+而不是单一积分。日日新没有每日签到，所以不进签到中心、也不参与自动签到。
+
 ---
 
 ## 号池

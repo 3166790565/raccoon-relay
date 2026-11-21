@@ -281,6 +281,44 @@ button.tiny { padding: 4px 9px; font-size: 12px; }
 .mini-bar i { display: block; height: 100%; background: #2f6fd0; border-radius: 3px; }
 .mini-bar.low i { background: var(--bad); }
 
+/* ---------- 号池：按供应商分组 ---------- */
+/* 分组头仿参考图：一条横向的浅色条，带折叠箭头、供应商名与账号数。
+   它不是数据行，所以用 colspan 撑满并粘贴在滚动容器内。 */
+.pool-table tbody tr.group-row td { padding: 0; background: #161a21; }
+.pool-table tbody tr.group-row:hover { background: #161a21; }
+.group-head {
+  display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+  cursor: pointer; user-select: none; border-top: 1px solid var(--line);
+}
+.pool-table tbody tr.group-row:first-child .group-head { border-top: none; }
+.group-head:hover { background: #1b2029; }
+.group-head .gh-caret { color: var(--dim); font-size: 11px; width: 12px; }
+.group-head .gh-emoji { font-size: 14px; }
+.group-head .gh-name { font-weight: 600; color: #dfe4ee; font-size: 13px; }
+.group-head .gh-count {
+  font-size: 11px; color: var(--dim); padding: 1px 7px; border-radius: 10px;
+  background: #232936;
+}
+.group-head .gh-sub { font-size: 11px; color: #5d6579; margin-left: 2px; }
+
+/* 日日新额度列：每个窗口一行（池名 · 窗口 | 细条 | 剩余） */
+.sn-quota { gap: 3px; }
+.sn-win { display: flex; align-items: center; gap: 6px; }
+.sn-win-name {
+  font-size: 11px; color: var(--dim); width: 108px; flex: none;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sn-win-bar {
+  flex: 1; height: 5px; border-radius: 3px; background: #262b36; overflow: hidden;
+  min-width: 40px;
+}
+.sn-win-bar i { display: block; height: 100%; background: #2f6fd0; border-radius: 3px; }
+.sn-win-bar i.low { background: var(--bad); }
+.sn-win-val {
+  font-size: 11px; font-variant-numeric: tabular-nums; width: 46px; flex: none;
+  text-align: right;
+}
+
 .pool-foot {
   display: flex; align-items: center; justify-content: space-between;
   padding: 8px 12px; border-top: 1px solid var(--line); background: #14171d;

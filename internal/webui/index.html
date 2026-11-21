@@ -56,7 +56,7 @@
             <h2>用量报表</h2>
             <span class="hint" id="rpRangeLabel">-</span>
           </div>
-          <div class="row rp-range-row">
+<div class="row rp-range-row">
             <div class="seg" id="rpRange" role="tablist">
               <button data-v="today">今天</button>
               <button data-v="yesterday">昨天</button>
@@ -202,6 +202,12 @@
         <!-- 筛选条 -->
         <div class="pool-toolbar" id="poolToolbar">
           <div class="pool-filters">
+            <!-- 供应商分栏：小浣熊与日日新是两套完全不同的上游，号池按它分组展示。 -->
+            <div class="seg provider-seg" id="pfProvider" role="tablist">
+              <button class="on" data-v="all">全部 <b>0</b></button>
+              <button data-v="raccoon">🦝 小浣熊 <b>0</b></button>
+              <button data-v="sensenova">🌊 日日新 <b>0</b></button>
+            </div>
             <div class="seg" id="pfStatus" role="tablist">
               <button class="on" data-v="all">全部 <b>0</b></button>
               <button data-v="enabled">启用 <b>0</b></button>
@@ -446,6 +452,7 @@
         <div class="tabs" id="addTabs">
           <button class="tab active" data-tab="paste">粘贴授权码</button>
           <button class="tab" data-tab="manual">手填令牌</button>
+          <button class="tab" data-tab="sensenova">日日新账号</button>
           <button class="tab" data-tab="import">导入 JSON</button>
         </div>
 
@@ -475,6 +482,20 @@
           <div class="field"><label>备注名</label><input id="mName" placeholder="可留空"></div>
           <button class="primary" id="manualBtn">添加账号</button>
           <p class="msg" id="manualMsg"></p>
+        </div>
+
+        <!-- 商汤日日新：账号密码导入。与上面两栏是并列的第三条添加路径。 -->
+        <div class="tabpane" id="pane-sensenova">
+          <p class="hint">填写商汤日日新（Token Plan，<code>platform.sensenova.cn</code>）身份。
+            服务端会用账号密码登录控制台、自动创建一枚推理 API Key 并入库；
+            日常转发用这枚 Key，账号密码只用于换登录票、读积分额度。</p>
+          <div class="field"><label>控制台账号</label><input id="snUsername" placeholder="手机号 / 邮箱"></div>
+          <div class="field"><label>控制台密码</label><input id="snPassword" type="password" placeholder="登录 platform.sensenova.cn 的密码"></div>
+          <div class="field"><label>API Key（可选）</label><input id="snApiKey" placeholder="已从控制台「API-Key 管理」建好 Key 时可直接填，留空则自动创建"></div>
+          <div class="field"><label>备注名</label><input id="snName" placeholder="可留空；默认用控制台账号名"></div>
+          <div class="field"><label>备注</label><input id="snNote" placeholder="可留空"></div>
+          <button class="primary" id="snAddBtn">登录并添加</button>
+          <p class="msg" id="snMsg"></p>
         </div>
 
         <div class="tabpane" id="pane-import">

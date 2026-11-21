@@ -176,7 +176,7 @@ async function loadStatus() {
 // 号池页的筛选、勾选状态都放在 STATE.pool 里：账号列表会被定时/手动刷新，
 // 刷新不该把用户正在看的筛选条件和勾选清掉。
 const POOL = {
-  status: 'all', cool: 'all', q: '', sel: new Set(), fold: false,
+  provider: 'all', status: 'all', cool: 'all', q: '', sel: new Set(), fold: false,
   peakCredits: 1, creditStopBelow: 0,
 };
 
@@ -209,6 +209,7 @@ function isLimited(a) {
 function filteredAccounts() {
   const q = POOL.q.trim().toLowerCase();
   return STATE.accounts.filter((a) => {
+    if (POOL.provider !== 'all' && (a.provider || 'raccoon') !== POOL.provider) return false;
     if (POOL.status === 'enabled' && !a.enabled) return false;
     if (POOL.status === 'disabled' && a.enabled) return false;
     if (POOL.cool === 'normal' && isLimited(a)) return false;
@@ -261,6 +262,36 @@ function renderQuotaCell(a) {
   </div>`;
 }
 
+// 日日新额度列：积分池是「池 × 窗口」，与小浣熊的单一积分不同。
+// 按参考图的做法，把每个窗口压成一行「池名 · 窗口 | 剩余」并把剩余量画成细条；
+// 没有拉到额度时给出「未同步」，而不是假装 0。
+function renderSNQuotaCell(a) {
+  const wins = Array.isArray(a.snWindows) ? a.snWindows.filter((w) => w && w.limit > 0) : [];
+  if (!wins.length) {
+    return `<div class="quota sn-quota"><span class="q-val dim">未同步额度</span>
+      <span class="q-label">${a.snPoolAt ? '上次查询 ' + fmtTime(a.snPoolAt) : '点「查额度」拉取'}</span></div>`;
+  }
+  const rows = wins.map((w) => {
+    const pct = Math.max(2, Math.min(100, Number(w.percent) || 0));
+    const low = pct <= 15;
+    return `<div class="sn-win">
+      <span class="sn-win-name" title="${esc(w.name)}">${esc(w.scope || w.name)} · ${esc(w.label || '')}</span>
+      <span class="sn-win-bar"><i class="${low ? 'low' : ''}" style="width:${pct}%"></i></span>
+      <span class="sn-win-val ${low ? 'bad' : 'ok'}">${fmtCredits(Math.round(w.remaining))}</span>
+    </div>`;
+  }).join('');
+  return `<div class="quota sn-quota">${rows}
+    <span class="q-label">${a.snPoolAt ? '额度更新于 ' + fmtTime(a.snPoolAt) : ''}${a.snPlan ? ' · ' + esc(a.snPlan) : ''}</span>
+  </div>`;
+}
+
+const PROVIDER_META = {
+  raccoon: { label: '小浣熊', emoji: '🦝', sub: '商汤小浣熊 · xiaohuanxiong.com' },
+  sensenova: { label: '日日新', emoji: '🌊', sub: '商汤日日新 Token Plan · platform.sensenova.cn' },
+};
+
+function providerOf(a) { return a.provider || 'raccoon'; }
+
 function renderAccounts() {
   // 余额条的参照系：全池已知余额的最大值。每次渲染前算一次，
   // 避免每行都去遍历一遍列表。
@@ -282,76 +313,133 @@ function renderAccounts() {
     return;
   }
 
-  tbody.innerHTML = rows.map((a, i) => {
-    const st = a.status || 'online';
-    const lowCredit = st === 'exhausted' && !a.coolUntil;
-    const stLabel = lowCredit ? '低积分' : (STATUS_LABEL[st] || esc(st));
-    const cools = modelCoolsOf(a).filter((m) => m.until > Date.now());
-    const exp = expireInfo(a);
-    const checked = POOL.sel.has(a.id);
+  // 按供应商分组：两种号是完全不同的上游，混在一张表里会让人误以为
+  // 「换号」能跨供应商生效。分组头仿参考图：可折叠、显示该组账号数。
+  const groups = {};
+  rows.forEach((a) => {
+    const p = providerOf(a);
+    (groups[p] = groups[p] || []).push(a);
+  });
+  const order = ['raccoon', 'sensenova'].filter((p) => groups[p]);
+  // 其它未知供应商追加在后面，避免数据里的新值凭空消失。
+  Object.keys(groups).forEach((p) => { if (!order.includes(p)) order.push(p); });
 
-    // 限流列：账号级冷却显示原因 + 剩余时间；只有模型级罚单时显示「N 个模型」。
-    // 只要有错误现场（冷却中/需重登/已限流）就做成可点的「错误详情」入口，
-    // 单元格本身只放摘要，点开才看到响应头与原始响应体。
-    let coolCell;
-    if (st === 'cooling' || (st === 'exhausted' && a.coolUntil)) {
-      // 账号级失败链会累加命中次数（200108 账号异常），这里带上档位，
-      // 否则用户只能看到「冷却」却不知道这是第几次、还要罚多久。
-      const ac = a.accountCool && a.accountCool.until > Date.now() ? a.accountCool : null;
-      const tier = ac && ac.hits > 0 ? `第 ${ac.hits} 次 · ` : '';
-      coolCell = `<div class="coolbox warn clickable" title="点击查看错误详情">
-        <span class="cb-main">${esc(a.coolReason || '限流中')}</span>
-        <span class="cb-sub">${esc(tier)}${esc(fmtLeft(a.coolUntil || 0))} · 详情</span>
-      </div>`;
-    } else if (lowCredit) {
-      coolCell = `<div class="coolbox bad">
-        <span class="cb-main">${esc(a.coolReason || '积分低于阈值')}</span>
-        <span class="cb-sub">待余额恢复</span>
-      </div>`;
-    } else if (st === 'relogin') {
-      coolCell = `<div class="coolbox bad clickable" title="点击查看错误详情">
-        <span class="cb-main">凭证失效</span><span class="cb-sub">需重新登录 · 详情</span>
-      </div>`;
-    } else if (cools.length) {
-      coolCell = `<div class="coolbox info" title="点击查看限流明细">
-        <span class="cb-main">${cools.length} 个模型</span>
-        <span class="cb-sub">最早 ${esc(fmtLeft(Math.min(...cools.map((m) => m.until))))}</span>
-      </div>`;
-    } else if (a.deadReason) {
-      coolCell = `<div class="coolbox bad"><span class="cb-main">${esc(a.deadReason)}</span></div>`;
-    } else {
-      coolCell = '<span class="dim">—</span>';
-    }
-
-    return `<tr data-id="${esc(a.id)}" class="${checked ? 'sel' : ''}">
-      <td class="c-check"><input type="checkbox" class="row-check" ${checked ? 'checked' : ''}></td>
-      <td class="c-idx"><span class="idx">#${i + 1}</span></td>
-      <td class="c-name">
-        <div class="acc-name" title="${esc(a.uid)}">${esc(a.name || shortUID(a.uid))}</div>
-        <div class="acc-sub">${esc(shortUID(a.uid))}${a.note ? ' · ' + esc(a.note) : ''}${Number(a.maxConcurrent) > 0 ? ` · 并发≤${Number(a.maxConcurrent)}` : ''}</div>
-        ${a.deadReason ? `<div class="acc-sub bad">${esc(a.deadReason)}</div>` : ''}
-      </td>
-      <td class="c-enable">
-        <label class="switch" title="${a.enabled ? '点击停用' : '点击启用'}">
-          <input type="checkbox" class="row-enable" ${a.enabled ? 'checked' : ''}>
-          <span></span>
-        </label>
-      </td>
-      <td class="c-status"><span class="pill ${esc(st)}${lowCredit ? ' lowcredit' : ''}">
-        <i class="dot"></i>${stLabel}</span></td>
-      <td class="c-cool">${coolCell}</td>
-      <td class="c-expire"><span class="${exp.cls}" ${exp.title ? `title="${esc(exp.title)}"` : ''}>${esc(exp.text)}</span></td>
-      <td class="c-balance" title="${a.creditsAt ? '余额更新于 ' + fmtTime(a.creditsAt) : ''}">${renderQuotaCell(a)}</td>
-      <td class="c-ops">
-        <button class="ghost tiny" data-act="balance">余额</button>
-        <button class="ghost tiny" data-act="settings">设置</button>
-        <button class="ghost tiny more" data-act="more" title="更多操作">…</button>
+  let idx = 0;
+  const html = order.map((p) => {
+    const meta = PROVIDER_META[p] || { label: p, emoji: '•', sub: '' };
+    const list = groups[p];
+    const collapsed = POOL.collapsed && POOL.collapsed[p];
+    const head = `<tr class="group-row" data-group="${esc(p)}">
+      <td colspan="9">
+        <div class="group-head ${collapsed ? 'collapsed' : ''}">
+          <span class="gh-caret">${collapsed ? '▸' : '▾'}</span>
+          <span class="gh-emoji">${meta.emoji}</span>
+          <span class="gh-name">${esc(meta.label)}</span>
+          <span class="gh-count">${list.length} 个账号</span>
+          <span class="gh-sub">${esc(meta.sub)}</span>
+        </div>
       </td>
     </tr>`;
+    if (collapsed) return head;
+    return head + list.map((a) => { idx += 1; return renderAccountRow(a, idx); }).join('');
   }).join('');
 
+  tbody.innerHTML = html;
   bindRowEvents(tbody);
+  bindGroupEvents(tbody);
   syncSelUI();
+}
+
+// renderAccountRow 生成单个账号行。序号按当前筛选结果的连续编号。
+function renderAccountRow(a, i) {
+  const st = a.status || 'online';
+  const lowCredit = st === 'exhausted' && !a.coolUntil;
+  const stLabel = lowCredit ? '低积分' : (STATUS_LABEL[st] || esc(st));
+  const cools = modelCoolsOf(a).filter((m) => m.until > Date.now());
+  const exp = expireInfo(a);
+  const checked = POOL.sel.has(a.id);
+  const sn = providerOf(a) === 'sensenova';
+
+  // 限流列：账号级冷却显示原因 + 剩余时间；只有模型级罚单时显示「N 个模型」。
+  // 只要有错误现场（冷却中/需重登/已限流）就做成可点的「错误详情」入口，
+  // 单元格本身只放摘要，点开才看到响应头与原始响应体。
+  let coolCell;
+  if (st === 'cooling' || (st === 'exhausted' && a.coolUntil)) {
+    // 账号级失败链会累加命中次数（200108 账号异常），这里带上档位，
+    // 否则用户只能看到「冷却」却不知道这是第几次、还要罚多久。
+    const ac = a.accountCool && a.accountCool.until > Date.now() ? a.accountCool : null;
+    const tier = ac && ac.hits > 0 ? `第 ${ac.hits} 次 · ` : '';
+    coolCell = `<div class="coolbox warn clickable" title="点击查看错误详情">
+      <span class="cb-main">${esc(a.coolReason || '限流中')}</span>
+      <span class="cb-sub">${esc(tier)}${esc(fmtLeft(a.coolUntil || 0))} · 详情</span>
+    </div>`;
+  } else if (lowCredit) {
+    coolCell = `<div class="coolbox bad">
+      <span class="cb-main">${esc(a.coolReason || '积分低于阈值')}</span>
+      <span class="cb-sub">待余额恢复</span>
+    </div>`;
+  } else if (st === 'relogin') {
+    coolCell = `<div class="coolbox bad clickable" title="点击查看错误详情">
+      <span class="cb-main">凭证失效</span><span class="cb-sub">需重新登录 · 详情</span>
+    </div>`;
+  } else if (cools.length) {
+    coolCell = `<div class="coolbox info" title="点击查看限流明细">
+      <span class="cb-main">${cools.length} 个模型</span>
+      <span class="cb-sub">最早 ${esc(fmtLeft(Math.min(...cools.map((m) => m.until))))}</span>
+    </div>`;
+  } else if (a.deadReason) {
+    coolCell = `<div class="coolbox bad"><span class="cb-main">${esc(a.deadReason)}</span></div>`;
+  } else {
+    coolCell = '<span class="dim">—</span>';
+  }
+
+  // 余额/额度列按供应商分派：日日新是池×窗口，小浣熊是单一积分。
+  const quotaCell = sn ? renderSNQuotaCell(a) : renderQuotaCell(a);
+  const quotaTitle = sn
+    ? (a.snPoolAt ? '额度更新于 ' + fmtTime(a.snPoolAt) : '尚未同步额度')
+    : (a.creditsAt ? '余额更新于 ' + fmtTime(a.creditsAt) : '');
+  // 日日新的「凭证」列显示控制台账号 + 登录票状态；小浣熊没有这个概念。
+  const subExtra = sn
+    ? ` · ${a.snTokenValid ? '登录票有效' : '登录票失效'}${a.snUser ? ' · ' + esc(a.snUser) : ''}`
+    : '';
+
+  return `<tr data-id="${esc(a.id)}" data-provider="${esc(providerOf(a))}" class="${checked ? 'sel' : ''}">
+    <td class="c-check"><input type="checkbox" class="row-check" ${checked ? 'checked' : ''}></td>
+    <td class="c-idx"><span class="idx">#${i}</span></td>
+    <td class="c-name">
+      <div class="acc-name" title="${esc(a.uid)}">${esc(a.name || shortUID(a.uid))}</div>
+      <div class="acc-sub">${esc(shortUID(a.uid))}${a.note ? ' · ' + esc(a.note) : ''}${Number(a.maxConcurrent) > 0 ? ` · 并发≤${Number(a.maxConcurrent)}` : ''}${subExtra}</div>
+      ${a.deadReason ? `<div class="acc-sub bad">${esc(a.deadReason)}</div>` : ''}
+    </td>
+    <td class="c-enable">
+      <label class="switch" title="${a.enabled ? '点击停用' : '点击启用'}">
+        <input type="checkbox" class="row-enable" ${a.enabled ? 'checked' : ''}>
+        <span></span>
+      </label>
+    </td>
+    <td class="c-status"><span class="pill ${esc(st)}${lowCredit ? ' lowcredit' : ''}">
+      <i class="dot"></i>${stLabel}</span></td>
+    <td class="c-cool">${coolCell}</td>
+    <td class="c-expire"><span class="${exp.cls}" ${exp.title ? `title="${esc(exp.title)}"` : ''}>${exp.text ? esc(exp.text) : ''}</span></td>
+    <td class="c-balance" title="${esc(quotaTitle)}">${quotaCell}</td>
+    <td class="c-ops">
+      <button class="ghost tiny" data-act="balance">${sn ? '查额度' : '余额'}</button>
+      <button class="ghost tiny" data-act="settings">设置</button>
+      <button class="ghost tiny more" data-act="more" title="更多操作">…</button>
+    </td>
+  </tr>`;
+}
+
+// bindGroupEvents 处理分组头的折叠。
+function bindGroupEvents(tbody) {
+  tbody.querySelectorAll('.group-head').forEach((head) => {
+    head.addEventListener('click', () => {
+      const p = head.closest('tr').dataset.group;
+      POOL.collapsed = POOL.collapsed || {};
+      POOL.collapsed[p] = !POOL.collapsed[p];
+      renderAccounts();
+    });
+  });
 }
 
 function bindRowEvents(tbody) {
@@ -404,6 +492,8 @@ function renderPoolStats() {
   const total = STATE.accounts.length;
   const enabled = STATE.accounts.filter((a) => a.enabled).length;
   const limited = STATE.accounts.filter(isLimited).length;
+  const raccoonN = STATE.accounts.filter((a) => providerOf(a) === 'raccoon').length;
+  const snN = STATE.accounts.filter((a) => providerOf(a) === 'sensenova').length;
   const setB = (sel, vals) => {
     const btns = document.querySelectorAll(sel + ' button');
     btns.forEach((b, i) => {
@@ -411,6 +501,7 @@ function renderPoolStats() {
       if (b2) b2.textContent = vals[i] ?? 0;
     });
   };
+  setB('#pfProvider', [total, raccoonN, snN]);
   setB('#pfStatus', [total, enabled, total - enabled]);
   setB('#pfCool', [total, total - limited, limited]);
 }
@@ -444,6 +535,7 @@ $('clearSelBtn').addEventListener('click', () => { POOL.sel.clear(); renderAccou
 
 // 筛选条：点击切换，再点一次回到「全部」。
 const FILTERS = {
+  pfProvider: 'provider',
   pfStatus: 'status',
   pfCool: 'cool',
 };
@@ -666,17 +758,20 @@ $('errDetailLogs').addEventListener('click', () => {
 function openRowMenu(anchor, id) {
   const acc = STATE.accounts.find((a) => a.id === id);
   if (!acc) return;
+  const sn = providerOf(acc) === 'sensenova';
+  // 日日新没有「签到」也没有小浣熊那套 refresh_token：「刷新凭据」对它
+  // 的实际含义是重登控制台、补建 API Key——保留按钮但改名，避免误操作。
   const el = openPop(anchor, `
     <div class="pop-menu">
-      <button data-m="balance">查余额</button>
-      <button data-m="refresh">刷新凭据</button>
-      <button data-m="checkin">签到</button>
+      <button data-m="balance">${sn ? '查额度' : '查余额'}</button>
+      <button data-m="refresh">${sn ? '重登并补建 Key' : '刷新凭据'}</button>
+      ${sn ? '' : '<button data-m="checkin">签到</button>'}
       <button data-m="errors">错误详情</button>
       <button data-m="uncool">解除冷却</button>
       <button data-m="toggle">${acc.enabled ? '停用账号' : '启用账号'}</button>
       <div class="sep"></div>
       <button data-m="delete" class="danger">删除账号</button>
-    </div>`, { width: 160 });
+    </div>`, { width: 170 });
 
   el.querySelectorAll('[data-m]').forEach((b) => {
     b.addEventListener('click', () => {
@@ -703,7 +798,11 @@ function openAccountSettings(id) {
       <div class="field"><label>优先级</label><input id="asPriority" type="number" step="1" value="${Number(acc.priority) || 0}"></div>
       <div class="field"><label>并发上限（0 = 不单独限制）</label><input id="asMaxConcurrent" type="number" step="1" min="0" value="${Number(acc.maxConcurrent) || 0}"></div>
       <p class="hint">uid：${esc(acc.uid)}<br>最近一次使用：${acc.lastUsed ? fmtTime(acc.lastUsed) : '从未'}<br>
-        今日签到：${STATE.today && acc.lastCheckinDay === STATE.today ? '已签到' : esc(acc.lastCheckinDay || '未签到')}<br>
+        ${providerOf(acc) === 'sensenova'
+          ? `控制台账号：${esc(acc.snUser || '未记录')}<br>
+             登录票：${acc.snTokenValid ? '有效' : '已失效（转发或查额度时会自动重登）'}<br>
+             额度：${acc.snPoolAt ? '更新于 ' + fmtTime(acc.snPoolAt) : '尚未同步'}<br>`
+          : `今日签到：${STATE.today && acc.lastCheckinDay === STATE.today ? '已签到' : esc(acc.lastCheckinDay || '未签到')}<br>`}
         并发上限：该号同时最多接几个请求，达到后新请求会落到别的号；0 表示不单独限制。<br>
         优先级：数值大的先被选中（两种选号策略都生效）。想让主力号先用光再切备用号，就给主力号设更高的值。</p>
     </div>
@@ -765,7 +864,12 @@ async function accountAction(act, id) {
       toast(r.message || '已解除冷却');
     } else if (act === 'balance') {
       const r = await api(`/api/accounts/${encodeURIComponent(id)}/balance`, { method: 'POST' });
-      toast(`余额 ${fmtCredits(r.credits)} 积分`);
+      toast(providerOf(acc) === 'sensenova'
+        ? `额度已同步 · 主池剩余 ${fmtCredits(r.credits)}`
+        : `余额 ${fmtCredits(r.credits)} 积分`);
+    } else if (act === 'refresh' && providerOf(acc) === 'sensenova') {
+      const r = await api(`/api/accounts/${encodeURIComponent(id)}/refresh`, { method: 'POST' });
+      toast(r.message || '已完成');
     } else {
       const r = await api(`/api/accounts/${encodeURIComponent(id)}/${act}`, { method: 'POST' });
       toast(r.message || '完成');
@@ -961,6 +1065,35 @@ $('manualBtn').addEventListener('click', async () => {
     }
   } catch (e) {
     $('manualMsg').textContent = e.message;
+  }
+});
+
+// 商汤日日新：账号密码导入。登录换票 + 建 Key 在服务端完成，面板只负责提交与回显。
+$('snAddBtn').addEventListener('click', async () => {
+  const body = {
+    username: $('snUsername').value.trim(),
+    password: $('snPassword').value,
+    apiKey: $('snApiKey').value.trim(),
+    name: $('snName').value.trim(),
+    note: $('snNote').value.trim(),
+  };
+  if (!body.username || !body.password) {
+    $('snMsg').textContent = '控制台账号和密码都不能为空';
+    return;
+  }
+  $('snMsg').textContent = '登录控制台并创建 API Key…（可能需要几秒）';
+  $('snAddBtn').disabled = true;
+  try {
+    const r = await api('/api/auth/sensenova', { method: 'POST', body: JSON.stringify(body) });
+    $('snMsg').textContent = r.message + (r.uid ? `（账号 ${shortUID(r.uid)}）` : '');
+    if (r.ok) {
+      ['snUsername', 'snPassword', 'snApiKey', 'snName', 'snNote'].forEach((id) => { $(id).value = ''; });
+      await Promise.all([loadAccounts(), loadStatus()]);
+    }
+  } catch (e) {
+    $('snMsg').textContent = e.message;
+  } finally {
+    $('snAddBtn').disabled = false;
   }
 });
 
@@ -2325,6 +2458,7 @@ function renderCheckinOverview(r) {
 }
 
 function ckAccountState(a) {
+  if (a.noCheckin) return { cls: 'dim', text: '无签到' };
   if (!a.enabled) return { cls: 'dim', text: '已停用' };
   if (a.signedToday) return { cls: 'ok', text: '今日已签' };
   if (a.hasToday && !a.todayOk) return { cls: 'bad', text: '今日失败' };
@@ -2369,7 +2503,7 @@ function renderCheckinAccounts() {
       <td class="lc-time">${a.todayAt ? esc(fmtTime(a.todayAt)) : '-'}</td>
       <td>${esc(CK_SOURCE_LABEL[a.todaySource] || a.todaySource || '-')}</td>
       <td class="lc-detail">
-        ${a.enabled ? `<button class="ghost tiny" data-act="checkin">补签</button>` : ''}
+        ${a.enabled && !a.noCheckin ? `<button class="ghost tiny" data-act="checkin">补签</button>` : ''}
       </td>
     </tr>`;
   }).join('');
@@ -2661,6 +2795,8 @@ function renderReport() {
     ['当前连续天数', String(o.streak || 0), '含今天在内往前数', ''],
     ['Top 模型', top ? top.model : '—',
       top ? `${rpFmtInt(top.tokens)} token · 占 ${rpPct(top.share)}` : '所选范围内还没有模型用量', ''],
+    ['平均耗时', rpFmtMs(lat.avgMs), 'P95 ' + rpFmtMs(lat.p95Ms), ''],
+    ['输出速度', (lat.tokenPerSec || 0) + ' tok/s', '峰值 ' + rpFmtMs(lat.maxMs), ''],
   ];
   $('rpKpis').innerHTML = kpis.map(([k, v, sub, cls]) =>
     `<div class="rp-kpi ${cls}"><div class="k">${esc(k)}</div>` +
@@ -2931,6 +3067,7 @@ function renderRpHeat(cells) {
   const end = new Date(today.getFullYear(), today.getMonth(), today.getDate());
   const start = new Date(end);
   start.setDate(start.getDate() - 364);
+  // 从 start 所在周的周一算起，保证列对齐星期
   const offset = (start.getDay() + 6) % 7; // 周一 = 0
   start.setDate(start.getDate() - offset);
   end.setDate(end.getDate() + (6 - ((end.getDay() + 6) % 7)));

@@ -37,6 +37,10 @@ func (p *Panel) handleCheckinCenter(w http.ResponseWriter, r *http.Request) {
 			// 算进「待签到」只会让进度条永远走不到头。
 			continue
 		}
+		// 日日新账号没有签到：不计入任何签到统计，否则「待签到」永远差这几个号。
+		if a.Provider == store.ProviderSenseNova {
+			continue
+		}
 		switch {
 		case a.LastCheckinDay == today:
 			done++
@@ -74,6 +78,7 @@ func (p *Panel) handleCheckinCenter(w http.ResponseWriter, r *http.Request) {
 		centers = append(centers, map[string]any{
 			"id": a.ID, "name": a.Name, "uid": a.UID, "note": a.Note,
 			"enabled": a.Enabled, "status": a.Status, "credits": a.Credits,
+			"provider": a.Provider, "noCheckin": a.Provider == store.ProviderSenseNova,
 			"lastCheckinDay": a.LastCheckinDay,
 			"signedToday":    a.LastCheckinDay == today,
 			"hasToday":       a.HasToday, "todayOk": a.TodayOK, "todayAlready": a.TodayAlready,

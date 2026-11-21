@@ -27,6 +27,7 @@ import (
 	"github.com/3166790565/raccoon-relay/internal/raccoon"
 	"github.com/3166790565/raccoon-relay/internal/relay"
 	"github.com/3166790565/raccoon-relay/internal/scheduler"
+	"github.com/3166790565/raccoon-relay/internal/sensenova"
 	"github.com/3166790565/raccoon-relay/internal/store"
 	"github.com/3166790565/raccoon-relay/internal/updater"
 )
@@ -41,6 +42,8 @@ type Panel struct {
 	cool     *pool.CooldownBook
 	engine   *relay.Engine
 	loginMgr *login.Manager
+	// snImport 处理日日新账号密码导入；nil 表示未配置。
+	snImport *login.SenseNovaImporter
 	sched    *scheduler.Scheduler
 	balancer *creditsync.Balancer
 	logs     *logmgr.Manager
@@ -84,6 +87,12 @@ func New(cfg *config.Config, st *store.Store, client *raccoon.Client, refresh *r
 		logs: logs, renewer: renewer, srv: srv, updater: up, version: version,
 		onRestart: onRestart, webFS: webFS,
 	}
+}
+
+// SetSenseNovaImporter 注入日日新账号密码导入器。装配层调用；
+// 不注入时 /api/auth/sensenova 返回「未启用」。
+func (p *Panel) SetSenseNovaImporter(im *login.SenseNovaImporter) {
+	p.snImport = im
 }
 
 // ---------- 鉴权 ----------
@@ -216,6 +225,8 @@ func (p *Panel) Route(w http.ResponseWriter, r *http.Request) {
 		p.handleExchange(w, r)
 	case path == "/api/auth/manual" && r.Method == http.MethodPost:
 		p.handleManual(w, r)
+	case path == "/api/auth/sensenova" && r.Method == http.MethodPost:
+		p.handleSenseNovaImport(w, r)
 	case strings.HasPrefix(path, "/api/accounts/"):
 		p.handleAccountAction(w, r)
 	case strings.HasPrefix(path, "/api/keys/"):
@@ -244,9 +255,10 @@ func (p *Panel) handleListAccounts(w http.ResponseWriter, r *http.Request) {
 			modelCools = p.cool.ModelCooldownsOf(a.ID)
 			accountCool = p.cool.AccountCoolOf(a.ID)
 		}
-		out = append(out, map[string]any{
+		row := map[string]any{
 			"accountCool": accountCool,
 			"id":          a.ID, "uid": a.UID, "name": a.Name, "note": a.Note,
+			"provider": providerOf(a), "providerName": a.ProviderName(),
 			"status": a.Status, "credits": a.Credits, "creditsAt": a.CreditsAt,
 			"coolUntil": a.CoolUntil, "coolReason": a.CoolReason,
 			"modelCools": modelCools,
@@ -259,9 +271,43 @@ func (p *Panel) handleListAccounts(w http.ResponseWriter, r *http.Request) {
 			"platformUid": platformUIDOf(a.Meta),
 			"deadReason":  a.DeadReason(now),
 			"createdAt":   a.CreatedAt, "updatedAt": a.UpdatedAt,
-		})
+		}
+		if a.IsSenseNova() {
+			// 日日新的额度是「池 × 窗口」，不是单一积分。面板按供应商分栏展示，
+			// 这里把展开后的窗口与登录票状态一起带出去。
+			usage := sensenova.UnmarshalStored(a.SNPool)
+			row["snWindows"] = flattenSN(usage)
+			row["snPlan"] = snPlan(usage)
+			row["snUser"] = a.SNUsername
+			row["snPoolAt"] = a.SNPoolAt
+			row["snTokenValid"] = sensenova.TokenReusable(a.SNToken, time.Now())
+		}
+		out = append(out, row)
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "accounts": out})
+}
+
+// providerOf 返回账号供应商；空值按小浣熊。
+func providerOf(a *store.Account) string {
+	if a.Provider == "" {
+		return store.ProviderRaccoon
+	}
+	return a.Provider
+}
+
+// flattenSN 把存储的额度 JSON 展开成面板窗口列表。
+func flattenSN(u *sensenova.Usage) []sensenova.FlatWindow {
+	if u == nil {
+		return []sensenova.FlatWindow{}
+	}
+	return u.Flatten()
+}
+
+func snPlan(u *sensenova.Usage) string {
+	if u == nil {
+		return ""
+	}
+	return u.Plan
 }
 
 // platformUIDOf 取 agent2api 导入时保留的平台 uid（数字 ID），供面板识别同一个号。
@@ -624,6 +670,12 @@ func (p *Panel) actionBalance(w http.ResponseWriter, r *http.Request, acc *store
 }
 
 func (p *Panel) actionRefresh(w http.ResponseWriter, r *http.Request, acc *store.Account) {
+	// 日日新没有小浣熊那种 refresh_token：「刷新」在这里是「重登控制台 +
+	// 补建一枚新 API Key」，用户点它通常是 Key 丢了或登录票过期。
+	if acc.IsSenseNova() {
+		p.refreshSenseNova(w, r, acc)
+		return
+	}
 	if _, err := p.refresh.RefreshNow(r.Context(), acc); err != nil {
 		writeJSON(w, 400, map[string]any{"ok": false, "message": err.Error()})
 		return
@@ -638,6 +690,44 @@ func (p *Panel) actionRefresh(w http.ResponseWriter, r *http.Request, acc *store
 		})
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+// refreshSenseNova 用账号密码重登控制台并补建 API Key。没有账号密码时，
+// 至少尝试用现有登录票补建；都不行就如实报错，让用户重新导入。
+func (p *Panel) refreshSenseNova(w http.ResponseWriter, r *http.Request, acc *store.Account) {
+	if p.engine == nil || p.engine.SN == nil {
+		writeJSON(w, 400, map[string]any{"ok": false, "message": "日日新上游未配置"})
+		return
+	}
+	cred, err := p.engine.SN.EnsureToken(r.Context(), acc)
+	if err != nil {
+		writeJSON(w, 400, map[string]any{"ok": false, "message": "重登失败：" + err.Error()})
+		return
+	}
+	if cred != nil {
+		exp := cred.ExpiresAt
+		patch := store.AccountPatch{SNToken: &cred.ConsoleToken, SNTokenExp: &exp}
+		if cred.Username != "" {
+			patch.SNUsername = &cred.Username
+		}
+		_ = p.st.UpdateAccount(r.Context(), acc.ID, patch)
+		acc.SNToken, acc.SNTokenExp = cred.ConsoleToken, exp
+	}
+	key, kerr := p.engine.SN.ProvisionKey(r.Context(), acc)
+	if kerr != nil {
+		// 登录成功但建 Key 失败：登录票已续上，额度可查，Key 下次转发再补。
+		writeJSON(w, 200, map[string]any{
+			"ok": true, "message": "登录票已更新，但创建 API Key 失败：" + kerr.Error(),
+		})
+		return
+	}
+	if err := p.st.UpdateAccount(r.Context(), acc.ID, store.AccountPatch{
+		Token: &key, RefreshToken: &key,
+	}); err != nil {
+		writeJSON(w, 500, map[string]any{"ok": false, "message": err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "message": "已重新登录并补建 API Key"})
 }
 
 // actionUncool 手动解除限流。带 model 时只清该「账号×模型」的罚单，
@@ -847,6 +937,40 @@ func (p *Panel) handleManual(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, out)
 }
 
+// handleSenseNovaImport 处理商汤日日新账号密码导入。
+//
+// 它的凭据形态与手填令牌完全不同：用户提供控制台账号密码，我们登录换票、
+// 建 API Key、入库。这与小浣熊的「粘贴授权码/手填令牌」是并列的第三条
+// 添加路径，所以单独一个端点。
+func (p *Panel) handleSenseNovaImport(w http.ResponseWriter, r *http.Request) {
+	if p.snImport == nil {
+		writeJSON(w, 400, map[string]any{"ok": false, "message": "日日新导入未启用"})
+		return
+	}
+	var body struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+		Name     string `json:"name"`
+		Note     string `json:"note"`
+		APIKey   string `json:"apiKey"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, 400, map[string]any{"ok": false, "message": err.Error()})
+		return
+	}
+	res := p.snImport.Import(r.Context(), login.SenseNovaInput{
+		Username: body.Username, Password: body.Password, Name: body.Name, Note: body.Note, APIKey: body.APIKey,
+	})
+	out := map[string]any{
+		"ok": res.OK, "id": res.ID, "uid": res.UID, "updated": res.Updated, "message": res.Message,
+	}
+	if res.OK && !res.Updated {
+		p.onboard(r.Context(), res.ID)
+		out["onboarded"] = true
+	}
+	writeJSON(w, 200, out)
+}
+
 // handleOAuthCallback 是可选的回环回调路径，只在配置了 RedirectBase 时生效。
 func (p *Panel) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	if p.loginMgr.RedirectBase == "" {
@@ -935,7 +1059,8 @@ func (p *Panel) handleStatus(w http.ResponseWriter, r *http.Request) {
 	var credTotal int64
 	var credKnown int
 	for _, a := range accounts {
-		if a.Enabled && a.LastCheckinDay != today {
+		// 日日新没有签到，不计入「待签到」。
+		if a.Enabled && !a.IsSenseNova() && a.LastCheckinDay != today {
 			due++
 		}
 		if a.Credits >= 0 {

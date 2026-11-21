@@ -38,7 +38,19 @@ var sqliteSchema = []string{
 		created_at      INTEGER NOT NULL DEFAULT 0,
 		updated_at      INTEGER NOT NULL DEFAULT 0,
 		last_used       INTEGER NOT NULL DEFAULT 0,
-		max_concurrent  INTEGER NOT NULL DEFAULT 0
+		max_concurrent  INTEGER NOT NULL DEFAULT 0,
+		-- provider 区分上游：raccoon（小浣熊）与 sensenova（商汤日日新 Token Plan）。
+		-- 两种号在同一张表里，但凭据形态、额度接口、选号模型都不同，靠这一列分流。
+		provider        TEXT NOT NULL DEFAULT 'raccoon',
+		-- 商汤日日新专用：控制台账号密码用来换登录票、建 API Key、读积分池。
+		-- 密码与令牌走同一套 AES 加密；API Key 复用 token 列。
+		sn_username      TEXT NOT NULL DEFAULT '',
+		sn_password      TEXT NOT NULL DEFAULT '',
+		sn_token         TEXT NOT NULL DEFAULT '',
+		sn_token_exp     INTEGER NOT NULL DEFAULT 0,
+		sn_refresh_token TEXT NOT NULL DEFAULT '',
+		sn_pool          TEXT NOT NULL DEFAULT '',
+		sn_pool_at       INTEGER NOT NULL DEFAULT 0
 	)`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_uid ON accounts(uid)`,
 
@@ -206,7 +218,15 @@ var pgSchema = []string{
 		created_at      BIGINT NOT NULL DEFAULT 0,
 		updated_at      BIGINT NOT NULL DEFAULT 0,
 		last_used       BIGINT NOT NULL DEFAULT 0,
-		max_concurrent  BIGINT NOT NULL DEFAULT 0
+		max_concurrent  BIGINT NOT NULL DEFAULT 0,
+		provider        TEXT NOT NULL DEFAULT 'raccoon',
+		sn_username      TEXT NOT NULL DEFAULT '',
+		sn_password      TEXT NOT NULL DEFAULT '',
+		sn_token         TEXT NOT NULL DEFAULT '',
+		sn_token_exp     BIGINT NOT NULL DEFAULT 0,
+		sn_refresh_token TEXT NOT NULL DEFAULT '',
+		sn_pool          TEXT NOT NULL DEFAULT '',
+		sn_pool_at       BIGINT NOT NULL DEFAULT 0
 	)`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_uid ON accounts(uid)`,
 
@@ -322,4 +342,4 @@ var pgSchema = []string{
 	`CREATE INDEX IF NOT EXISTS idx_event_account ON runtime_events(account_id, id)`,
 }
 
-const schemaVersion = 3
+const schemaVersion = 4

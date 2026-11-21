@@ -210,6 +210,18 @@ func (c *Client) OpenChat(ctx context.Context, req ChatRequest) (*ChatStream, er
 	return s, nil
 }
 
+// NewChatStream 用已经建立的上游响应构造流。供其它上游实现（日日新）
+// 复用同一套 SSE 解析与空闲超时：它的 token-plan 端点也是 OpenAI 方言，
+// 帧格式与小浣熊一致，转发层只认 ChatEvent。
+func NewChatStream(resp *http.Response, scanner *bufio.Scanner, cancel context.CancelFunc,
+	parent context.Context, idle time.Duration) *ChatStream {
+	s := &ChatStream{resp: resp, scanner: scanner, cancel: cancel, parent: parent, idle: idle}
+	if idle > 0 {
+		s.timer = time.AfterFunc(idle, cancel)
+	}
+	return s
+}
+
 type ChatStream struct {
 	resp    *http.Response
 	scanner *bufio.Scanner

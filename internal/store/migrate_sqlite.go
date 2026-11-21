@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -48,6 +49,9 @@ type accountRow struct {
 	ExpiresAt                                                                                                int64
 	DeviceID, DeviceName, OSVersion, OfficeIdentity, Platform, ClientChannel, Language, Meta, LastCheckinDay string
 	Priority, Enabled, CreatedAt, UpdatedAt, LastUsed, MaxConcurrent                                         int64
+	// 供应商与日日新凭据（v4 新增列）。旧库没有时按零值导入。
+	Provider, SNUsername, SNPassword, SNToken, SNRefreshToken, SNPool string
+	SNTokenExp, SNPoolAt                                              int64
 }
 
 type keyRow struct {
@@ -228,16 +232,47 @@ func readIfExists[T any](db *sql.DB, what string, fn func(*sql.DB) ([]T, error))
 	return rows, nil
 }
 
+// removeColumnBlock 从列清单里删掉一段（单列名或逗号分隔的列块），
+// 连同它前面的逗号与换行。accountCols 是多行常量，逐列 Replace 会因换行失配。
+func removeColumnBlock(cols, block string) string {
+	// FIELDS(, block) 会把「空白字面量」收进分组，删掉后逗号也一并去掉；
+	// 若块位于开头，则匹配 block, FIELDS。
+	if re := regexp.MustCompile(`,\s*` + regexp.QuoteMeta(block)); re.MatchString(cols) {
+		return re.ReplaceAllString(cols, "")
+	}
+	re := regexp.MustCompile(regexp.QuoteMeta(block) + `,\s*`)
+	return re.ReplaceAllString(cols, "")
+}
+
 func readAccounts(db *sql.DB) ([]accountRow, error) {
-	// max_concurrent 是 v1.3 新增列，旧库没有时按 0（跟随全局）处理。
-	hasMax, err := columnExists(db, "accounts", "max_concurrent")
-	if err != nil {
-		return nil, err
+	// 逐列探测：老库可能停在 max_concurrent 之前，也可能停在 provider 之前。
+	// 只查存在的列，缺失的按零值（provider 后面由调用方归一成 raccoon）。
+	has := func(col string) bool {
+		ok, err := columnExists(db, "accounts", col)
+		if err != nil {
+			// 读不到列信息时按「存在」处理：让后续 SELECT 给出真实的 SQL 错误，
+			// 而不是把权限/IO 之类的问题静默当成「老库缺列」。
+			return true
+		}
+		return ok
 	}
+	hasMax := has("max_concurrent")
+	hasProvider := has("provider")
+	hasSN := has("sn_username")
+	// 注意：accountCols 是跨行常量，换行符会让不可变列名的字符串匹配失效。
+	// 所以按「新增列块」整体裁掉，而不是逐列删。
 	cols := accountCols
-	if !hasMax {
-		cols = strings.Replace(accountCols, ", max_concurrent", "", 1)
+	const snBlock = "sn_username, sn_password, sn_token, sn_token_exp, sn_refresh_token, sn_pool, sn_pool_at"
+	if !hasSN {
+		cols = removeColumnBlock(cols, snBlock)
 	}
+	if !hasProvider {
+		cols = removeColumnBlock(cols, "provider")
+	}
+	if !hasMax {
+		cols = removeColumnBlock(cols, "max_concurrent")
+	}
+
 	rows, err := db.Query(`SELECT ` + cols + ` FROM accounts ORDER BY id`)
 	if err != nil {
 		return nil, err
@@ -253,6 +288,13 @@ func readAccounts(db *sql.DB) ([]accountRow, error) {
 			&a.LastCheckinDay, &a.CreatedAt, &a.UpdatedAt, &a.LastUsed}
 		if hasMax {
 			dest = append(dest, &a.MaxConcurrent)
+		}
+		if hasProvider {
+			dest = append(dest, &a.Provider)
+		}
+		if hasSN {
+			dest = append(dest, &a.SNUsername, &a.SNPassword, &a.SNToken, &a.SNTokenExp,
+				&a.SNRefreshToken, &a.SNPool, &a.SNPoolAt)
 		}
 		if err := rows.Scan(dest...); err != nil {
 			return nil, err
@@ -347,7 +389,7 @@ func readCheckins(db *sql.DB) ([]checkinRow, error) {
 	return out, rows.Err()
 }
 
-// columnExists 用 PRAGMA table_info 判断列是否存在。
+// columnExists 用 PRAGMA table_info 判断 SQLite 表的列是否存在。
 func columnExists(db *sql.DB, table, column string) (bool, error) {
 	rows, err := db.Query(`PRAGMA table_info(` + table + `)`)
 	if err != nil {
@@ -370,6 +412,19 @@ func columnExists(db *sql.DB, table, column string) (bool, error) {
 		}
 	}
 	return false, rows.Err()
+}
+
+// columnExistsTx 是事务内的版本，供 Postgres 迁移在同一把 advisory lock 下补列。
+// Postgres 走 information_schema。
+func columnExistsTx(ctx context.Context, tx *sql.Tx, table, column string) (bool, error) {
+	rows, err := tx.QueryContext(ctx,
+		`SELECT 1 FROM information_schema.columns WHERE table_name = ? AND column_name = ?`,
+		table, column)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	return rows.Next(), rows.Err()
 }
 
 func readUsage(db *sql.DB) ([]usageRow, error) {
@@ -482,12 +537,18 @@ func (s *Store) insertDumpRows(ctx context.Context, tx *sql.Tx, d *sqliteDump) e
 			ph   []string
 		)
 		for _, a := range d.Accounts[i:end] {
-			ph = append(ph, "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+			ph = append(ph, "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+			provider := a.Provider
+			if provider == "" {
+				provider = ProviderRaccoon
+			}
 			args = append(args, a.ID, a.UID, a.Name, a.Note, a.Token, a.RefreshToken, a.TokenExp,
 				a.Credits, a.CreditsAt, a.Status, a.CoolUntil, a.CoolReason, a.ExpiresAt,
 				a.DeviceID, a.DeviceName, a.OSVersion, a.OfficeIdentity, a.Platform,
 				a.ClientChannel, a.Language, a.Meta, a.Priority, a.Enabled,
-				a.LastCheckinDay, a.CreatedAt, a.UpdatedAt, a.LastUsed, a.MaxConcurrent)
+				a.LastCheckinDay, a.CreatedAt, a.UpdatedAt, a.LastUsed, a.MaxConcurrent,
+				provider, a.SNUsername, a.SNPassword, a.SNToken, a.SNTokenExp,
+				a.SNRefreshToken, a.SNPool, a.SNPoolAt)
 		}
 		q := `INSERT INTO accounts (` + accountCols + `) VALUES ` + joinStrings(ph, ",")
 		if _, err := s.execTx(ctx, tx, q, args...); err != nil {
