@@ -44,10 +44,37 @@ func (p *Panel) handleReport(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 500, map[string]any{"ok": false, "message": err.Error()})
 		return
 	}
+	apis, err := p.st.LoadDailyAPIs(r.Context(), startKey, endKey)
+	if err != nil {
+		writeJSON(w, 500, map[string]any{"ok": false, "message": err.Error()})
+		return
+	}
 	accounts, err := p.st.LoadAccountUsage(r.Context(), sinceMS, untilMS)
 	if err != nil {
 		writeJSON(w, 500, map[string]any{"ok": false, "message": err.Error()})
 		return
+	}
+	apiUsage, err := p.st.LoadAPIUsage(r.Context(), sinceMS, untilMS)
+	if err != nil {
+		writeJSON(w, 500, map[string]any{"ok": false, "message": err.Error()})
+		return
+	}
+	trendAccounts, err := p.st.LoadDailyAccounts(r.Context(), sinceMS, untilMS)
+	if err != nil {
+		trendAccounts = nil // 账号维度下钻是附加项，读不到不影响整页
+	} else {
+		// 分解表里 key 是账号 id；趋势图的下拉与图例要显示账号名。
+		nameByID := map[string]string{}
+		for _, a := range accounts {
+			nameByID[a.ID] = a.Name
+		}
+		for i := range trendAccounts {
+			if n := nameByID[trendAccounts[i].Key]; n != "" {
+				trendAccounts[i].Key = n
+			} else {
+				trendAccounts[i].Key = shortID(trendAccounts[i].Key)
+			}
+		}
 	}
 	latency, err := p.st.LoadLatency(r.Context(), sinceMS, untilMS, 0)
 	if err != nil {
@@ -72,22 +99,25 @@ func (p *Panel) handleReport(w http.ResponseWriter, r *http.Request) {
 
 	// 模型汇总：日×模型 → 区间总计。
 	modelTotals := map[string]*store.ModelUsage{}
-	var sumTokens, sumReq, sumOK int64
+	var sumTokens, sumReq, sumOK, sumPrompt, sumCompletion int64
 	var modelTokens int64
 	for _, m := range models {
-		mu := modelTotals[m.Model]
+		mu := modelTotals[m.Key]
 		if mu == nil {
-			mu = &store.ModelUsage{Model: m.Model}
-			modelTotals[m.Model] = mu
+			mu = &store.ModelUsage{Model: m.Key}
+			modelTotals[m.Key] = mu
 		}
 		mu.Requests += m.Requests
 		mu.Tokens += m.Tokens
 		modelTokens += m.Tokens
 	}
+	// 输入/输出拆分要从日汇总取：分解表只存了总量，没有 prompt/completion。
 	for _, d := range trend {
 		sumReq += d.Requests
 		sumOK += d.Successful
 		sumTokens += d.Tokens
+		sumPrompt += d.PromptTokens
+		sumCompletion += d.Completion
 	}
 	modelList := make([]store.ModelUsage, 0, len(modelTotals))
 	for _, mu := range modelTotals {
@@ -103,8 +133,35 @@ func (p *Panel) handleReport(w http.ResponseWriter, r *http.Request) {
 		return modelList[i].Requests > modelList[j].Requests
 	})
 
+	// 按模型分配输入/输出：分解表没有分项，按「该模型占当日 token 的比例」
+	// 从当日分项里摊回去，让各模型的输入/输出之和与总量一致（面板有这一列）。
+	completionByModel := map[string]int64{}
+	promptByModel := map[string]int64{}
+	dayMeta := map[string]store.DailyStat{}
+	for _, d := range trend {
+		dayMeta[d.Day] = d
+	}
+	dayModelTokens := map[string]int64{}
+	for _, m := range models {
+		dayModelTokens[m.Day] += m.Tokens
+	}
+	for _, m := range models {
+		base := dayMeta[m.Day]
+		dayTok := dayModelTokens[m.Day]
+		if dayTok <= 0 {
+			continue
+		}
+		promptByModel[m.Key] += base.PromptTokens * m.Tokens / dayTok
+		completionByModel[m.Key] += base.Completion * m.Tokens / dayTok
+	}
+	for i := range modelList {
+		modelList[i].PromptTokens = promptByModel[modelList[i].Model]
+		modelList[i].Completion = completionByModel[modelList[i].Model]
+	}
+
 	overview := store.ReportTotals{
 		Requests: sumReq, Successful: sumOK, Tokens: sumTokens,
+		PromptTokens: sumPrompt, Completion: sumCompletion,
 		ActiveDays: store.ActiveDays(trend),
 	}
 	if sumReq > 0 {
@@ -130,22 +187,35 @@ func (p *Panel) handleReport(w http.ResponseWriter, r *http.Request) {
 	body := map[string]any{
 		"ok": true,
 		"summary": store.ReportSummary{
-			Range:     normalizeRangeName(q.Get("range")),
-			StartDate: startKey,
-			EndDate:   endKey,
-			Label:     rng.Label,
-			Overview:  overview,
-			Models:    modelList,
-			Accounts:  accounts,
-			Trend:     trend,
-			Heatmap:   heatmap,
-			Latency:   latency,
+			Range:         normalizeRangeName(q.Get("range")),
+			StartDate:     startKey,
+			EndDate:       endKey,
+			Label:         rng.Label,
+			Overview:      overview,
+			Models:        modelList,
+			Accounts:      accounts,
+			APIs:          apiUsage,
+			Trend:         trend,
+			TrendModels:   models,
+			TrendAPIs:     apis,
+			TrendAccounts: trendAccounts,
+			Heatmap:       heatmap,
+			Latency:       latency,
 		},
 	}
 	p.reportMu.Lock()
 	p.reportKey, p.reportAt, p.reportBody = cacheKey, time.Now(), body
 	p.reportMu.Unlock()
 	writeJSON(w, 200, body)
+}
+
+// shortID 把账号 id 缩成前 12 + 后 4，账号已删除时趋势图下拉不至于太长。
+func shortID(id string) string {
+	if len([]rune(id)) <= 18 {
+		return id
+	}
+	r := []rune(id)
+	return string(r[:12]) + "…" + string(r[len(r)-4:])
 }
 
 // normalizeRangeName 把区间名收敛到面板认识的一组，未知值按 all 处理。

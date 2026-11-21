@@ -275,6 +275,11 @@ func (s *Store) migrate() error {
 	if err := s.ensureAccountColumns(); err != nil {
 		return err
 	}
+	// 报表聚合表同理：上一版建出来的表缺列，必须补齐才能跑新聚合 SQL。
+	// 建表本身由上面的 schema 保证（都带 IF NOT EXISTS），这里只补列。
+	if err := s.ensureReportColumns(); err != nil {
+		return err
+	}
 	return s.applySchemaVersion()
 }
 
@@ -293,6 +298,47 @@ func (s *Store) ensureAccountColumns() error {
 		return fmt.Errorf("补充 accounts.max_concurrent 失败: %w", err)
 	}
 	return nil
+}
+
+// ensureReportColumns 给上一版报表聚合表补上「输入/输出 Token」「成功请求数」列。
+//
+// 聚合表是 CREATE TABLE IF NOT EXISTS 建的：上一版已经建出来的表不会自动多出
+// 这些列，不补的话新聚合 SQL 会直接报「no such column」，报表页整页 500。
+// 新表本身（request_daily_api）由 schema 段负责创建，这里只管老表补列。
+func (s *Store) ensureReportColumns() error {
+	type add struct{ table, column, ddl string }
+	patches := []add{
+		{"request_daily", "prompt_tokens", `ALTER TABLE request_daily ADD COLUMN prompt_tokens BIGINT NOT NULL DEFAULT 0`},
+		{"request_daily", "completion_tokens", `ALTER TABLE request_daily ADD COLUMN completion_tokens BIGINT NOT NULL DEFAULT 0`},
+		{"request_daily_model", "successful", `ALTER TABLE request_daily_model ADD COLUMN successful BIGINT NOT NULL DEFAULT 0`},
+		{"request_daily_model", "prompt_tokens", `ALTER TABLE request_daily_model ADD COLUMN prompt_tokens BIGINT NOT NULL DEFAULT 0`},
+		{"request_daily_model", "completion_tokens", `ALTER TABLE request_daily_model ADD COLUMN completion_tokens BIGINT NOT NULL DEFAULT 0`},
+	}
+	for _, p := range patches {
+		has, err := s.columnExistsAny(p.table, p.column)
+		if err != nil {
+			return fmt.Errorf("检查 %s.%s 列失败: %w", p.table, p.column, err)
+		}
+		if has {
+			continue
+		}
+		if _, err := s.db.Exec(p.ddl); err != nil {
+			return fmt.Errorf("补充 %s.%s 失败: %w", p.table, p.column, err)
+		}
+	}
+	return nil
+}
+
+// columnExistsAny 跨方言判断表列是否存在。
+func (s *Store) columnExistsAny(table, column string) (bool, error) {
+	if s.dialect != dialectPostgres {
+		return columnExists(s.db, table, column)
+	}
+	var n int
+	err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM information_schema.columns
+		 WHERE table_name = $1 AND column_name = $2`, table, column).Scan(&n)
+	return n > 0, err
 }
 
 // applySchemaVersion 记录 schema 版本（SQLite 路径）。

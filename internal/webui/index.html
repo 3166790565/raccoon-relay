@@ -56,54 +56,142 @@
             <h2>用量报表</h2>
             <span class="hint" id="rpRangeLabel">-</span>
           </div>
-          <div class="row">
+          <div class="row rp-range-row">
             <div class="seg" id="rpRange" role="tablist">
               <button data-v="today">今天</button>
               <button data-v="yesterday">昨天</button>
-              <button class="on" data-v="7">近 7 天</button>
-              <button data-v="30">近 30 天</button>
+              <button class="on" data-v="7">7 天</button>
+              <button data-v="30">30 天</button>
               <button data-v="month">本月</button>
               <button data-v="all">全部</button>
+              <button data-v="custom">自定义</button>
+            </div>
+            <div class="rp-daterange" id="rpCustomRange" hidden>
+              <input type="date" id="rpStartDate" aria-label="起始日期">
+              <span class="hint">至</span>
+              <input type="date" id="rpEndDate" aria-label="结束日期">
             </div>
             <button class="ghost" id="rpRefreshBtn">刷新</button>
           </div>
         </div>
 
-        <!-- KPI -->
-        <div class="rp-kpis" id="rpKpis"></div>
-
-        <!-- 日趋势 -->
+        <!-- 概览 KPI -->
         <div class="rp-panel">
-          <div class="rp-panel-head">
-            <h3>每日趋势</h3>
-            <div class="seg tiny-seg" id="rpMetric" role="tablist">
-              <button class="on" data-v="tokens">Token</button>
-              <button data-v="requests">请求数</button>
+          <div class="rp-panel-head"><h3>统计概览</h3><span class="hint" id="rpOverviewSub">-</span></div>
+          <div class="rp-kpis" id="rpKpis"></div>
+        </div>
+
+        <!-- Top 账号 / Top 协议 -->
+        <div class="rp-grid2">
+          <div class="rp-panel">
+            <div class="rp-panel-head">
+              <h3>Top 账号</h3><span class="hint" id="rpAccountsTotal">按 Token</span>
+            </div>
+            <div class="rp-rank" id="rpAccounts"></div>
+          </div>
+          <div class="rp-panel">
+            <div class="rp-panel-head">
+              <h3>Top 协议</h3><span class="hint" id="rpApisTotal">按 Token</span>
+            </div>
+            <div class="rp-rank" id="rpApis"></div>
+          </div>
+        </div>
+
+        <!-- 环形图：模型用量 / 协议用量 -->
+        <div class="rp-grid2">
+          <div class="rp-panel">
+            <div class="rp-panel-head"><h3>模型用量</h3><span class="hint">占区间总 Token</span></div>
+            <div class="rp-donut" id="rpModelsDonut"></div>
+          </div>
+          <div class="rp-panel">
+            <div class="rp-panel-head"><h3>协议用量</h3><span class="hint">占区间总 Token</span></div>
+            <div class="rp-donut" id="rpApisDonut"></div>
+          </div>
+        </div>
+
+        <!-- 日趋势：维度 / 指标 / 实体 -->
+        <div class="rp-panel">
+          <div class="rp-panel-head rp-trend-head">
+            <h3 id="rpTrendTitle">按天 Token 趋势</h3>
+            <span class="hint rp-trend-range" id="rpTrendRange">-</span>
+            <div class="row rp-trend-controls">
+              <div class="seg tiny-seg" id="rpDim" role="tablist">
+                <button class="on" data-v="models">模型</button>
+                <button data-v="apis">协议</button>
+                <button data-v="accounts">账号</button>
+              </div>
+              <div class="seg tiny-seg" id="rpMetric" role="tablist">
+                <button class="on" data-v="tokens">Token</button>
+                <button data-v="requests">请求数</button>
+              </div>
+              <select id="rpEntity" class="rp-entity"><option value="__all__">全部</option></select>
             </div>
           </div>
           <div class="rp-chart" id="rpTrend"></div>
-        </div>
-
-        <!-- 排行 -->
-        <div class="rp-grid2">
-          <div class="rp-panel">
-            <div class="rp-panel-head"><h3>模型用量</h3><span class="hint">按 Token</span></div>
-            <div class="rp-rank" id="rpModels"></div>
-          </div>
-          <div class="rp-panel">
-            <div class="rp-panel-head"><h3>账号用量</h3><span class="hint">按 Token</span></div>
-            <div class="rp-rank" id="rpAccounts"></div>
-          </div>
+          <div class="rp-trend-legend" id="rpTrendLegend"></div>
         </div>
 
         <!-- 热力图 -->
         <div class="rp-panel">
           <div class="rp-panel-head">
             <h3>活跃热力图</h3>
-            <span class="hint">近一年 · 颜色越深当天请求越多</span>
+            <span class="hint">近 365 天 · 按当天 Token 用量着色（档位按本窗口峰值自动定）</span>
           </div>
           <div class="rp-heat" id="rpHeat"></div>
         </div>
+
+        <!-- 缓存命中率四窗口：上游目前不回传缓存字段，这一块先不展示 -->
+        <div class="rp-panel" id="rpLatencyPanel">
+          <div class="rp-panel-head"><h3>耗时与吞吐</h3><span class="hint">区间内成功请求</span></div>
+          <div class="rp-kpis rp-kpis-4" id="rpLatency"></div>
+        </div>
+
+        <!-- 账号统计明细表 -->
+        <div class="rp-panel">
+          <div class="rp-panel-head rp-table-head">
+            <h3>账号统计</h3>
+            <div class="row">
+              <div class="seg tiny-seg" id="rpAccSort" role="tablist">
+                <button class="on" data-v="tokens">按 Token</button>
+                <button data-v="requests">按请求数</button>
+              </div>
+            </div>
+          </div>
+          <div class="rp-tablewrap">
+            <table class="rp-table">
+              <thead><tr>
+                <th>账号</th>
+                <th class="num">请求数</th>
+                <th class="num">成功 / 失败</th>
+                <th class="num">成功率</th>
+                <th class="num">总 Token</th>
+                <th class="num">占比</th>
+                <th class="num">输入 / 输出</th>
+              </tr></thead>
+              <tbody id="rpAccTable"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- 协议统计明细表 -->
+        <div class="rp-panel">
+          <div class="rp-panel-head"><h3>协议统计</h3><span class="hint">按出站协议汇总</span></div>
+          <div class="rp-tablewrap">
+            <table class="rp-table">
+              <thead><tr>
+                <th>协议</th>
+                <th class="num">请求数</th>
+                <th class="num">成功 / 失败</th>
+                <th class="num">成功率</th>
+                <th class="num">总 Token</th>
+                <th class="num">占比</th>
+                <th class="num">输入 / 输出</th>
+              </tr></thead>
+              <tbody id="rpApiTable"></tbody>
+            </table>
+          </div>
+        </div>
+
         <p class="msg" id="rpMsg"></p>
       </section>
     </section>

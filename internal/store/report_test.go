@@ -12,10 +12,10 @@ func TestFoldDailyAggregates(t *testing.T) {
 	SetDailyLocation(time.UTC)
 	ts := time.Date(2026, 3, 10, 12, 0, 0, 0, time.UTC).UnixMilli()
 	batch := []UsageLog{
-		{TS: ts, Model: "m1", Status: 200, TotalTokens: 100},
-		{TS: ts + 1000, Model: "m1", Status: 200, TotalTokens: 50},
-		{TS: ts + 2000, Model: "m2", Status: 429, TotalTokens: 0},
-		{TS: time.Date(2026, 3, 11, 1, 0, 0, 0, time.UTC).UnixMilli(), Model: "m2", Status: 502, TotalTokens: 0},
+		{TS: ts, Model: "m1", API: "openai", Status: 200, TotalTokens: 100, PromptTokens: 40, CompletionTokens: 60},
+		{TS: ts + 1000, Model: "m1", API: "openai", Status: 200, TotalTokens: 50, PromptTokens: 20, CompletionTokens: 30},
+		{TS: ts + 2000, Model: "m2", API: "openai", Status: 429, TotalTokens: 0},
+		{TS: time.Date(2026, 3, 11, 1, 0, 0, 0, time.UTC).UnixMilli(), Model: "m2", API: "openai", Status: 502, TotalTokens: 0},
 	}
 	st.foldDaily(ctx, batch)
 
@@ -32,6 +32,9 @@ func TestFoldDailyAggregates(t *testing.T) {
 	if daily[1].Day != "2026-03-11" || daily[1].Successful != 0 {
 		t.Fatalf("3-11 聚合不对: %+v", daily[1])
 	}
+	if daily[0].PromptTokens != 60 || daily[0].Completion != 90 {
+		t.Fatalf("3-10 输入/输出拆分不对: %+v", daily[0])
+	}
 
 	models, err := st.LoadDailyModels(ctx, "2026-03-01", "2026-03-31")
 	if err != nil {
@@ -39,10 +42,25 @@ func TestFoldDailyAggregates(t *testing.T) {
 	}
 	got := map[string]int64{}
 	for _, m := range models {
-		got[m.Model] += m.Tokens
+		got[m.Key] += m.Tokens
 	}
 	if got["m1"] != 150 {
 		t.Fatalf("m1 应累计 150 token，实际 %d", got["m1"])
+	}
+
+	// 协议分解与日表同口径：按 api 汇总
+	apis, err := st.LoadDailyAPIs(ctx, "2026-03-01", "2026-03-31")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var apiOK int64
+	for _, a := range apis {
+		if a.Key == "openai" {
+			apiOK += a.Requests
+		}
+	}
+	if apiOK != 4 {
+		t.Fatalf("openai 协议应累计 4 次，实际 %d", apiOK)
 	}
 }
 

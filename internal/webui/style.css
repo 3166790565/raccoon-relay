@@ -682,21 +682,27 @@ button[disabled] { opacity: .5; cursor: not-allowed; }
 
 /* ---------- 报表 ---------- */
 .report-head { align-items: flex-start; }
-.rp-kpis {
-  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 10px; margin-bottom: 18px;
+.rp-range-row { justify-content: flex-end; flex-wrap: wrap; }
+.rp-daterange { display: flex; align-items: center; gap: 6px; }
+.rp-daterange input[type=date] {
+  width: auto; min-width: 132px; padding: 6px 8px; font-size: 12px;
 }
+
+.rp-kpis {
+  display: grid; grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 10px;
+}
+.rp-kpis-4 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
 .rp-kpi {
   background: #12151b; border: 1px solid var(--line); border-radius: 9px;
   padding: 12px 14px; min-width: 0;
 }
 .rp-kpi .k { font-size: 12px; color: var(--dim); }
 .rp-kpi .v {
-  font-size: 22px; font-weight: 700; margin-top: 4px; line-height: 1.2;
+  font-size: 21px; font-weight: 700; margin-top: 4px; line-height: 1.2;
   font-variant-numeric: tabular-nums; word-break: break-all;
 }
-.rp-kpi .v small { font-size: 13px; font-weight: 500; color: var(--dim); margin-left: 2px; }
-.rp-kpi .sub { font-size: 11px; color: var(--dim); margin-top: 5px; }
+.rp-kpi .sub { font-size: 11px; color: var(--dim); margin-top: 5px; line-height: 1.4; }
 .rp-kpi.accent .v { color: var(--accent); }
 .rp-kpi.ok .v { color: var(--ok); }
 .rp-kpi.warn .v { color: var(--warn); }
@@ -707,25 +713,33 @@ button[disabled] { opacity: .5; cursor: not-allowed; }
 }
 .rp-panel-head {
   display: flex; align-items: center; justify-content: space-between;
-  gap: 12px; margin-bottom: 10px;
+  gap: 12px; margin-bottom: 12px; flex-wrap: wrap;
 }
 .rp-panel-head h3 { margin: 0; font-size: 13px; font-weight: 600; }
-.rp-grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
+.rp-grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); gap: 16px; }
 .rp-grid2 .rp-panel { margin-bottom: 16px; }
 
-/* 趋势图：用内联 SVG 画，柱/线都随容器宽度自适应 */
-.rp-chart { position: relative; width: 100%; min-height: 190px; }
-.rp-chart svg { display: block; width: 100%; height: 190px; overflow: visible; }
-.rp-chart .bar { fill: var(--accent); opacity: .85; }
-.rp-chart .bar:hover { opacity: 1; }
+/* 趋势图 */
+.rp-trend-head { align-items: center; }
+.rp-trend-range { flex: 0 0 auto; }
+.rp-trend-controls { margin-left: auto; }
+.rp-entity { width: auto; min-width: 120px; max-width: 220px; padding: 5px 8px; font-size: 12px; }
+.rp-chart { position: relative; width: 100%; min-height: 230px; }
+.rp-chart svg { display: block; width: 100%; height: 230px; overflow: visible; }
+.rp-chart .seg:hover, .rp-chart .bar:hover { opacity: .85; }
 .rp-chart .axis-text { fill: var(--dim); font-size: 10px; }
 .rp-chart .gridline { stroke: var(--line); stroke-width: 1; }
-.rp-chart .empty { text-align: center; color: var(--dim); padding: 60px 0; }
+.rp-chart .empty { text-align: center; color: var(--dim); padding: 70px 0; }
+.rp-trend-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 10px; }
+.rp-legend-item {
+  display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--dim);
+}
+.rp-legend-item i { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
 
-/* 排行：名称 + 条 + 数字。条用 grid subgrid 对齐，数字列右对齐不抖 */
+/* 排行：名称 / 进度条 / 数值 / 占比 */
 .rp-rank { display: flex; flex-direction: column; gap: 9px; max-height: 300px; overflow-y: auto; scrollbar-gutter: stable; }
 .rp-rank-row {
-  display: grid; grid-template-columns: minmax(0, 1fr) 92px 64px;
+  display: grid; grid-template-columns: minmax(0, 1fr) 1fr 62px 52px;
   align-items: center; gap: 10px;
 }
 .rp-rank-row .name {
@@ -733,36 +747,74 @@ button[disabled] { opacity: .5; cursor: not-allowed; }
 }
 .rp-rank-row .meter { height: 7px; border-radius: 4px; background: #232833; overflow: hidden; }
 .rp-rank-row .meter i { display: block; height: 100%; background: var(--accent); border-radius: 4px; }
-.rp-rank-row .num {
-  font-size: 12px; text-align: right; font-variant-numeric: tabular-nums; color: var(--fg);
+.rp-rank-row .num, .rp-rank-row .pct {
+  font-size: 12px; text-align: right; font-variant-numeric: tabular-nums;
 }
-.rp-rank-row .num small { display: block; font-size: 10px; color: var(--dim); }
-.rp-rank .empty { color: var(--dim); font-size: 12px; padding: 14px 0; text-align: center; }
+.rp-rank-row .pct { color: var(--dim); }
+.rp-rank .empty { color: var(--dim); font-size: 12px; padding: 16px 0; text-align: center; }
 
-/* 热力图：365 天，一行 53 列（按周），每格 11px + 3px 间距 */
+/* 环形图 */
+.rp-donut-layout { display: flex; gap: 20px; align-items: center; flex-wrap: wrap; }
+.rp-donut-wrap { position: relative; width: 132px; height: 132px; flex: none; }
+.rp-donut-wrap svg { width: 132px; height: 132px; display: block; }
+.rp-donut-center {
+  position: absolute; inset: 0; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; pointer-events: none;
+}
+.rp-donut-center .v { font-size: 16px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.rp-donut-center .k { font-size: 10px; color: var(--dim); margin-top: 2px; }
+.rp-donut-legend { flex: 1; min-width: 180px; display: flex; flex-direction: column; gap: 6px; max-height: 160px; overflow-y: auto; }
+.rp-donut-legend-row {
+  display: grid; grid-template-columns: 10px minmax(0, 1fr) auto auto; align-items: center; gap: 8px;
+  font-size: 12px;
+}
+.rp-donut-legend-row .dot { width: 9px; height: 9px; border-radius: 2px; }
+.rp-donut-legend-row .lname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rp-donut-legend-row .ltok { font-variant-numeric: tabular-nums; color: var(--fg); text-align: right; }
+.rp-donut-legend-row .lpct { font-variant-numeric: tabular-nums; color: var(--dim); text-align: right; min-width: 42px; }
+.rp-donut .empty { color: var(--dim); font-size: 12px; padding: 30px 0; text-align: center; }
+
+/* 热力图 */
 .rp-heat { overflow-x: auto; padding-bottom: 4px; }
 .rp-heat .heat-grid {
   display: grid; grid-auto-flow: column; grid-template-rows: repeat(7, 12px);
   grid-auto-columns: 12px; gap: 3px; width: max-content;
 }
-.rp-heat .cell {
-  width: 12px; height: 12px; border-radius: 3px; background: #1c2028;
-  outline: 1px solid transparent;
-}
+.rp-heat .cell { width: 12px; height: 12px; border-radius: 3px; background: #1c2028; outline: 1px solid transparent; }
 .rp-heat .cell:hover { outline-color: var(--accent); }
-.rp-heat .cell.l1 { background: #513624; }
-.rp-heat .cell.l2 { background: #7c4f2b; }
-.rp-heat .cell.l3 { background: #b5672f; }
-.rp-heat .cell.l4 { background: var(--accent); }
+.rp-heat .cell.l1, .rp-legend-item i.cell.l1 { background: #513624; }
+.rp-heat .cell.l2, .rp-legend-item i.cell.l2 { background: #7c4f2b; }
+.rp-heat .cell.l3, .rp-legend-item i.cell.l3 { background: #b5672f; }
+.rp-heat .cell.l4, .rp-legend-item i.cell.l4 { background: var(--accent); }
 .rp-heat .heat-legend {
-  display: flex; align-items: center; gap: 5px; justify-content: flex-end;
-  margin-top: 8px; font-size: 11px; color: var(--dim);
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  margin-top: 10px; font-size: 11px; color: var(--dim);
 }
-.rp-heat .heat-legend .cell { width: 11px; height: 11px; }
-.rp-heat .heat-empty { color: var(--dim); font-size: 12px; padding: 16px 0; }
+.rp-heat .heat-legend .rp-legend-item { color: var(--dim); }
+.rp-heat .heat-legend i.cell { width: 11px; height: 11px; display: inline-block; border-radius: 3px; }
+.rp-heat .heat-legend .spacer { flex: 1; }
 
+/* 明细表 */
+.rp-tablewrap { overflow-x: auto; }
+.rp-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.rp-table th, .rp-table td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.rp-table th { color: var(--dim); font-weight: 500; font-size: 11.5px; position: sticky; top: 0; background: #12151b; }
+.rp-table th.num, .rp-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.rp-table tbody tr:hover td { background: #171b23; }
+.rp-table .ok { color: var(--ok); }
+.rp-table .bad { color: var(--bad); }
+.rp-table .rp-cell-name { display: block; max-width: 240px; overflow: hidden; text-overflow: ellipsis; }
+.rp-table .rp-cell-sub { display: block; color: var(--dim); font-size: 10.5px; margin-top: 1px; }
+.rp-table .empty { text-align: center; color: var(--dim); padding: 16px; }
+
+@media (max-width: 1100px) {
+  .rp-kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .rp-kpis-4 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
 @media (max-width: 900px) {
-  .rp-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .rp-kpis, .rp-kpis-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .rp-grid2 { grid-template-columns: 1fr; }
-  .rp-rank-row { grid-template-columns: minmax(0, 1fr) 70px 56px; }
+  .rp-rank-row { grid-template-columns: minmax(0, 1fr) 60px 46px; }
+  .rp-rank-row .meter { display: none; }
+  .rp-trend-controls { margin-left: 0; width: 100%; }
 }

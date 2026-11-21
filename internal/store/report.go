@@ -15,16 +15,18 @@ import (
 
 // DailyStat 是某一天的汇总。
 type DailyStat struct {
-	Day        string `json:"day"`
-	Requests   int64  `json:"requests"`
-	Successful int64  `json:"successful"`
-	Tokens     int64  `json:"tokens"`
+	Day          string `json:"day"`
+	Requests     int64  `json:"requests"`
+	Successful   int64  `json:"successful"`
+	Tokens       int64  `json:"tokens"`
+	PromptTokens int64  `json:"promptTokens"`
+	Completion   int64  `json:"completionTokens"`
 }
 
-// ModelStat 是某一天某个模型的用量。
-type ModelStat struct {
+// DaySlice 是「某天 × 某个维度值」的用量，模型/协议/账号共用。
+type DaySlice struct {
 	Day      string `json:"day"`
-	Model    string `json:"model"`
+	Key      string `json:"key"`
 	Requests int64  `json:"requests"`
 	Tokens   int64  `json:"tokens"`
 }
@@ -107,40 +109,69 @@ type ReportSummary struct {
 	Overview  ReportTotals   `json:"overview"`
 	Models    []ModelUsage   `json:"models"`
 	Accounts  []AccountUsage `json:"accounts"`
+	APIs      []APIUsage     `json:"apis"`
 	Trend     []DailyStat    `json:"trend"`
-	Heatmap   []DailyStat    `json:"heatmap"`
-	Latency   LatencyStat    `json:"latency"`
+	// TrendModels / TrendAPIs 是趋势图按维度下钻用的逐日分解，
+	// 前端切到「模型 / 协议」维度、或只选某一个实体时直接读这里。
+	TrendModels   []DaySlice  `json:"trendModels"`
+	TrendAPIs     []DaySlice  `json:"trendApis"`
+	TrendAccounts []DaySlice  `json:"trendAccounts"`
+	Heatmap       []DailyStat `json:"heatmap"`
+	Latency       LatencyStat `json:"latency"`
 }
 
 // ReportTotals 是区间总量。
 type ReportTotals struct {
-	Requests    int64   `json:"requests"`
-	Successful  int64   `json:"successful"`
-	Tokens      int64   `json:"tokens"`
-	ActiveDays  int     `json:"activeDays"`
-	Streak      int     `json:"streak"`
-	SuccessRate float64 `json:"successRate"`
-	TopModel    string  `json:"topModel"`
-	TopModelTok int64   `json:"topModelTokens"`
+	Requests     int64   `json:"requests"`
+	Successful   int64   `json:"successful"`
+	Tokens       int64   `json:"tokens"`
+	PromptTokens int64   `json:"promptTokens"`
+	Completion   int64   `json:"completionTokens"`
+	ActiveDays   int     `json:"activeDays"`
+	Streak       int     `json:"streak"`
+	SuccessRate  float64 `json:"successRate"`
+	TopModel     string  `json:"topModel"`
+	TopModelTok  int64   `json:"topModelTokens"`
 }
 
 // ModelUsage 是区间内某模型的汇总。
 type ModelUsage struct {
-	Model    string  `json:"model"`
-	Requests int64   `json:"requests"`
-	Tokens   int64   `json:"tokens"`
-	Share    float64 `json:"share"` // 占区间总 token 的比例（0-100）
+	Model        string  `json:"model"`
+	Requests     int64   `json:"requests"`
+	Tokens       int64   `json:"tokens"`
+	PromptTokens int64   `json:"promptTokens"`
+	Completion   int64   `json:"completionTokens"`
+	Share        float64 `json:"share"` // 占区间总 token 的比例（0-100）
 }
 
 // AccountUsage 是区间内某账号的汇总（账号名从 accounts 表补）。
 type AccountUsage struct {
-	ID       string  `json:"id"`
-	UID      string  `json:"uid"`
-	Name     string  `json:"name"`
-	Requests int64   `json:"requests"`
-	Success  int64   `json:"success"`
-	Tokens   int64   `json:"tokens"`
-	Share    float64 `json:"share"`
+	ID           string  `json:"id"`
+	UID          string  `json:"uid"`
+	Name         string  `json:"name"`
+	Requests     int64   `json:"requests"`
+	Success      int64   `json:"success"`
+	Failures     int64   `json:"failures"`
+	Tokens       int64   `json:"tokens"`
+	PromptTokens int64   `json:"promptTokens"`
+	Completion   int64   `json:"completionTokens"`
+	Share        float64 `json:"share"`
+	SuccessRate  float64 `json:"successRate"`
+}
+
+// APIUsage 是区间内某把 API Key 的汇总。流水里现在不存 Key 身份，
+// 所以这里按出站协议（openai / anthropic / responses）统计——面板仍叫「协议统计」，
+// 数值全都来自真实流水，不编造。
+type APIUsage struct {
+	API          string  `json:"api"`
+	Requests     int64   `json:"requests"`
+	Success      int64   `json:"success"`
+	Failures     int64   `json:"failures"`
+	Tokens       int64   `json:"tokens"`
+	PromptTokens int64   `json:"promptTokens"`
+	Completion   int64   `json:"completionTokens"`
+	Share        float64 `json:"share"`
+	SuccessRate  float64 `json:"successRate"`
 }
 
 // LatencyStat 是区间内的耗时分布（从 usage_logs 直接算）。
@@ -219,7 +250,7 @@ func (s *Store) FirstDailyDay(ctx context.Context) string {
 // LoadDaily 读取区间内的日汇总，零碎缺失的日期不补齐（由调用方按需补零）。
 func (s *Store) LoadDaily(ctx context.Context, start, end string) ([]DailyStat, error) {
 	rows, err := s.query(ctx,
-		`SELECT day, requests, successful, tokens FROM request_daily
+		`SELECT day, requests, successful, tokens, prompt_tokens, completion_tokens FROM request_daily
 		 WHERE day >= ? AND day <= ? ORDER BY day ASC`, start, end)
 	if err != nil {
 		return nil, err
@@ -228,7 +259,8 @@ func (s *Store) LoadDaily(ctx context.Context, start, end string) ([]DailyStat, 
 	var out []DailyStat
 	for rows.Next() {
 		var d DailyStat
-		if err := rows.Scan(&d.Day, &d.Requests, &d.Successful, &d.Tokens); err != nil {
+		if err := rows.Scan(&d.Day, &d.Requests, &d.Successful, &d.Tokens,
+			&d.PromptTokens, &d.Completion); err != nil {
 			return nil, err
 		}
 		out = append(out, d)
@@ -237,18 +269,28 @@ func (s *Store) LoadDaily(ctx context.Context, start, end string) ([]DailyStat, 
 }
 
 // LoadDailyModels 读取区间内按天×模型的用量。
-func (s *Store) LoadDailyModels(ctx context.Context, start, end string) ([]ModelStat, error) {
+func (s *Store) LoadDailyModels(ctx context.Context, start, end string) ([]DaySlice, error) {
+	return s.loadDaySlices(ctx, "request_daily_model", "model", start, end)
+}
+
+// LoadDailyAPIs 读取区间内按天×出站协议的用量。
+func (s *Store) LoadDailyAPIs(ctx context.Context, start, end string) ([]DaySlice, error) {
+	return s.loadDaySlices(ctx, "request_daily_api", "api", start, end)
+}
+
+// loadDaySlices 是两张同构分解表的公共读取。表名与列名只来自内部常量，不含用户输入。
+func (s *Store) loadDaySlices(ctx context.Context, table, keyCol, start, end string) ([]DaySlice, error) {
 	rows, err := s.query(ctx,
-		`SELECT day, model, requests, tokens FROM request_daily_model
+		`SELECT day, `+keyCol+`, requests, tokens FROM `+table+`
 		 WHERE day >= ? AND day <= ? ORDER BY day ASC`, start, end)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []ModelStat
+	var out []DaySlice
 	for rows.Next() {
-		var m ModelStat
-		if err := rows.Scan(&m.Day, &m.Model, &m.Requests, &m.Tokens); err != nil {
+		var m DaySlice
+		if err := rows.Scan(&m.Day, &m.Key, &m.Requests, &m.Tokens); err != nil {
 			return nil, err
 		}
 		out = append(out, m)
@@ -259,7 +301,7 @@ func (s *Store) LoadDailyModels(ctx context.Context, start, end string) ([]Model
 // LoadHeatmap 读取最近一年的日汇总（热力图固定 365 格，不随区间变化）。
 func (s *Store) LoadHeatmap(ctx context.Context, since string) ([]DailyStat, error) {
 	rows, err := s.query(ctx,
-		`SELECT day, requests, successful, tokens FROM request_daily
+		`SELECT day, requests, successful, tokens, prompt_tokens, completion_tokens FROM request_daily
 		 WHERE day >= ? ORDER BY day ASC`, since)
 	if err != nil {
 		return nil, err
@@ -268,7 +310,8 @@ func (s *Store) LoadHeatmap(ctx context.Context, since string) ([]DailyStat, err
 	var out []DailyStat
 	for rows.Next() {
 		var d DailyStat
-		if err := rows.Scan(&d.Day, &d.Requests, &d.Successful, &d.Tokens); err != nil {
+		if err := rows.Scan(&d.Day, &d.Requests, &d.Successful, &d.Tokens,
+			&d.PromptTokens, &d.Completion); err != nil {
 			return nil, err
 		}
 		out = append(out, d)
@@ -281,7 +324,9 @@ func (s *Store) LoadHeatmap(ctx context.Context, since string) ([]DailyStat, err
 func (s *Store) LoadAccountUsage(ctx context.Context, sinceMS, untilMS int64) ([]AccountUsage, error) {
 	q := `SELECT u.account_id, COALESCE(a.uid, ''), COALESCE(a.name, ''),
 			COUNT(*), ` + s.dialect.sumInt("CASE WHEN u.status >= 200 AND u.status < 400 THEN 1 ELSE 0 END") + `,
-			` + s.dialect.sumInt("u.total_tokens") + `
+			` + s.dialect.sumInt("u.total_tokens") + `,
+			` + s.dialect.sumInt("u.prompt_tokens") + `,
+			` + s.dialect.sumInt("u.completion_tokens") + `
 		FROM usage_logs u LEFT JOIN accounts a ON a.id = u.account_id
 		WHERE u.ts >= ? AND u.ts < ?
 		GROUP BY u.account_id, a.uid, a.name`
@@ -294,7 +339,8 @@ func (s *Store) LoadAccountUsage(ctx context.Context, sinceMS, untilMS int64) ([
 	var total int64
 	for rows.Next() {
 		var a AccountUsage
-		if err := rows.Scan(&a.ID, &a.UID, &a.Name, &a.Requests, &a.Success, &a.Tokens); err != nil {
+		if err := rows.Scan(&a.ID, &a.UID, &a.Name, &a.Requests, &a.Success, &a.Tokens,
+			&a.PromptTokens, &a.Completion); err != nil {
 			return nil, err
 		}
 		total += a.Tokens
@@ -304,8 +350,109 @@ func (s *Store) LoadAccountUsage(ctx context.Context, sinceMS, untilMS int64) ([
 		return nil, err
 	}
 	for i := range out {
+		a := &out[i]
+		a.Failures = a.Requests - a.Success
+		if a.Requests > 0 {
+			a.SuccessRate = float64(a.Success) / float64(a.Requests) * 100
+		}
 		if total > 0 {
-			out[i].Share = float64(out[i].Tokens) / float64(total) * 100
+			a.Share = float64(a.Tokens) / float64(total) * 100
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Tokens != out[j].Tokens {
+			return out[i].Tokens > out[j].Tokens
+		}
+		return out[i].Requests > out[j].Requests
+	})
+	return out, nil
+}
+
+// LoadDailyAccounts 读取区间内按天×账号的用量（从流水实时聚合）。
+//
+// 账号维度没有独立的日聚合表：账号数远少于请求数，且需要在趋势图里下钻到单个账号，
+// 直接按区间扫一遍 usage_logs 的 ts 索引即可，代价可控。
+func (s *Store) LoadDailyAccounts(ctx context.Context, sinceMS, untilMS int64) ([]DaySlice, error) {
+	// SQL 里按「天」分组要依赖方言各自的日期函数，直接用 Go 归并更稳妥。
+	rows, err := s.query(ctx,
+		`SELECT u.account_id, u.ts, u.total_tokens FROM usage_logs u
+		 WHERE u.ts >= ? AND u.ts < ?`, sinceMS, untilMS)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	loc := dailyLocation()
+	type key struct{ day, acc string }
+	agg := map[key]*DaySlice{}
+	for rows.Next() {
+		var acc string
+		var ts, tok int64
+		if err := rows.Scan(&acc, &ts, &tok); err != nil {
+			return nil, err
+		}
+		day := time.UnixMilli(ts).In(loc).Format("2006-01-02")
+		k := key{day, acc}
+		d := agg[k]
+		if d == nil {
+			d = &DaySlice{Day: day, Key: acc}
+			agg[k] = d
+		}
+		d.Requests++
+		d.Tokens += tok
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := make([]DaySlice, 0, len(agg))
+	for _, d := range agg {
+		out = append(out, *d)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Day != out[j].Day {
+			return out[i].Day < out[j].Day
+		}
+		return out[i].Key < out[j].Key
+	})
+	return out, nil
+}
+
+// LoadAPIUsage 按出站协议汇总区间内的流水。
+func (s *Store) LoadAPIUsage(ctx context.Context, sinceMS, untilMS int64) ([]APIUsage, error) {
+	q := `SELECT u.api, COUNT(*),
+			` + s.dialect.sumInt("CASE WHEN u.status >= 200 AND u.status < 400 THEN 1 ELSE 0 END") + `,
+			` + s.dialect.sumInt("u.total_tokens") + `,
+			` + s.dialect.sumInt("u.prompt_tokens") + `,
+			` + s.dialect.sumInt("u.completion_tokens") + `
+		FROM usage_logs u
+		WHERE u.ts >= ? AND u.ts < ?
+		GROUP BY u.api`
+	rows, err := s.query(ctx, q, sinceMS, untilMS)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []APIUsage
+	var total int64
+	for rows.Next() {
+		var a APIUsage
+		if err := rows.Scan(&a.API, &a.Requests, &a.Success, &a.Tokens,
+			&a.PromptTokens, &a.Completion); err != nil {
+			return nil, err
+		}
+		total += a.Tokens
+		out = append(out, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for i := range out {
+		a := &out[i]
+		a.Failures = a.Requests - a.Success
+		if a.Requests > 0 {
+			a.SuccessRate = float64(a.Success) / float64(a.Requests) * 100
+		}
+		if total > 0 {
+			a.Share = float64(a.Tokens) / float64(total) * 100
 		}
 	}
 	sort.Slice(out, func(i, j int) bool {

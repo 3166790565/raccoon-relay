@@ -109,18 +109,35 @@ var sqliteSchema = []string{
 	// 做 GROUP BY 会在大表上扫几十万行；这里在写流水的同时按天累加，
 	// 报表只读这张小表。流水被清理（保留天数）后，历史日统计仍然保留。
 	`CREATE TABLE IF NOT EXISTS request_daily (
-		day        TEXT PRIMARY KEY,
-		requests   INTEGER NOT NULL DEFAULT 0,
-		successful INTEGER NOT NULL DEFAULT 0,
-		tokens     INTEGER NOT NULL DEFAULT 0
+		day               TEXT PRIMARY KEY,
+		requests          INTEGER NOT NULL DEFAULT 0,
+		successful        INTEGER NOT NULL DEFAULT 0,
+		tokens            INTEGER NOT NULL DEFAULT 0,
+		prompt_tokens     INTEGER NOT NULL DEFAULT 0,
+		completion_tokens INTEGER NOT NULL DEFAULT 0
 	)`,
 	// 按「天 × 模型」的分解，报表的模型 Top N 与趋势图选维度都读它。
 	`CREATE TABLE IF NOT EXISTS request_daily_model (
-		day      TEXT NOT NULL,
-		model    TEXT NOT NULL DEFAULT '',
-		requests INTEGER NOT NULL DEFAULT 0,
-		tokens   INTEGER NOT NULL DEFAULT 0,
+		day               TEXT NOT NULL,
+		model             TEXT NOT NULL DEFAULT '',
+		requests          INTEGER NOT NULL DEFAULT 0,
+		successful        INTEGER NOT NULL DEFAULT 0,
+		tokens            INTEGER NOT NULL DEFAULT 0,
+		prompt_tokens     INTEGER NOT NULL DEFAULT 0,
+		completion_tokens INTEGER NOT NULL DEFAULT 0,
 		PRIMARY KEY (day, model)
+	)`,
+	// 按「天 × 出站协议」的分解（openai / anthropic / responses），
+	// 报表的「协议统计」与趋势图按协议选维度都读它。
+	`CREATE TABLE IF NOT EXISTS request_daily_api (
+		day               TEXT NOT NULL,
+		api               TEXT NOT NULL DEFAULT '',
+		requests          INTEGER NOT NULL DEFAULT 0,
+		successful        INTEGER NOT NULL DEFAULT 0,
+		tokens            INTEGER NOT NULL DEFAULT 0,
+		prompt_tokens     INTEGER NOT NULL DEFAULT 0,
+		completion_tokens INTEGER NOT NULL DEFAULT 0,
+		PRIMARY KEY (day, api)
 	)`,
 
 	`CREATE TABLE IF NOT EXISTS settings (
@@ -255,17 +272,32 @@ var pgSchema = []string{
 
 	// 与 SQLite 版一一对应的报表日聚合表。
 	`CREATE TABLE IF NOT EXISTS request_daily (
-		day        TEXT PRIMARY KEY,
-		requests   BIGINT NOT NULL DEFAULT 0,
-		successful BIGINT NOT NULL DEFAULT 0,
-		tokens     BIGINT NOT NULL DEFAULT 0
+		day               TEXT PRIMARY KEY,
+		requests          BIGINT NOT NULL DEFAULT 0,
+		successful        BIGINT NOT NULL DEFAULT 0,
+		tokens            BIGINT NOT NULL DEFAULT 0,
+		prompt_tokens     BIGINT NOT NULL DEFAULT 0,
+		completion_tokens BIGINT NOT NULL DEFAULT 0
 	)`,
 	`CREATE TABLE IF NOT EXISTS request_daily_model (
-		day      TEXT NOT NULL,
-		model    TEXT NOT NULL DEFAULT '',
-		requests BIGINT NOT NULL DEFAULT 0,
-		tokens   BIGINT NOT NULL DEFAULT 0,
+		day               TEXT NOT NULL,
+		model             TEXT NOT NULL DEFAULT '',
+		requests          BIGINT NOT NULL DEFAULT 0,
+		successful        BIGINT NOT NULL DEFAULT 0,
+		tokens            BIGINT NOT NULL DEFAULT 0,
+		prompt_tokens     BIGINT NOT NULL DEFAULT 0,
+		completion_tokens BIGINT NOT NULL DEFAULT 0,
 		PRIMARY KEY (day, model)
+	)`,
+	`CREATE TABLE IF NOT EXISTS request_daily_api (
+		day               TEXT NOT NULL,
+		api               TEXT NOT NULL DEFAULT '',
+		requests          BIGINT NOT NULL DEFAULT 0,
+		successful        BIGINT NOT NULL DEFAULT 0,
+		tokens            BIGINT NOT NULL DEFAULT 0,
+		prompt_tokens     BIGINT NOT NULL DEFAULT 0,
+		completion_tokens BIGINT NOT NULL DEFAULT 0,
+		PRIMARY KEY (day, api)
 	)`,
 
 	`CREATE TABLE IF NOT EXISTS settings (

@@ -138,10 +138,21 @@ func (s *Store) foldDaily(ctx context.Context, batch []UsageLog) {
 		return
 	}
 	loc := dailyLocation()
-	type agg struct{ req, ok, tok int64 }
+	type agg struct{ req, ok, tok, prompt, completion int64 }
+	add := func(a *agg, u UsageLog) {
+		a.req++
+		if u.Status >= 200 && u.Status < 400 {
+			a.ok++
+		}
+		a.tok += u.TotalTokens
+		a.prompt += u.PromptTokens
+		a.completion += u.CompletionTokens
+	}
 	days := map[string]*agg{}
 	type mkey struct{ day, model string }
 	models := map[mkey]*agg{}
+	type akey struct{ day, api string }
+	apis := map[akey]*agg{}
 	for _, u := range batch {
 		ts := u.TS
 		if ts == 0 {
@@ -153,38 +164,61 @@ func (s *Store) foldDaily(ctx context.Context, batch []UsageLog) {
 			d = &agg{}
 			days[day] = d
 		}
-		d.req++
-		if u.Status >= 200 && u.Status < 400 {
-			d.ok++
-		}
-		d.tok += u.TotalTokens
+		add(d, u)
 		mk := mkey{day, u.Model}
 		m := models[mk]
 		if m == nil {
 			m = &agg{}
 			models[mk] = m
 		}
-		m.req++
-		m.tok += u.TotalTokens
+		add(m, u)
+		ak := akey{day, u.API}
+		a := apis[ak]
+		if a == nil {
+			a = &agg{}
+			apis[ak] = a
+		}
+		add(a, u)
 	}
-	const dayQuery = `INSERT INTO request_daily (day, requests, successful, tokens) VALUES (?,?,?,?)
+	const dayQuery = `INSERT INTO request_daily
+			(day, requests, successful, tokens, prompt_tokens, completion_tokens) VALUES (?,?,?,?,?,?)
 		ON CONFLICT(day) DO UPDATE SET
 			requests = request_daily.requests + excluded.requests,
 			successful = request_daily.successful + excluded.successful,
-			tokens = request_daily.tokens + excluded.tokens`
+			tokens = request_daily.tokens + excluded.tokens,
+			prompt_tokens = request_daily.prompt_tokens + excluded.prompt_tokens,
+			completion_tokens = request_daily.completion_tokens + excluded.completion_tokens`
 	for day, a := range days {
-		if _, err := s.exec(ctx, dayQuery, day, a.req, a.ok, a.tok); err != nil {
+		if _, err := s.exec(ctx, dayQuery, day, a.req, a.ok, a.tok, a.prompt, a.completion); err != nil {
 			log.Printf("[报表] 累加日统计失败（%s）: %v", day, err)
 			return
 		}
 	}
-	const modelQuery = `INSERT INTO request_daily_model (day, model, requests, tokens) VALUES (?,?,?,?)
+	const modelQuery = `INSERT INTO request_daily_model
+			(day, model, requests, successful, tokens, prompt_tokens, completion_tokens) VALUES (?,?,?,?,?,?,?)
 		ON CONFLICT(day, model) DO UPDATE SET
 			requests = request_daily_model.requests + excluded.requests,
-			tokens = request_daily_model.tokens + excluded.tokens`
+			successful = request_daily_model.successful + excluded.successful,
+			tokens = request_daily_model.tokens + excluded.tokens,
+			prompt_tokens = request_daily_model.prompt_tokens + excluded.prompt_tokens,
+			completion_tokens = request_daily_model.completion_tokens + excluded.completion_tokens`
 	for k, a := range models {
-		if _, err := s.exec(ctx, modelQuery, k.day, k.model, a.req, a.tok); err != nil {
+		if _, err := s.exec(ctx, modelQuery, k.day, k.model, a.req, a.ok, a.tok, a.prompt, a.completion); err != nil {
 			log.Printf("[报表] 累加模型统计失败（%s/%s）: %v", k.day, k.model, err)
+			return
+		}
+	}
+	const apiQuery = `INSERT INTO request_daily_api
+			(day, api, requests, successful, tokens, prompt_tokens, completion_tokens) VALUES (?,?,?,?,?,?,?)
+		ON CONFLICT(day, api) DO UPDATE SET
+			requests = request_daily_api.requests + excluded.requests,
+			successful = request_daily_api.successful + excluded.successful,
+			tokens = request_daily_api.tokens + excluded.tokens,
+			prompt_tokens = request_daily_api.prompt_tokens + excluded.prompt_tokens,
+			completion_tokens = request_daily_api.completion_tokens + excluded.completion_tokens`
+	for k, a := range apis {
+		if _, err := s.exec(ctx, apiQuery, k.day, k.api, a.req, a.ok, a.tok, a.prompt, a.completion); err != nil {
+			log.Printf("[报表] 累加协议统计失败（%s/%s）: %v", k.day, k.api, err)
 			return
 		}
 	}
