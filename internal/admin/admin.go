@@ -23,6 +23,7 @@ import (
 	"github.com/3166790565/raccoon-relay/internal/creds"
 	"github.com/3166790565/raccoon-relay/internal/login"
 	"github.com/3166790565/raccoon-relay/internal/logmgr"
+	"github.com/3166790565/raccoon-relay/internal/modelrules"
 	"github.com/3166790565/raccoon-relay/internal/pool"
 	"github.com/3166790565/raccoon-relay/internal/raccoon"
 	"github.com/3166790565/raccoon-relay/internal/relay"
@@ -44,10 +45,15 @@ type Panel struct {
 	loginMgr *login.Manager
 	// snImport 处理日日新账号密码导入；nil 表示未配置。
 	snImport *login.SenseNovaImporter
-	sched    *scheduler.Scheduler
-	balancer *creditsync.Balancer
-	logs     *logmgr.Manager
-	renewer  *relay.Renewer
+	// 模型管理：snClient 用于连通性测试，catalog 提供实时清单，
+	// modelRules 是启停/映射/能力位的规则层。
+	snClient     *sensenova.Client
+	modelCatalog *relay.Catalog
+	modelRules   *modelrules.Manager
+	sched        *scheduler.Scheduler
+	balancer     *creditsync.Balancer
+	logs         *logmgr.Manager
+	renewer      *relay.Renewer
 	// report 是报表聚合的短时缓存：面板会按几秒一次的节奏自动刷新，
 	// 每次都重新跑一遍聚合没必要，缓存 5 秒足够。
 	reportMu   sync.Mutex
@@ -146,7 +152,7 @@ func (p *Panel) Route(w http.ResponseWriter, r *http.Request) {
 	case path == "/admin" || path == "/admin/" || path == "/":
 		p.serveIndex(w, r)
 		return
-	case path == "/admin/app.js" || path == "/admin/style.css":
+	case path == "/admin/app.js" || path == "/admin/models.js" || path == "/admin/style.css":
 		p.serveStatic(w, r, strings.TrimPrefix(path, "/admin/"))
 		return
 	case path == "/api/login" && r.Method == http.MethodPost:
@@ -227,6 +233,22 @@ func (p *Panel) Route(w http.ResponseWriter, r *http.Request) {
 		p.handleManual(w, r)
 	case path == "/api/auth/sensenova" && r.Method == http.MethodPost:
 		p.handleSenseNovaImport(w, r)
+	case path == "/api/models/manage" && r.Method == http.MethodGet:
+		p.handleModelManage(w, r)
+	case path == "/api/models/state" && r.Method == http.MethodPost:
+		p.handleModelState(w, r)
+	case path == "/api/models/mappings" && r.Method == http.MethodPost:
+		p.handleModelMapping(w, r)
+	case path == "/api/models/mappings/remove" && r.Method == http.MethodPost:
+		p.handleModelMappingRemove(w, r)
+	case path == "/api/models/custom" && r.Method == http.MethodPost:
+		p.handleModelCustom(w, r)
+	case path == "/api/models/custom/remove" && r.Method == http.MethodPost:
+		p.handleModelCustomRemove(w, r)
+	case path == "/api/models/capabilities" && r.Method == http.MethodPost:
+		p.handleModelCapabilities(w, r)
+	case path == "/api/models/test" && r.Method == http.MethodPost:
+		p.handleModelTest(w, r)
 	case strings.HasPrefix(path, "/api/accounts/"):
 		p.handleAccountAction(w, r)
 	case strings.HasPrefix(path, "/api/keys/"):

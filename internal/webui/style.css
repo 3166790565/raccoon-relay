@@ -856,3 +856,15 @@ button[disabled] { opacity: .5; cursor: not-allowed; }
   .rp-rank-row .meter { display: none; }
   .rp-trend-controls { margin-left: 0; width: 100%; }
 }
+
+/* ---------- 模型管理页 ---------- */
+/* 筛选栏是一条横向工具条：搜索框吃剩余宽度，下拉与按钮保持内容宽度。
+   页面里的 .row 默认会换行，这里显式不换行并让输入框收缩。 */
+#page-models .model-toolbar {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+#page-models .model-toolbar input { flex: 1 1 200px; min-width: 160px; }
+#page-models .model-toolbar select { flex: 0 0 auto; width: auto; min-width: 120px; }
+#page-models .model-toolbar button { flex: 0 0 auto; }
+#modelTable td .pill { margin-right: 4px; }

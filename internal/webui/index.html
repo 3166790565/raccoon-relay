@@ -33,6 +33,7 @@
       <button class="navtab" data-page="accounts">号池</button>
       <button class="navtab" data-page="checkin">签到中心</button>
       <button class="navtab" data-page="add">添加账号</button>
+      <button class="navtab" data-page="models">模型</button>
       <button class="navtab" data-page="keys">API Keys</button>
       <button class="navtab" data-page="logs">调用日志</button>
       <button class="navtab" data-page="syslogs">运行日志</button>
@@ -509,6 +510,69 @@
           <pre class="out" id="importOut"></pre>
         </div>
       </section>
+    </section>
+
+    <!-- 模型管理 -->
+    <section class="page xwide" id="page-models">
+      <section class="card">
+        <div class="cardhead">
+          <h2>模型</h2>
+        </div>
+        <div class="model-toolbar">
+          <input id="modelSearch" placeholder="搜索模型 / 别名" style="min-width:180px">
+          <select id="modelProvider"><option value="">全部供应商</option></select>
+          <select id="modelState">
+            <option value="">全部状态</option>
+            <option value="on">已启用</option>
+            <option value="off">已停用</option>
+            <option value="custom">自定义</option>
+          </select>
+          <button class="ghost tiny" id="modelRefreshBtn">刷新</button>
+          <button class="ghost tiny" id="modelAddCustomBtn">＋ 登记自定义模型</button>
+        </div>
+        <p class="hint">
+          模型清单来自上游实时接口（10 分钟缓存）。停用后不再对下游广告；
+          别名让客户端用稳定的对外名，后端可随时换到别的上游模型。
+        </p>
+        <div class="tablewrap">
+          <table id="modelTable">
+            <thead><tr>
+              <th>模型</th><th>供应商</th><th>来源</th>
+              <th>上下文</th><th>最大输出</th><th>能力</th>
+              <th>别名</th><th>启用</th><th></th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="cardhead">
+          <h2>模型映射</h2>
+          <button class="ghost tiny" id="modelAddMappingBtn">＋ 新建映射</button>
+        </div>
+        <p class="hint">对外名 → 上游模型。自映射（同名）是每一行的默认绑定，只能关闭、不能删除。</p>
+        <div class="tablewrap">
+          <table id="mappingTable">
+            <thead><tr>
+              <th>对外名</th><th>上游模型</th><th>供应商</th>
+              <th>思考等级</th><th>状态</th><th></th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <div class="modal-scrim" id="modelDialog" hidden>
+        <div class="modal">
+          <div class="modal-head">
+            <h3 id="modelDialogTitle">映射</h3>
+            <button class="ghost tiny" id="modelDialogClose">关闭</button>
+          </div>
+          <div class="modal-body" id="modelDialogForm"></div>
+          <p class="err" id="modelDialogErr"></p>
+        </div>
+      </div>
     </section>
 
     <!-- API Keys -->
@@ -1014,6 +1078,7 @@
   </div>
 </main>
 
+<script src="/admin/models.js"></script>
 <script src="/admin/app.js"></script>
 </body>
 </html>

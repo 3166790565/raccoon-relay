@@ -22,6 +22,7 @@ import (
 	"github.com/3166790565/raccoon-relay/internal/eventlog"
 	"github.com/3166790565/raccoon-relay/internal/login"
 	"github.com/3166790565/raccoon-relay/internal/logmgr"
+	"github.com/3166790565/raccoon-relay/internal/modelrules"
 	"github.com/3166790565/raccoon-relay/internal/pool"
 	"github.com/3166790565/raccoon-relay/internal/raccoon"
 	"github.com/3166790565/raccoon-relay/internal/relay"
@@ -240,6 +241,10 @@ func main() {
 
 	panel := admin.New(cfg, st, client, refresher, po, cool, engine, lm, sch, balancer, lmgr, renewer, srv, up, version, requestRestart, webFS)
 	panel.SetSenseNovaImporter(snImporter)
+	// 模型管理：规则层同时喂给数据面（映射改写、/v1/models 过滤）与管理面。
+	modelMgr := modelrules.NewManager(context.Background(), st)
+	srv.SetModelRules(modelMgr.Rules)
+	panel.SetModelCatalog(catalog, modelMgr, snClient)
 	// 面板里改过的选号策略/重试策略优先于环境变量，保证重启后仍然生效
 	panel.ApplyStoredSettings(context.Background())
 

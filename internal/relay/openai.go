@@ -307,7 +307,7 @@ func (s *Server) HandleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	model, _ := body["model"].(string)
 	streamReq := boolOf(body["stream"])
 
-	cc := BuildChatContext(model, body, DefaultModel, SessionKeyOf(r, body))
+	cc := s.buildChatContext(model, body, SessionKeyOf(r, body))
 	start := time.Now()
 
 	// 并发上限：超出时在这里排队，拿到槽位才继续；不直接拒绝。
@@ -374,10 +374,24 @@ func (s *Server) HandleModels(w http.ResponseWriter, r *http.Request) {
 	}
 	models := s.catalog.List(r.Context())
 	data := make([]any, 0, len(models))
+	now := time.Now().Unix()
 	for _, m := range models {
+		m := m
+		// 模型管理里停用的模型不对外广告；启用时按 provider 判定。
+		if s.Rules != nil && s.Rules.Hidden(m.ID) {
+			continue
+		}
 		data = append(data, map[string]any{
-			"id": m.ID, "object": "model", "created": time.Now().Unix(), "owned_by": "raccoon",
+			"id": m.ID, "object": "model", "created": now, "owned_by": "raccoon",
 		})
+		// 指向这个模型的显式别名也一并广告，客户端才能请求它。
+		if s.Rules != nil {
+			for _, alias := range s.Rules.AliasesOf(m.ID) {
+				data = append(data, map[string]any{
+					"id": alias, "object": "model", "created": now, "owned_by": "raccoon",
+				})
+			}
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data})
 }

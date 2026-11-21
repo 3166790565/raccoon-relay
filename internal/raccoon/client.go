@@ -133,6 +133,8 @@ type Model struct {
 	ContextLength   int    `json:"contextLength"`
 	MaxOutputTokens int    `json:"maxOutputTokens"`
 	SupportsImages  bool   `json:"supportsImages"`
+	SupportsTools   bool   `json:"supportsTools"`
+	SupportsReason  bool   `json:"supportsReasoning"`
 }
 
 type RefreshResult struct {

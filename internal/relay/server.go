@@ -132,10 +132,20 @@ type Server struct {
 	catalog *Catalog
 	// sem 是跨实例并发闸门；nil 表示不限制并发。
 	sem cache.Semaphore
+	// Rules 是模型管理规则；nil 表示未启用（不做映射改写）。
+	Rules ModelRules
 }
 
 func NewServer(cfg *config.Config, st *store.Store, engine *Engine, catalog *Catalog) *Server {
 	return &Server{cfg: cfg, st: st, engine: engine, catalog: catalog}
+}
+
+// SetModelRules 注入模型管理规则（装配层调用）。
+func (s *Server) SetModelRules(r ModelRules) { s.Rules = r }
+
+// buildChatContext 按当前模型规则构造转发上下文。
+func (s *Server) buildChatContext(model string, body map[string]any, sessionKey string) *ChatContext {
+	return BuildChatContextWithRules(s.Rules, model, body, DefaultModel, sessionKey)
 }
 
 // auth 从 Authorization 或 x-api-key 取 Key 并校验。

@@ -3,11 +3,13 @@ package sensenova
 // 内置模型快照：来自平台自己的 /v1/models（context_length / max_output_length）。
 // 只在实时清单拉不到时兜底，保证没登录的部署也有可选项。
 type Model struct {
-	ID            string
-	Name          string
-	ContextLength int
-	MaxOutput     int
-	SupportsImage bool
+	ID             string
+	Name           string
+	ContextLength  int
+	MaxOutput      int
+	SupportsImage  bool
+	SupportsTools  bool
+	SupportsReason bool
 }
 
 // FallbackModels 是日日新的模型阵容快照，只在实时清单拉不到时兜底

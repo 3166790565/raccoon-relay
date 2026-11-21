@@ -145,6 +145,8 @@ func (u *Upstream) ModelsFor(ctx context.Context, acc *store.Account) []raccoon.
 			ContextLength:   m.ContextLength,
 			MaxOutputTokens: m.MaxOutput,
 			SupportsImages:  m.SupportsImage,
+			SupportsTools:   m.SupportsTools,
+			SupportsReason:  m.SupportsReason,
 		})
 	}
 	return out

@@ -79,11 +79,12 @@ func (c *Client) LiveModels(ctx context.Context, apiKey string) []Model {
 	}
 	var data struct {
 		Data []struct {
-			ID               string   `json:"id"`
-			ContextLength    int      `json:"context_length"`
-			MaxOutputLength  int      `json:"max_output_length"`
-			InputModalities  []string `json:"input_modalities"`
-			OutputModalities []string `json:"output_modalities"`
+			ID                string   `json:"id"`
+			ContextLength     int      `json:"context_length"`
+			MaxOutputLength   int      `json:"max_output_length"`
+			InputModalities   []string `json:"input_modalities"`
+			OutputModalities  []string `json:"output_modalities"`
+			SupportedFeatures []string `json:"supported_features"`
 		} `json:"data"`
 	}
 	if json.Unmarshal(raw, &data) != nil {
@@ -99,11 +100,13 @@ func (c *Client) LiveModels(ctx context.Context, apiKey string) []Model {
 			continue
 		}
 		out = append(out, Model{
-			ID:            m.ID,
-			Name:          m.ID,
-			ContextLength: m.ContextLength,
-			MaxOutput:     m.MaxOutputLength,
-			SupportsImage: containsStr(m.InputModalities, "image"),
+			ID:             m.ID,
+			Name:           m.ID,
+			ContextLength:  m.ContextLength,
+			MaxOutput:      m.MaxOutputLength,
+			SupportsImage:  containsStr(m.InputModalities, "image"),
+			SupportsTools:  containsStr(m.SupportedFeatures, "tools"),
+			SupportsReason: containsStr(m.SupportedFeatures, "reasoning"),
 		})
 	}
 	return out

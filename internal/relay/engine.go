@@ -579,7 +579,9 @@ func (e *Engine) ensureSNKey(ctx context.Context, acc *store.Account) (string, e
 
 // ChatContext 是一次请求的输入。
 type ChatContext struct {
-	Model       string
+	Model string
+	// PublicModel 是客户端请求里的对外名（未经映射改写）。流水与回显用它。
+	PublicModel string
 	Body        map[string]any
 	Title       string
 	SessionSeed string
@@ -587,6 +589,16 @@ type ChatContext struct {
 	// 与 SessionSeed 不同：后者是「内容哈希」（每轮都变），
 	// 前者是「这段对话是谁」，多轮之间不变。
 	SessionKey string
+}
+
+// ModelRules 是模型管理规则的只读视图，由装配层注入（避免 relay 依赖具体实现）。
+type ModelRules interface {
+	// Resolve 把对外名翻译成 (上游模型, 思考等级)。ok=false 表示没有映射。
+	Resolve(model string) (target, reasoning string, ok bool)
+	// Hidden 判断某个上游模型是否被停用（不对外广告）。
+	Hidden(id string) bool
+	// AliasesOf 返回指向该上游模型的启用别名。
+	AliasesOf(id string) []string
 }
 
 // Result 是转发结果的元信息。
@@ -609,6 +621,22 @@ type OpenAISink interface {
 // sessionKey 由调用方从请求头/请求体里取（x-session-id / conversation_id 等），
 // 用于会话粘性。取不到就是空串，粘性自动关闭，不影响转发。
 func BuildChatContext(model string, body map[string]any, defaultModel, sessionKey string) *ChatContext {
+	return BuildChatContextWithRules(nil, model, body, defaultModel, sessionKey)
+}
+
+// BuildChatContextWithRules 与 BuildChatContext 相同，但先按模型管理里的
+// 映射把「对外名」翻译成上游真实模型名。rules 为 nil 时不做改写。
+//
+// 改写只影响发给上游的 model 字段；流水与会话粘性用原始对外名，
+// 这样客户端看到的模型名始终稳定。
+func BuildChatContextWithRules(rules ModelRules, model string, body map[string]any, defaultModel, sessionKey string) *ChatContext {
+	original := model
+	if rules != nil {
+		if target, level, ok := rules.Resolve(model); ok {
+			model = target
+			body = withReasoning(body, level)
+		}
+	}
 	prepared := raccoon.PrepareBody(model, body, defaultModel)
 	messages, _ := prepared["messages"].([]any)
 	title := ""
@@ -622,7 +650,32 @@ func BuildChatContext(model string, body map[string]any, defaultModel, sessionKe
 		Title:       title,
 		SessionSeed: string(seed),
 		SessionKey:  sessionKey,
+		// PublicModel 是对外名：流水的 model 列与下游回显都用它。
+		PublicModel: original,
 	}
+}
+
+// withReasoning 把映射上绑定的思考等级写进请求体。只在客户端没显式指定时
+// 注入 —— 与 Agent2API 的「映射等级是默认值，不覆盖客户端选择」一致。
+func withReasoning(body map[string]any, level string) map[string]any {
+	level = strings.TrimSpace(level)
+	if level == "" || level == "off" || level == "none" {
+		return body
+	}
+	if _, ok := body["reasoning_effort"]; ok {
+		return body
+	}
+	if r, ok := body["reasoning"].(map[string]any); ok {
+		if _, ok := r["effort"]; ok {
+			return body
+		}
+	}
+	out := make(map[string]any, len(body)+1)
+	for k, v := range body {
+		out[k] = v
+	}
+	out["reasoning_effort"] = level
+	return out
 }
 
 // SessionKeyOf 从请求头或请求体里取会话标识，用于会话粘性。

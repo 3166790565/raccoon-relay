@@ -91,6 +91,7 @@ const PAGE_LOADERS = {
   accounts: () => loadAccounts(),
   checkin: () => loadCheckinCenter(),
   add: () => Promise.resolve(),
+  models: () => loadModels(),
   keys: () => loadKeys(),
   logs: () => ensureLogFacets().then(() => loadLogs()),
   syslogs: () => loadSysLogs(),
