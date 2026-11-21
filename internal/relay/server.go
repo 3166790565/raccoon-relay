@@ -134,7 +134,8 @@ func (s *Server) logUsage(ctx context.Context, res Result, err error, start time
 	if usage != nil {
 		u.PromptTokens, u.CompletionTokens, u.TotalTokens = usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens
 	}
-	_ = s.st.AddUsage(ctx, u)
+	// 异步写：每个请求同步 INSERT 在单连接 SQLite 上会排队等写锁。
+	s.st.AddUsageAsync(u)
 }
 
 // Route 是数据面的顶层分发。

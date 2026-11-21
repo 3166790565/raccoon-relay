@@ -231,6 +231,8 @@ func main() {
 	_ = httpServer.Shutdown(shutdownCtx)
 	// 让日志文件刷盘后再 exec，否则最后几行「已安装」会丢。
 	lmgr.Close()
+	// 把异步流水队列里剩下的记录写完，避免丢最后一批账。
+	st.FlushUsage()
 
 	if restartTarget != "" {
 		// 传安装目标而不是让 Restart 自己找：容器里进程是 /app/relay 起的，

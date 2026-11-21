@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -19,6 +20,14 @@ type Store struct {
 	db      *sql.DB
 	cipher  *Cipher
 	dialect dialect
+
+	// 热路径缓存：Key 校验命中、last_used 写节流、账号列表快照。
+	keys keyCacheState
+	snap accountSnapshot
+	// usage 异步写入器，见 usage_async.go。
+	usageOnce    sync.Once
+	usageQ       chan UsageLog
+	usagePending int64
 }
 
 // Options 是打开存储层的完整参数。零值等价于纯 SQLite 本地模式。
@@ -95,6 +104,8 @@ func OpenWithOptions(o Options) (*Store, error) {
 	db.SetMaxIdleConns(maxIdle)
 
 	s := &Store{db: db, cipher: c, dialect: d}
+	s.keys.hits = map[string]keyCacheEntry{}
+	s.keys.touched = map[string]time.Time{}
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, err

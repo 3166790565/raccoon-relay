@@ -110,7 +110,16 @@ func (s *Store) scanAccount(sc interface{ Scan(...any) error }) (*Account, error
 	return &a, nil
 }
 
+// ListAccounts 返回全部账号（已解密）。
+//
+// 走 1 秒进程内快照：选号在每个请求（以及每次换号重试）时都会调它，
+// 而全表读取 + 逐行 AES 解密在热路径上代价很高。
+// 所有账号写操作都会失效快照，多副本之间最多滞后 1 秒。
 func (s *Store) ListAccounts(ctx context.Context) ([]*Account, error) {
+	return s.listAccountsCached(ctx)
+}
+
+func (s *Store) listAccountsDB(ctx context.Context) ([]*Account, error) {
 	// 并列时按 id 排序：两种方言的并列顺序都不确定，多实例批量 UPDATE
 	// 若顺序不一致会放大死锁概率。
 	rows, err := s.query(ctx, `SELECT `+accountCols+` FROM accounts ORDER BY created_at ASC, id ASC`)
@@ -175,6 +184,9 @@ func (s *Store) CreateAccount(ctx context.Context, a *Account) error {
 		a.DeviceID, a.DeviceName, a.OSVersion, a.OfficeIdentity, a.Platform, a.ClientChannel,
 		a.Language, string(meta), a.Priority, enabled, a.LastCheckinDay,
 		a.CreatedAt, a.UpdatedAt, a.LastUsed)
+	if err == nil {
+		s.invalidateAccounts()
+	}
 	return err
 }
 
@@ -261,6 +273,9 @@ func (s *Store) UpdateAccount(ctx context.Context, id string, p AccountPatch) er
 	}
 	args = append(args, id)
 	_, err := s.exec(ctx, `UPDATE accounts SET `+joinComma(sets)+` WHERE id = ?`, args...)
+	if err == nil {
+		s.invalidateAccounts()
+	}
 	return err
 }
 
@@ -273,7 +288,11 @@ func (s *Store) DeleteAccount(ctx context.Context, id string) error {
 	if err := s.deleteAccountRows(ctx, tx, id); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.invalidateAccounts()
+	return nil
 }
 
 // deleteAccountRows 删掉账号及挂在它下面的冷却与签到记录。
@@ -366,7 +385,13 @@ func (s *Store) PurgeDeadAccounts(ctx context.Context, ids []string) (int, error
 		}
 		deleted++
 	}
-	return deleted, tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	if deleted > 0 {
+		s.invalidateAccounts()
+	}
+	return deleted, nil
 }
 
 func joinComma(items []string) string {
