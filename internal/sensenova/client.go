@@ -13,13 +13,18 @@ package sensenova
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"net/url"
 	"strings"
@@ -36,8 +41,14 @@ const (
 	IAMBase      = "https://iam.sensecoreapi.cn"
 	IAMAuthN     = "https://iam.sensecoreapi.cn/iam/authn"
 	ClientID     = "nova"
+	// SigninBase 发放 JWKS，控制台前端用它的公钥加密密码后再提交登录。
+	SigninBase = "https://signin.sensecore.cn"
+	// JWKSKid 是前端指定的那把公钥（原本是签名钥，前端改作加密用）。
+	JWKSKid = "public:hydra.openid.id-token"
 	// TokenPlanBase 是 OpenAI 兼容推理地址，模型请求与 /models 都打这里。
 	TokenPlanBase = "https://token.sensenova.cn/v1"
+	// jwksTTL 控制公钥缓存时长；公钥轮换很少，10 分钟足够。
+	jwksTTL = 10 * time.Minute
 	// OAuthScope 是网页端授权时的原值。
 	OAuthScope = "openid offline offline_access"
 	// UserAgent：登录页面对非常规 UA 有风控，固定一个普通浏览器 UA。
@@ -60,6 +71,12 @@ type Client struct {
 	Lite     string
 	IAM      string
 	Token    string
+	Signin   string
+
+	// jwks 缓存登录密码加密用的公钥。
+	jwksMu sync.Mutex
+	jwks   *rsa.PublicKey
+	jwksAt time.Time
 
 	// modelsMu 缓存实时模型清单，避免每次 /v1/models 都打上游。
 	modelsMu  sync.Mutex
@@ -81,6 +98,7 @@ func NewClient(timeout time.Duration) *Client {
 		Lite:           PlatformLite,
 		IAM:            IAMBase,
 		Token:          TokenPlanBase,
+		Signin:         SigninBase,
 		modelsTTL:      10 * time.Minute,
 	}
 }
@@ -266,6 +284,119 @@ func (j *cookieJar) header() string {
 	return strings.Join(parts, "; ")
 }
 
+/* -------------------------------------------------------- 登录密码加密 */
+
+// loginJWKS 是控制台前端依赖的公钥集接口。
+type loginJWKS struct {
+	Keys []struct {
+		Kid string `json:"kid"`
+		Kty string `json:"kty"`
+		N   string `json:"n"`
+		E   string `json:"e"`
+	} `json:"keys"`
+}
+
+// loginPublicKey 取登录密码加密用的 RSA 公钥（带 10 分钟缓存）。
+// 控制台前端会拿 signin 站 JWKS 里 kid=public:hydra.openid.id-token 的公钥，
+// 按 RSA-OAEP 加密，缺这个后端会直接判「账号或密码错误」。
+func (c *Client) loginPublicKey(ctx context.Context) *rsa.PublicKey {
+	c.jwksMu.Lock()
+	if c.jwks != nil && time.Since(c.jwksAt) < jwksTTL {
+		key := c.jwks
+		c.jwksMu.Unlock()
+		return key
+	}
+	c.jwksMu.Unlock()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.Signin+"/.well-known/jwks.json", nil)
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", UserAgent)
+	res, err := c.httpClient().Do(req)
+	if err != nil {
+		return nil
+	}
+	defer res.Body.Close()
+	if res.StatusCode >= 400 {
+		return nil
+	}
+	var set loginJWKS
+	if json.Unmarshal(limitReader(res.Body), &set) != nil {
+		return nil
+	}
+	for _, k := range set.Keys {
+		if k.Kid != JWKSKid || k.N == "" || k.E == "" {
+			continue
+		}
+		n, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(k.N, "="))
+		if err != nil {
+			continue
+		}
+		e, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(k.E, "="))
+		if err != nil || len(e) > 4 {
+			continue
+		}
+		exponent := 0
+		for _, b := range e {
+			exponent = exponent<<8 | int(b)
+		}
+		pub := &rsa.PublicKey{N: new(big.Int).SetBytes(n), E: exponent}
+		if pub.N.BitLen() < 2048 || pub.E <= 1 {
+			continue
+		}
+		c.jwksMu.Lock()
+		c.jwks, c.jwksAt = pub, time.Now()
+		c.jwksMu.Unlock()
+		return pub
+	}
+	return nil
+}
+
+// encryptPassword 复刻控制台前端的做法：把密码塞进 JWE 里用 RSA-OAEP 加密，
+// 载荷用 A256GCM。失败（取不到公钥或加密异常）返回空串，调用方退回明文。
+func (c *Client) encryptPassword(ctx context.Context, password string) string {
+	key := c.loginPublicKey(ctx)
+	if key == nil {
+		return ""
+	}
+	cek := make([]byte, 32)
+	iv := make([]byte, 12)
+	if _, err := rand.Read(cek); err != nil {
+		return ""
+	}
+	if _, err := rand.Read(iv); err != nil {
+		return ""
+	}
+	// 前端用的 jose 里 "RSA-OAEP" 对应 OAEP+SHA-1（不是 RSA-OAEP-256）。
+	wrapped, err := rsa.EncryptOAEP(sha1.New(), rand.Reader, key, cek, nil)
+	if err != nil {
+		return ""
+	}
+	block, err := aes.NewCipher(cek)
+	if err != nil {
+		return ""
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return ""
+	}
+	header, _ := json.Marshal(map[string]string{"alg": "RSA-OAEP", "enc": "A256GCM"})
+	protected := b64url(header)
+	// JWE 的 AAD 是 protected header 的 base64url 字符串（ASCII 字节）。
+	sealed := gcm.Seal(nil, iv, []byte(password), []byte(protected))
+	// Go 的 GCM 把 16 字节认证标签拼在密文末尾，JWE 要求它单独占第 5 段。
+	tagAt := len(sealed) - gcm.Overhead()
+	return strings.Join([]string{
+		protected,
+		b64url(wrapped),
+		b64url(iv),
+		b64url(sealed[:tagAt]),
+		b64url(sealed[tagAt:]),
+	}, ".")
+}
+
 /* ------------------------------------------------------------------ 登录 */
 
 // LoginResult 是一次控制台登录的结果。
@@ -345,12 +476,16 @@ func (c *Client) Login(ctx context.Context, username, password string) (*LoginRe
 		}
 	}
 
-	// 与 magpie-sensenova / Agent2API 一致：明文密码 + is_encrypt:false。
+	// 控制台前端总是把密码加密后再提交；拿不到公钥时才退回明文。
+	passwordField, encrypted := password, false
+	if enc := c.encryptPassword(ctx, password); enc != "" {
+		passwordField, encrypted = enc, true
+	}
 	loginBody, _ := json.Marshal(map[string]any{
 		"username":   username,
-		"password":   password,
+		"password":   passwordField,
 		"challenge":  challengeValue,
-		"is_encrypt": false,
+		"is_encrypt": encrypted,
 	})
 	loginReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		c.IAM+"/iam/authn/v1/auth/nova/login", strings.NewReader(string(loginBody)))
@@ -653,17 +788,29 @@ func (c *Client) redirectlessClient() *http.Client {
 
 /* -------------------------------------------------------------- API Key */
 
+// TokenPlanKeyType 是 Token Plan 订阅下推理可用的 Key 类型。
+// 旧接口 /iam/idp/v1/apiKeys 建出的 Key 没有这个类型，调推理恒定 401。
+const TokenPlanKeyType = "API_KEY_TYPE_TOKEN_PLAN"
+
 // CreateAPIKey 用控制台登录票创建一枚 API Key，返回明文。
-// 控制台的「API-Key 管理」走的也是这个接口，Key 的明文只在创建响应里出现一次。
+//
+// 控制台的「API-Key 管理」走的是 lite 控制台接口，请求体必须带
+// key_type=API_KEY_TYPE_TOKEN_PLAN；Key 的明文只在创建响应里出现一次。
 func (c *Client) CreateAPIKey(ctx context.Context, consoleToken, name string) (string, error) {
-	body, _ := json.Marshal(map[string]string{"displayname": name})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.IAM+"/iam/idp/v1/apiKeys", strings.NewReader(string(body)))
+	body, _ := json.Marshal(map[string]string{
+		"displayname": name,
+		"key_type":    TokenPlanKeyType,
+	})
+	target := c.Lite + "/console/v1/metered/api-keys"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, strings.NewReader(string(body)))
 	if err != nil {
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Authorization", "Bearer "+consoleToken)
+	req.Header.Set("Origin", c.Platform)
+	req.Header.Set("Referer", c.Platform+"/console/keys")
 	req.Header.Set("User-Agent", UserAgent)
 	res, err := c.httpClient().Do(req)
 	if err != nil {
@@ -673,11 +820,13 @@ func (c *Client) CreateAPIKey(ctx context.Context, consoleToken, name string) (s
 	raw := limitReader(res.Body)
 	var data struct {
 		APIKeyPlain string `json:"api_key_plain"`
-		APIKey      string `json:"api_key"`
-		Message     string `json:"message"`
+		APIKey      struct {
+			APIKey string `json:"api_key"`
+		} `json:"api_key"`
+		Message string `json:"message"`
 	}
 	_ = json.Unmarshal(raw, &data)
-	key := firstNonEmpty(data.APIKeyPlain, data.APIKey)
+	key := firstNonEmpty(data.APIKeyPlain, data.APIKey.APIKey)
 	if res.StatusCode >= 400 || key == "" {
 		detail := data.Message
 		if detail == "" {
@@ -688,14 +837,18 @@ func (c *Client) CreateAPIKey(ctx context.Context, consoleToken, name string) (s
 	return strings.TrimSpace(key), nil
 }
 
-// ListAPIKeys 返回控制台里已有 Key 的掩码清单，仅用于排障展示。
+// ListAPIKeys 返回控制台下该账号已有 Key 的数量，仅用于排障展示。
 func (c *Client) ListAPIKeys(ctx context.Context, consoleToken string) (int, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.IAM+"/iam/idp/v1/apiKeys?page_size=50", nil)
+	target := c.Lite + "/console/v1/metered/api-keys?key_type=" + TokenPlanKeyType + "&page_size=50"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
 		return 0, err
 	}
 	req.Header.Set("Authorization", "Bearer "+consoleToken)
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Origin", c.Platform)
+	req.Header.Set("Referer", c.Platform+"/console/keys")
+	req.Header.Set("User-Agent", UserAgent)
 	res, err := c.httpClient().Do(req)
 	if err != nil {
 		return 0, newError("api-key", "读取 API Key 列表失败", err.Error())
@@ -705,6 +858,7 @@ func (c *Client) ListAPIKeys(ctx context.Context, consoleToken string) (int, err
 	if res.StatusCode >= 400 {
 		return 0, newError("api-key", "读取 API Key 列表失败", fmt.Sprintf("HTTP %d", res.StatusCode))
 	}
+	// lite 接口返回掩码清单（内容被脱敏），这里只数条目。
 	var data struct {
 		APIKeys []struct {
 			APIKey string `json:"api_key"`

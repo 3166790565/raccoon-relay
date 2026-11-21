@@ -2,7 +2,14 @@ package sensenova
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha1"
+	"encoding/base64"
 	"encoding/json"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -79,6 +86,7 @@ func TestLoginFollowsRedirectsManually(t *testing.T) {
 			if body.Challenge != challenge {
 				t.Errorf("提交的 challenge=%q", body.Challenge)
 			}
+			// 测试里 IAM 与响应站不同源，取不到 JWKS → 退回明文并标 is_encrypt=false
 			if body.Username != "1516020" || body.Password != "pw" || body.IsEncrypt {
 				t.Errorf("提交的凭据=%+v", body)
 			}
@@ -94,12 +102,98 @@ func TestLoginFollowsRedirectsManually(t *testing.T) {
 	c := NewClient(5 * time.Second)
 	c.Platform = platform.URL
 	c.IAM = iam.URL
+	c.Signin = platform.URL + "/signin" // 不连外网；没公钥就走明文
 	res, err := c.Login(context.Background(), "1516020", "pw")
 	if err != nil {
 		t.Fatalf("登录失败: %v", err)
 	}
 	if res.AccessToken == "" || res.RefreshToken != "refresh-1" || res.TenantID != "t-1" {
 		t.Fatalf("登录结果不对: %+v", res)
+	}
+}
+
+// encryptPassword 要生成控制台同款 compact JWE：RSA-OAEP(SHA-1) 包 CEK，
+// A256GCM 载荷，AAD 是 protected header 的 base64url 字符串，
+// 认证标签单独占第 5 段。
+func TestEncryptPasswordRoundTrip(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"keys": []map[string]string{{
+			"kid": JWKSKid, "kty": "RSA",
+			"n": b64url(key.N.Bytes()),
+			"e": b64url(big.NewInt(int64(key.E)).Bytes()),
+		}}})
+	}))
+	defer srv.Close()
+
+	c := NewClient(5 * time.Second)
+	c.Signin = srv.URL
+	token := c.encryptPassword(context.Background(), "s3cret-pw")
+	if token == "" {
+		t.Fatal("应当生成 JWE")
+	}
+	parts := strings.Split(token, ".")
+	if len(parts) != 5 {
+		t.Fatalf("compact JWE 应有 5 段，实际 %d", len(parts))
+	}
+	wrap, _ := base64.RawURLEncoding.DecodeString(parts[1])
+	cek, err := rsa.DecryptOAEP(sha1.New(), rand.Reader, key, wrap, nil)
+	if err != nil {
+		t.Fatalf("解 CEK 失败: %v", err)
+	}
+	iv, _ := base64.RawURLEncoding.DecodeString(parts[2])
+	ct, _ := base64.RawURLEncoding.DecodeString(parts[3])
+	tag, _ := base64.RawURLEncoding.DecodeString(parts[4])
+	if len(tag) != 16 {
+		t.Fatalf("认证标签应单独占第 5 段且为 16 字节，实际 %d", len(tag))
+	}
+	block, _ := aes.NewCipher(cek)
+	gcm, _ := cipher.NewGCM(block)
+	plain, err := gcm.Open(nil, iv, append(ct, tag...), []byte(parts[0]))
+	if err != nil {
+		t.Fatalf("解载荷失败: %v", err)
+	}
+	if string(plain) != "s3cret-pw" {
+		t.Fatalf("载荷=%q", plain)
+	}
+}
+
+// 建 Key 必须走 lite 控制台接口并带 key_type，否则建出来的 Key 调推理恒 401。
+func TestCreateAPIKeyUsesTokenPlanType(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/lite/console/v1/metered/api-keys" {
+			t.Errorf("建 Key 路径=%q", r.URL.Path)
+		}
+		var body struct {
+			DisplayName string `json:"displayname"`
+			KeyType     string `json:"key_type"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body.KeyType != TokenPlanKeyType {
+			t.Errorf("key_type=%q", body.KeyType)
+		}
+		if body.DisplayName != "rr" {
+			t.Errorf("displayname=%q", body.DisplayName)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"api_key":       map[string]string{"api_key": "sk-masked****"},
+			"api_key_plain": "sk-plain-123",
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClient(5 * time.Second)
+	c.Lite = srv.URL + "/lite"
+	c.Platform = srv.URL
+	key, err := c.CreateAPIKey(context.Background(), "tok", "rr")
+	if err != nil {
+		t.Fatalf("建 Key 失败: %v", err)
+	}
+	if key != "sk-plain-123" {
+		t.Fatalf("应取明文 Key，实际 %q", key)
 	}
 }
 
