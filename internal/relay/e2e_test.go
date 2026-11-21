@@ -497,35 +497,45 @@ func TestServerErrorDoesNotCool(t *testing.T) {
 	}
 }
 
-// 100041 是上游对内容（敏感词）的拒答，与账号无关：不冷却、不换号，直接回 400。
+// 100041 / 100042 是上游对内容（敏感词）的拒答，与账号无关：不冷却、不换号，直接回 400。
 func TestContentRejectedNotRetried(t *testing.T) {
-	h := newHarness(t, []chatResult{
-		{status: 400, errCode: 100041, errMsg: "内容包含敏感词"},
-		{status: 200, frames: sseFrames("不该走到这里"), usage: usageFrame},
-	})
-	a := h.addAccount(t, "pu-1", 100)
-	h.addAccount(t, "pu-2", 100)
+	for _, c := range []struct {
+		name string
+		code int
+	}{
+		{"100041", 100041},
+		{"100042", 100042},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHarness(t, []chatResult{
+				{status: 400, errCode: c.code, errMsg: "内容包含敏感词"},
+				{status: 200, frames: sseFrames("不该走到这里"), usage: usageFrame},
+			})
+			a := h.addAccount(t, "pu-1", 100)
+			h.addAccount(t, "pu-2", 100)
 
-	w := h.do(t, "POST", "/v1/chat/completions",
-		`{"model":"sn-test-model","messages":[{"role":"user","content":"敏感内容"}]}`)
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("100041 应回 400，实际 %d：%s", w.Code, w.Body.String())
-	}
-	if !strings.Contains(w.Body.String(), "敏感词") {
-		t.Fatalf("应透出上游可读文案: %s", w.Body.String())
-	}
-	h.up.mu.Lock()
-	hits := h.up.chatHits
-	h.up.mu.Unlock()
-	if hits != 1 {
-		t.Fatalf("100041 不该换号重试，实际打了 %d 次", hits)
-	}
-	acc, _ := h.st.GetAccount(context.Background(), a.ID)
-	if acc.Status != store.StatusOnline || acc.CoolUntil != 0 {
-		t.Fatalf("100041 不该冷却账号，实际 %s/%d", acc.Status, acc.CoolUntil)
-	}
-	if h.cool.IsModelCooled(a.ID, "sn-test-model") {
-		t.Fatal("100041 不该冷却「账号 × 模型」")
+			w := h.do(t, "POST", "/v1/chat/completions",
+				`{"model":"sn-test-model","messages":[{"role":"user","content":"敏感内容"}]}`)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("%d 应回 400，实际 %d：%s", c.code, w.Code, w.Body.String())
+			}
+			if !strings.Contains(w.Body.String(), "敏感词") {
+				t.Fatalf("应透出上游可读文案: %s", w.Body.String())
+			}
+			h.up.mu.Lock()
+			hits := h.up.chatHits
+			h.up.mu.Unlock()
+			if hits != 1 {
+				t.Fatalf("%d 不该换号重试，实际打了 %d 次", c.code, hits)
+			}
+			acc, _ := h.st.GetAccount(context.Background(), a.ID)
+			if acc.Status != store.StatusOnline || acc.CoolUntil != 0 {
+				t.Fatalf("%d 不该冷却账号，实际 %s/%d", c.code, acc.Status, acc.CoolUntil)
+			}
+			if h.cool.IsModelCooled(a.ID, "sn-test-model") {
+				t.Fatalf("%d 不该冷却「账号 × 模型」", c.code)
+			}
+		})
 	}
 }
 

@@ -1569,7 +1569,7 @@ function evMessageCell(e) {
     ? `<span class="ev-repeat" title="同一事件在合并窗口内重复出现，已折叠">近 ${e.count} 次</span>`
     : '';
   return `<div class="ev-msg">
-    <div class="ev-msg-main" title="${esc(e.message)}">${esc(e.message)}${countHint}</div>
+    <div class="ev-msg-main" title="${esc(e.message)}"><span class="ev-msg-text">${esc(e.message)}</span>${countHint}</div>
     ${sub ? `<div class="ev-msg-sub" title="${esc(first)}">${esc(sub)}</div>` : ''}
   </div>`;
 }

@@ -20,7 +20,7 @@ import (
 //
 // 不冷却、只换号重试的失败（NonCooling）：
 //   403 / 5xx / 网络 → 上游波动，换号即可，账号保持在线
-//   100041 敏感词   → 请求内容被上游拒答，与账号无关，不换号直接返回
+//   100041/100042 敏感词 → 请求内容被上游拒答，与账号无关，不换号直接返回
 
 // coolResetWindow：冷却早已结束、且超过这么久没有再犯，就当作新的一条失败链，
 // 从 3 分钟重新开始。否则一个号每天偶尔 429 一次，冷却时间会无限累加。
@@ -390,7 +390,7 @@ const (
 	FailRate            FailKind = "rate"             // 429（模型级冷却关闭时的兜底）
 	FailTransient       FailKind = "transient"        // 403 / 5xx / 网络：上游波动，不冷却，直接换号
 	FailRelogin         FailKind = "relogin"          // 401 且刷新失败
-	FailRejected        FailKind = "rejected"         // 100041 敏感词拒答：与账号无关，不冷却、不换号
+	FailRejected        FailKind = "rejected"         // 100041/100042 敏感词拒答：与账号无关，不冷却、不换号
 	FailModelScoped     FailKind = "model_scoped"     // 模型级问题，罚账号×模型
 	FailAccountAbnormal FailKind = "account_abnormal" // 200108 账号异常，账号级阶梯冷却
 	FailOther           FailKind = "other"

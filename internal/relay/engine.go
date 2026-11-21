@@ -184,7 +184,7 @@ func (e *Engine) RunOpenAI(ctx context.Context, req *ChatContext, sink OpenAISin
 		} else if !switchable {
 			action = "该错误不值得换号，直接报错"
 		}
-		// 403/5xx/网络波动与 100041 内容拒答都不停号，事件里要如实写「未冷却」，
+		// 403/5xx/网络波动与 100041/100042 内容拒答都不停号，事件里要如实写「未冷却」，
 		// 否则面板上会以为这个号被罚过。
 		if pool.NonCooling(kind) && !at.Started {
 			if switchable {

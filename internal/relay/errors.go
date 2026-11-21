@@ -28,8 +28,8 @@ func classify(err error) (pool.FailKind, bool, int, string) {
 	}
 	msg := cleanMessage(ue.Error())
 	switch {
-	case ue.Code == codeContentRejected:
-		// 100041 是上游对内容本身的拒答（命中敏感词），跟账号无关：
+	case isContentRejectedCode(ue.Code):
+		// 100041 / 100042 是上游对内容本身的拒答（命中敏感词），跟账号无关：
 		// 换号重试只会拿另一个号再问一遍同样的话，必然还是拒答。
 		// 不冷却、不换号，直接把错误交给调用方。
 		return pool.FailRejected, false, http.StatusBadRequest, msg
@@ -101,7 +101,16 @@ const (
 	// codeContentRejected = 100041：上游因内容命中敏感词拒答。这是请求本身的问题，
 	// 换号、重试都不会改变结果，也不该让任何账号吃冷却。
 	codeContentRejected = 100041
+	// codeSensitiveContent = 100042：上游另一条「请求内容包含敏感内容」的拒答码，
+	// 与 100041 同义（下游请求里的内容被判敏感），走同一套处理：不重试、回 400。
+	codeSensitiveContent = 100042
 )
+
+// isContentRejectedCode 判断业务码是否属于「请求内容被上游拒答」。
+// 这类错误只取决于下游发来的内容，与账号无关，因此永不冷却、永不换号。
+func isContentRejectedCode(code int) bool {
+	return code == codeContentRejected || code == codeSensitiveContent
+}
 
 // isModelScoped 判断错误是否只针对「账号 × 模型」：换号无用，罚模型即可。
 func isModelScoped(err error) bool {

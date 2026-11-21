@@ -506,11 +506,14 @@ button.tiny { padding: 4px 9px; font-size: 12px; }
 
 .ev-wrap { max-height: calc(100vh - 340px); }
 
-/* 表格列宽：时间 / 级别 / 来源都是定宽，摘要吃剩余宽度 */
+/* 表格列宽：时间 / 级别 / 来源都是定宽，摘要吃剩余宽度。
+   固定布局：长错误只在单元格里省略，不撑开表格。 */
+.ev-table { table-layout: fixed; }
 .ev-c-time { width: 168px; white-space: nowrap; }
 .ev-c-level { width: 76px; }
 .ev-c-scope { width: 104px; }
 .ev-c-account { width: 168px; max-width: 180px; }
+.ev-c-msg { min-width: 0; }
 .ev-c-count { width: 70px; text-align: center; }
 .ev-c-detail { width: 62px; text-align: right; }
 
@@ -521,8 +524,12 @@ button.tiny { padding: 4px 9px; font-size: 12px; }
 
 .ev-msg { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .ev-msg-main {
-  font-size: 13px; color: #dfe4ee; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  display: flex; align-items: baseline; gap: 8px;
+  font-size: 13px; color: #dfe4ee;
+  display: flex; align-items: baseline; gap: 8px; min-width: 0;
+}
+/* 省略号必须落在真正的文本节点上，flex 容器自身不会截断文本 */
+.ev-msg-text {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .ev-msg-sub {
   font-size: 11px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;

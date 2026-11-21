@@ -90,23 +90,32 @@ func TestBlockedMessageNotMisleading(t *testing.T) {
 	}
 }
 
-// 100041 是内容拒答，与账号无关：不换号、不冷却，对外回 400。
+// 100041 / 100042 都是内容拒答，与账号无关：不换号、不冷却，对外回 400。
 func TestClassifyContentRejected(t *testing.T) {
-	for _, status := range []int{400, 403, 429} {
-		kind, switchable, code, msg := classify(&raccoon.UpstreamError{
-			Status: status, Code: 100041, Message: "内容包含敏感词",
-		})
-		if kind != pool.FailRejected {
-			t.Fatalf("HTTP %d + code 100041 应归为内容拒答，实际 %s", status, kind)
-		}
-		if switchable {
-			t.Fatal("100041 不该换号重试：换号也还是同一段内容")
-		}
-		if code != http.StatusBadRequest {
-			t.Fatalf("对外应回 400，实际 %d", code)
-		}
-		if msg == "" {
-			t.Fatal("应给出可读文案")
+	cases := []struct {
+		name string
+		code int
+	}{
+		{"100041 敏感词", 100041},
+		{"100042 敏感内容", 100042},
+	}
+	for _, c := range cases {
+		for _, status := range []int{400, 403, 429} {
+			kind, switchable, code, msg := classify(&raccoon.UpstreamError{
+				Status: status, Code: c.code, Message: "内容包含敏感词",
+			})
+			if kind != pool.FailRejected {
+				t.Fatalf("HTTP %d + code %d（%s）应归为内容拒答，实际 %s", status, c.code, c.name, kind)
+			}
+			if switchable {
+				t.Fatalf("%d 不该换号重试：换号也还是同一段内容", c.code)
+			}
+			if code != http.StatusBadRequest {
+				t.Fatalf("对外应回 400，实际 %d", code)
+			}
+			if msg == "" {
+				t.Fatal("应给出可读文案")
+			}
 		}
 	}
 }
