@@ -325,6 +325,17 @@ func (s *Store) GetSetting(ctx context.Context, key, def string) string {
 	return v
 }
 
+// GetSettingOK 与 GetSetting 的区别是能区分「键不存在」与「存的是空串」。
+// 有些设置项的空值是合法配置（例如 User-Agent 留空表示按版本号自动派生），
+// 用 GetSetting 读会把「用户主动清空」和「从没设置过」混为一谈。
+func (s *Store) GetSettingOK(ctx context.Context, key string) (string, bool) {
+	var v string
+	if err := s.queryRow(ctx, `SELECT value FROM settings WHERE key = ?`, key).Scan(&v); err != nil {
+		return "", false
+	}
+	return v, true
+}
+
 func (s *Store) SetSetting(ctx context.Context, key, value string) error {
 	_, err := s.exec(ctx,
 		`INSERT INTO settings (key, value) VALUES (?,?)

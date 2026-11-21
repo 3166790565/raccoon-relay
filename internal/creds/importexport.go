@@ -400,6 +400,9 @@ func (im *Importer) importOne(ctx context.Context, a Account) ImportResult {
 		return ImportResult{OK: true, UID: uid, ID: existing.ID, Updated: true}
 	}
 
+	// 新号的指纹取当前生效值：面板里改过桌面平台/系统版本后，
+	// 之后导入的号应当与正在跑的请求保持同一套客户端身份。
+	fp := raccoon.CurrentFingerprint()
 	acc := &store.Account{
 		UID:            uid,
 		Name:           name,
@@ -413,9 +416,9 @@ func (im *Importer) importOne(ctx context.Context, a Account) ImportResult {
 		ExpiresAt:      a.ExpiresAt,
 		DeviceID:       deviceID,
 		DeviceName:     raccoon.IdentityFor(uid, deviceID, "", "", "", officeIdentity, "").DeviceName,
-		OSVersion:      raccoon.DefaultOSVersion,
+		OSVersion:      fp.OSVersion,
 		OfficeIdentity: officeIdentity,
-		Platform:       raccoon.DefaultDesktopPlat,
+		Platform:       fp.DesktopPlatform,
 		ClientChannel:  "stable",
 		Language:       "zh",
 		Meta:           meta,

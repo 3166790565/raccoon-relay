@@ -978,6 +978,8 @@ func (p *Panel) ApplyStoredSettings(ctx context.Context) {
 	p.applyStoredLogSettings(ctx)
 	p.applyStoredRenewSettings(ctx)
 	p.applyStoredConcurrencySettings(ctx)
+	p.applyStoredFingerprintSettings(ctx)
+	p.applyStoredDispatchSettings(ctx)
 }
 
 // applyStoredCheckinSettings 恢复面板里改过的签到配置。
@@ -1103,6 +1105,12 @@ func (p *Panel) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	for k, v := range p.concurrencySettings() {
 		settings[k] = v
 	}
+	for k, v := range p.fingerprintSettings() {
+		settings[k] = v
+	}
+	for k, v := range p.dispatchSettings() {
+		settings[k] = v
+	}
 	writeJSON(w, 200, map[string]any{"ok": true, "settings": settings})
 }
 
@@ -1158,6 +1166,287 @@ func (p *Panel) logSettings() map[string]any {
 	return out
 }
 
+// applyStoredFingerprintSettings 把面板里改过的客户端指纹盖回进程级配置。
+//
+// 指纹不是账号属性，而是「整台机器怎么对上游自称」：改一次就该对
+// 之后所有请求（对话、签到、余额、续期）同时生效，且重启后仍然生效。
+func (p *Panel) applyStoredFingerprintSettings(ctx context.Context) {
+	fp := raccoon.CurrentFingerprint()
+	getStr := func(key string, dst *string) {
+		if raw := p.st.GetSetting(ctx, key, ""); raw != "" {
+			*dst = raw
+		}
+	}
+	// UA 允许被显式存成空串（表示「按版本号自动派生」），所以这里用
+	// GetSettingOK 区分「没有这个键」与「存的是空值」——前者保留环境变量默认值，
+	// 后者要把 UA 清空、改回自动派生。
+	getUA := func(key string, dst *string) {
+		if raw, ok := p.st.GetSettingOK(ctx, key); ok {
+			*dst = raw
+		}
+	}
+	getStr("clientVersion", &fp.ClientVersion)
+	getStr("webClientVersion", &fp.WebClientVersion)
+	getStr("clientOSVersion", &fp.OSVersion)
+	getStr("clientPlatform", &fp.DesktopPlatform)
+	getUA("clientUserAgent", &fp.ChatUserAgent)
+	getUA("webUserAgent", &fp.WebUserAgent)
+	raccoon.SetFingerprint(fp)
+}
+
+// fingerprintSettings 供面板读取当前生效的指纹。
+func (p *Panel) fingerprintSettings() map[string]any {
+	fp := raccoon.CurrentFingerprint()
+	return map[string]any{
+		"clientVersion":    fp.ClientVersion,
+		"webClientVersion": fp.WebClientVersion,
+		"clientOSVersion":  fp.OSVersion,
+		"clientPlatform":   fp.DesktopPlatform,
+		// 原始值（空 = 自动派生）。面板要把「留空」这个选择原样回填出来，
+		// 所以这里不能用 CurrentFingerprint 里派生后的 UA。
+		"clientUserAgent": fp.ChatUserAgent,
+		"webUserAgent":    fp.WebUserAgent,
+		// 派生后的实际值，供面板做「当前实际发送」的提示。
+		"effectiveClientUserAgent": fp.ChatUA(),
+		"effectiveWebUserAgent":    fp.WebUA(),
+	}
+}
+
+// applyFingerprintSettings 校验并热更新客户端指纹。
+// 版本/平台留空视为「不改」；UA 留空表示按版本号自动派生，是合法值。
+func (p *Panel) applyFingerprintSettings(ctx context.Context, body settingsBody) error {
+	if body.ClientVersion == nil && body.WebClientVersion == nil && body.ClientOSVersion == nil &&
+		body.ClientPlatform == nil && body.ClientUserAgent == nil && body.WebUserAgent == nil {
+		return nil
+	}
+	fp := raccoon.CurrentFingerprint()
+	setStr := func(dst *string, v *string, label string) error {
+		if v == nil {
+			return nil
+		}
+		s := strings.TrimSpace(*v)
+		if s == "" {
+			return fmt.Errorf("%s不能为空", label)
+		}
+		// 头字段里出现换行/控制字符会让整个请求被判非法，宁可拒绝也不发出去。
+		for _, r := range s {
+			if r < 0x20 || r == 0x7f {
+				return fmt.Errorf("%s含有非法控制字符", label)
+			}
+		}
+		if len(s) > 128 {
+			return fmt.Errorf("%s过长（最多 128 字符）", label)
+		}
+		*dst = s
+		return nil
+	}
+	if err := setStr(&fp.ClientVersion, body.ClientVersion, "对话端版本号"); err != nil {
+		return err
+	}
+	if err := setStr(&fp.WebClientVersion, body.WebClientVersion, "管理面版本号"); err != nil {
+		return err
+	}
+	if err := setStr(&fp.OSVersion, body.ClientOSVersion, "系统版本"); err != nil {
+		return err
+	}
+	if err := setStr(&fp.DesktopPlatform, body.ClientPlatform, "桌面平台"); err != nil {
+		return err
+	}
+	// UA 可以留空（自动派生）；非空时同样要求是合法头值。
+	if body.ClientUserAgent != nil {
+		ua := strings.TrimSpace(*body.ClientUserAgent)
+		if err := validateHeaderValue(ua, "对话端 User-Agent"); err != nil {
+			return err
+		}
+		fp.ChatUserAgent = ua
+	}
+	if body.WebUserAgent != nil {
+		ua := strings.TrimSpace(*body.WebUserAgent)
+		if err := validateHeaderValue(ua, "管理面 User-Agent"); err != nil {
+			return err
+		}
+		fp.WebUserAgent = ua
+	}
+	raccoon.SetFingerprint(fp)
+	// 写库存的是归一化后的值：UA 留空也照样持久化，重启后仍然是「自动派生」。
+	stored := raccoon.CurrentFingerprint()
+	_ = p.st.SetSetting(ctx, "clientVersion", stored.ClientVersion)
+	_ = p.st.SetSetting(ctx, "webClientVersion", stored.WebClientVersion)
+	_ = p.st.SetSetting(ctx, "clientOSVersion", stored.OSVersion)
+	_ = p.st.SetSetting(ctx, "clientPlatform", stored.DesktopPlatform)
+	_ = p.st.SetSetting(ctx, "clientUserAgent", stored.ChatUserAgent)
+	_ = p.st.SetSetting(ctx, "webUserAgent", stored.WebUserAgent)
+	return nil
+}
+
+// validateHeaderValue 拒绝含控制字符或过长的头值。空串是允许的（表示自动派生）。
+func validateHeaderValue(s, label string) error {
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("%s含有非法控制字符", label)
+		}
+	}
+	if len(s) > 256 {
+		return fmt.Errorf("%s过长（最多 256 字符）", label)
+	}
+	return nil
+}
+
+// dispatchSettings 返回当前生效的「调度」相关参数。
+//
+// 这四项共同决定「一次请求失败后长什么样」：是否串行、失败后要不要等、
+// 这个号要不要短暂避让、下一轮是不是还回同一段对话的号。
+func (p *Panel) dispatchSettings() map[string]any {
+	lease := p.po.LeaseConfig()
+	bo := p.po.BackoffPolicy()
+	affinity, ttl := p.engine.AffinityPolicy()
+	return map[string]any{
+		"retryDelayMS":    int(p.engine.RetryDelay().Milliseconds()),
+		"leaseEnabled":    lease.Enabled,
+		"leaseTTLSec":     int(lease.TTL.Seconds()),
+		"backoffEnabled":  bo.Enabled,
+		"backoffBaseMS":   int(bo.Base.Milliseconds()),
+		"backoffMaxMS":    int(bo.Max.Milliseconds()),
+		"affinityEnabled": affinity,
+		"affinityTTLSec":  int(ttl.Seconds()),
+	}
+}
+
+// applyStoredDispatchSettings 把持久化的调度参数盖回运行中的号池与引擎。
+func (p *Panel) applyStoredDispatchSettings(ctx context.Context) {
+	getInt := func(key string) (int, bool) {
+		raw := p.st.GetSetting(ctx, key, "")
+		if raw == "" {
+			return 0, false
+		}
+		n, err := strconv.Atoi(raw)
+		return n, err == nil
+	}
+	getBool := func(key string) (bool, bool) {
+		raw := p.st.GetSetting(ctx, key, "")
+		if raw == "" {
+			return false, false
+		}
+		b, err := strconv.ParseBool(raw)
+		return b, err == nil
+	}
+	if n, ok := getInt("retryDelayMS"); ok && n >= 0 {
+		p.engine.SetRetryDelay(time.Duration(n) * time.Millisecond)
+	}
+	lease := p.po.LeaseConfig()
+	if b, ok := getBool("leaseEnabled"); ok {
+		lease.Enabled = b
+	}
+	if n, ok := getInt("leaseTTLSec"); ok && n > 0 {
+		lease.TTL = time.Duration(n) * time.Second
+	}
+	p.po.SetLeaseConfig(lease)
+
+	bo := p.po.BackoffPolicy()
+	if b, ok := getBool("backoffEnabled"); ok {
+		bo.Enabled = b
+	}
+	if n, ok := getInt("backoffBaseMS"); ok && n > 0 {
+		bo.Base = time.Duration(n) * time.Millisecond
+	}
+	if n, ok := getInt("backoffMaxMS"); ok && n > 0 {
+		bo.Max = time.Duration(n) * time.Millisecond
+	}
+	p.po.SetBackoffPolicy(bo)
+
+	affinity, ttl := p.engine.AffinityPolicy()
+	if b, ok := getBool("affinityEnabled"); ok {
+		affinity = b
+	}
+	if n, ok := getInt("affinityTTLSec"); ok && n > 0 {
+		ttl = time.Duration(n) * time.Second
+	}
+	p.engine.SetAffinityPolicy(affinity, ttl)
+}
+
+// applyDispatchSettings 校验并热更新调度参数，全部落地成功才写库。
+//
+// 一次保存涉及号池与引擎两处状态，所以先整体校验、再一起应用，
+// 避免出现「号池改了、引擎没改」的半套配置。
+func (p *Panel) applyDispatchSettings(ctx context.Context, body settingsBody) error {
+	if body.RetryDelayMS == nil && body.LeaseEnabled == nil && body.LeaseTTLSec == nil &&
+		body.BackoffEnabled == nil && body.BackoffBaseMS == nil && body.BackoffMaxMS == nil &&
+		body.AffinityEnabled == nil && body.AffinityTTLSec == nil {
+		return nil
+	}
+
+	retryDelay := int(p.engine.RetryDelay().Milliseconds())
+	lease := p.po.LeaseConfig()
+	bo := p.po.BackoffPolicy()
+	affinity, affinityTTL := p.engine.AffinityPolicy()
+
+	if body.RetryDelayMS != nil {
+		n := *body.RetryDelayMS
+		if n < 0 || n > 60_000 {
+			return fmt.Errorf("换号间隔必须在 0~60000 毫秒之间")
+		}
+		retryDelay = n
+	}
+	if body.LeaseTTLSec != nil {
+		n := *body.LeaseTTLSec
+		// 下限 30 秒：太短会让长回答跑到一半就失去独占；
+		// 上限 1 小时：太长则进程崩溃后的残租约要等很久才回收。
+		if n < 30 || n > 3600 {
+			return fmt.Errorf("租约时长必须在 30~3600 秒之间")
+		}
+		lease.TTL = time.Duration(n) * time.Second
+	}
+	if body.LeaseEnabled != nil {
+		lease.Enabled = *body.LeaseEnabled
+	}
+	if body.BackoffBaseMS != nil {
+		n := *body.BackoffBaseMS
+		if n < 100 || n > 600_000 {
+			return fmt.Errorf("退避起点必须在 100~600000 毫秒之间")
+		}
+		bo.Base = time.Duration(n) * time.Millisecond
+	}
+	if body.BackoffMaxMS != nil {
+		n := *body.BackoffMaxMS
+		if n < 100 || n > 3_600_000 {
+			return fmt.Errorf("退避上限必须在 100~3600000 毫秒之间")
+		}
+		bo.Max = time.Duration(n) * time.Millisecond
+	}
+	if body.BackoffEnabled != nil {
+		bo.Enabled = *body.BackoffEnabled
+	}
+	// 上限小于起点会让退避时长立刻被截断，等于退化成固定值，不是用户想要的。
+	if bo.Max < bo.Base {
+		return fmt.Errorf("退避上限（%dms）不能小于起点（%dms）", bo.Max.Milliseconds(), bo.Base.Milliseconds())
+	}
+	if body.AffinityTTLSec != nil {
+		n := *body.AffinityTTLSec
+		if n < 60 || n > 30*24*3600 {
+			return fmt.Errorf("会话绑定时长必须在 60~%d 秒之间", 30*24*3600)
+		}
+		affinityTTL = time.Duration(n) * time.Second
+	}
+	if body.AffinityEnabled != nil {
+		affinity = *body.AffinityEnabled
+	}
+
+	p.engine.SetRetryDelay(time.Duration(retryDelay) * time.Millisecond)
+	p.po.SetLeaseConfig(lease)
+	p.po.SetBackoffPolicy(bo)
+	p.engine.SetAffinityPolicy(affinity, affinityTTL)
+
+	_ = p.st.SetSetting(ctx, "retryDelayMS", strconv.Itoa(retryDelay))
+	_ = p.st.SetSetting(ctx, "leaseEnabled", strconv.FormatBool(lease.Enabled))
+	_ = p.st.SetSetting(ctx, "leaseTTLSec", strconv.Itoa(int(lease.TTL.Seconds())))
+	_ = p.st.SetSetting(ctx, "backoffEnabled", strconv.FormatBool(bo.Enabled))
+	_ = p.st.SetSetting(ctx, "backoffBaseMS", strconv.Itoa(int(bo.Base.Milliseconds())))
+	_ = p.st.SetSetting(ctx, "backoffMaxMS", strconv.Itoa(int(bo.Max.Milliseconds())))
+	_ = p.st.SetSetting(ctx, "affinityEnabled", strconv.FormatBool(affinity))
+	_ = p.st.SetSetting(ctx, "affinityTTLSec", strconv.Itoa(int(affinityTTL.Seconds())))
+	return nil
+}
+
 // settingsBody 是 /api/settings PUT 的请求体。所有字段都是指针：
 // 只处理客户端显式提交的项，未提交的保持原值。
 type settingsBody struct {
@@ -1190,6 +1479,22 @@ type settingsBody struct {
 
 	MaxConcurrent *int `json:"maxConcurrent"`
 	QueueWaitSec  *int `json:"queueWaitSec"`
+
+	ClientVersion    *string `json:"clientVersion"`
+	WebClientVersion *string `json:"webClientVersion"`
+	ClientOSVersion  *string `json:"clientOSVersion"`
+	ClientPlatform   *string `json:"clientPlatform"`
+	ClientUserAgent  *string `json:"clientUserAgent"`
+	WebUserAgent     *string `json:"webUserAgent"`
+
+	RetryDelayMS    *int  `json:"retryDelayMS"`
+	LeaseEnabled    *bool `json:"leaseEnabled"`
+	LeaseTTLSec     *int  `json:"leaseTTLSec"`
+	BackoffEnabled  *bool `json:"backoffEnabled"`
+	BackoffBaseMS   *int  `json:"backoffBaseMS"`
+	BackoffMaxMS    *int  `json:"backoffMaxMS"`
+	AffinityEnabled *bool `json:"affinityEnabled"`
+	AffinityTTLSec  *int  `json:"affinityTTLSec"`
 }
 
 func (p *Panel) handlePutSettings(w http.ResponseWriter, r *http.Request) {
@@ -1269,6 +1574,14 @@ func (p *Panel) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := p.applyConcurrencySettings(r.Context(), body); err != nil {
+		writeJSON(w, 400, map[string]any{"ok": false, "message": err.Error()})
+		return
+	}
+	if err := p.applyFingerprintSettings(r.Context(), body); err != nil {
+		writeJSON(w, 400, map[string]any{"ok": false, "message": err.Error()})
+		return
+	}
+	if err := p.applyDispatchSettings(r.Context(), body); err != nil {
 		writeJSON(w, 400, map[string]any{"ok": false, "message": err.Error()})
 		return
 	}

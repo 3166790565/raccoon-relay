@@ -306,7 +306,7 @@ func (s *Server) HandleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	model, _ := body["model"].(string)
 	streamReq := boolOf(body["stream"])
 
-	cc := BuildChatContext(model, body, DefaultModel)
+	cc := BuildChatContext(model, body, DefaultModel, SessionKeyOf(r, body))
 	start := time.Now()
 
 	// 并发上限：超出时在这里排队，拿到槽位才继续；不直接拒绝。

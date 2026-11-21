@@ -40,17 +40,21 @@ func IdentityFor(uid, deviceID, osVersion, platform, clientChannel, officeIdenti
 	seedSum := sha256.Sum256([]byte("agenthub:raccoon:" + defaultStr(uid, "anon")))
 	seed := hex.EncodeToString(seedSum[:])
 
+	// 缺省值与发往上游的指纹保持同一来源：面板里改了桌面平台/系统版本后，
+	// 新入库的号也应当按新值落库，而不是继续写死出厂值。
+	fp := CurrentFingerprint()
+
 	did := strings.TrimSpace(deviceID)
 	if did == "" {
 		did = deriveFromSeed(seed)
 	}
 	plat := strings.TrimSpace(platform)
 	if plat == "" {
-		plat = "desktop-windows-x64"
+		plat = fp.DesktopPlatform
 	}
 	osv := strings.TrimSpace(osVersion)
 	if osv == "" {
-		osv = "10.0.26200"
+		osv = fp.OSVersion
 	}
 	ch := strings.TrimSpace(clientChannel)
 	if ch == "" {

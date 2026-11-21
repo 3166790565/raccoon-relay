@@ -280,17 +280,25 @@ func (s *Store) migrate() error {
 
 // ensureAccountColumns 给历史版本的 accounts 表补上后来新增的列。
 // SQLite 用 PRAGMA 判断；Postgres 在 pgSchema 里已包含，无需处理。
+//
+// 新列必须同时加到 sqliteSchema 的建表语句里：全新库靠建表语句，
+// 老库靠这里的 ALTER，两边的默认值要一致。
 func (s *Store) ensureAccountColumns() error {
-	has, err := columnExists(s.db, "accounts", "max_concurrent")
-	if err != nil {
-		return fmt.Errorf("检查 accounts 列失败: %w", err)
+	cols := []struct{ name, ddl string }{
+		{"max_concurrent", `ALTER TABLE accounts ADD COLUMN max_concurrent INTEGER NOT NULL DEFAULT 0`},
+		{"lease_until", `ALTER TABLE accounts ADD COLUMN lease_until INTEGER NOT NULL DEFAULT 0`},
 	}
-	if has {
-		return nil
-	}
-	_, err = s.db.Exec(`ALTER TABLE accounts ADD COLUMN max_concurrent INTEGER NOT NULL DEFAULT 0`)
-	if err != nil {
-		return fmt.Errorf("补充 accounts.max_concurrent 失败: %w", err)
+	for _, c := range cols {
+		has, err := columnExists(s.db, "accounts", c.name)
+		if err != nil {
+			return fmt.Errorf("检查 accounts.%s 列失败: %w", c.name, err)
+		}
+		if has {
+			continue
+		}
+		if _, err := s.db.Exec(c.ddl); err != nil {
+			return fmt.Errorf("补充 accounts.%s 失败: %w", c.name, err)
+		}
 	}
 	return nil
 }

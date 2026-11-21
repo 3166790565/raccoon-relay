@@ -119,6 +119,16 @@ func main() {
 	events := eventlog.New(st)
 	go events.Start(ctx)
 
+	// 客户端指纹先落地：后续所有上游请求（对话、签到、余额、续期）都读这份进程级配置。
+	raccoon.SetFingerprint(raccoon.Fingerprint{
+		ClientVersion:    cfg.ClientVersion,
+		WebClientVersion: cfg.WebClientVersion,
+		OSVersion:        cfg.OSVersion,
+		DesktopPlatform:  cfg.DesktopPlatform,
+		ChatUserAgent:    cfg.ChatUserAgent,
+		WebUserAgent:     cfg.WebUserAgent,
+	})
+
 	client := raccoon.NewClient(cfg.UpstreamBase, time.Duration(cfg.UpstreamTimeoutSec)*time.Second)
 	// 对话流不能套总时限：长回答会被硬掐在超时点。改用上游空闲超时。
 	client.IdleTimeout = cfg.StreamIdleTimeout
@@ -130,6 +140,16 @@ func main() {
 		})
 	})
 	po := pool.New(st, cfg.PoolStrategy, cool)
+	// 单号串行与换号退避的初始值来自环境变量，面板保存后会热更新。
+	po.SetLeaseConfig(pool.LeaseConfig{
+		Enabled: cfg.LeaseEnabled,
+		TTL:     time.Duration(cfg.LeaseTTLSec) * time.Second,
+	})
+	po.SetBackoffPolicy(pool.BackoffPolicy{
+		Enabled: cfg.BackoffEnabled,
+		Base:    time.Duration(cfg.BackoffBaseMS) * time.Millisecond,
+		Max:     time.Duration(cfg.BackoffMaxMS) * time.Millisecond,
+	})
 	po.SetCreditPolicy(pool.CreditPolicy{
 		Enabled:     cfg.CreditStopEnable,
 		StopBelow:   cfg.CreditStopBelow,
@@ -139,6 +159,8 @@ func main() {
 	catalog := relay.NewCatalog(st, client, relay.DefaultModel)
 	engine := relay.BuildEngine(cfg, st, po, cool, client, refresher)
 	engine.Event = func(ev store.RuntimeEvent) { events.Emit(ev) }
+	engine.SetRetryDelay(time.Duration(cfg.RetryDelayMS) * time.Millisecond)
+	engine.SetAffinityPolicy(cfg.AffinityEnabled, time.Duration(cfg.AffinityTTLSec)*time.Second)
 	srv := relay.NewServer(cfg, st, engine, catalog)
 	// 并发闸门始终注入：面板里可能随时把上限从 0 改成非 0，
 	// 届时要能立刻生效，而不是等重启。上限为 0 时 acquireSlot 直接放行。
@@ -240,6 +262,10 @@ func main() {
 				// 积分阈值规则按余额巡检：余额是异步变化的（签到、手动查余额），
 				// 在选号时硬过滤之外再定期落一次状态，面板上才看得到谁被暂停了。
 				po.ApplyCreditPolicy(ctx)
+				// 清理过期会话绑定与早已失效的退避记录，避免两张表无限增长。
+				now := time.Now().UnixMilli()
+				_, _ = st.PruneSessions(ctx, now)
+				_, _ = st.PruneBackoffs(ctx, now-24*time.Hour.Milliseconds())
 				release()
 			}
 		}

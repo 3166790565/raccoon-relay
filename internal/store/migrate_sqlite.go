@@ -48,6 +48,8 @@ type accountRow struct {
 	ExpiresAt                                                                                                int64
 	DeviceID, DeviceName, OSVersion, OfficeIdentity, Platform, ClientChannel, Language, Meta, LastCheckinDay string
 	Priority, Enabled, CreatedAt, UpdatedAt, LastUsed, MaxConcurrent                                         int64
+	// LeaseUntil 是 v1.4 新增列；旧库没有时按 0（无在途租约）处理。
+	LeaseUntil int64
 }
 
 type keyRow struct {
@@ -229,14 +231,22 @@ func readIfExists[T any](db *sql.DB, what string, fn func(*sql.DB) ([]T, error))
 }
 
 func readAccounts(db *sql.DB) ([]accountRow, error) {
-	// max_concurrent 是 v1.3 新增列，旧库没有时按 0（跟随全局）处理。
+	// max_concurrent / lease_until 都是后来新增的列，旧库没有时按 0 处理。
+	// 必须逐列判断：只判断其中一列会让另一个缺列的旧库直接 SELECT 失败。
 	hasMax, err := columnExists(db, "accounts", "max_concurrent")
 	if err != nil {
 		return nil, err
 	}
+	hasLease, err := columnExists(db, "accounts", "lease_until")
+	if err != nil {
+		return nil, err
+	}
 	cols := accountCols
+	if !hasLease {
+		cols = strings.Replace(cols, ", lease_until", "", 1)
+	}
 	if !hasMax {
-		cols = strings.Replace(accountCols, ", max_concurrent", "", 1)
+		cols = strings.Replace(cols, ", max_concurrent", "", 1)
 	}
 	rows, err := db.Query(`SELECT ` + cols + ` FROM accounts ORDER BY id`)
 	if err != nil {
@@ -253,6 +263,9 @@ func readAccounts(db *sql.DB) ([]accountRow, error) {
 			&a.LastCheckinDay, &a.CreatedAt, &a.UpdatedAt, &a.LastUsed}
 		if hasMax {
 			dest = append(dest, &a.MaxConcurrent)
+		}
+		if hasLease {
+			dest = append(dest, &a.LeaseUntil)
 		}
 		if err := rows.Scan(dest...); err != nil {
 			return nil, err
@@ -482,12 +495,12 @@ func (s *Store) insertDumpRows(ctx context.Context, tx *sql.Tx, d *sqliteDump) e
 			ph   []string
 		)
 		for _, a := range d.Accounts[i:end] {
-			ph = append(ph, "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+			ph = append(ph, "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
 			args = append(args, a.ID, a.UID, a.Name, a.Note, a.Token, a.RefreshToken, a.TokenExp,
 				a.Credits, a.CreditsAt, a.Status, a.CoolUntil, a.CoolReason, a.ExpiresAt,
 				a.DeviceID, a.DeviceName, a.OSVersion, a.OfficeIdentity, a.Platform,
 				a.ClientChannel, a.Language, a.Meta, a.Priority, a.Enabled,
-				a.LastCheckinDay, a.CreatedAt, a.UpdatedAt, a.LastUsed, a.MaxConcurrent)
+				a.LastCheckinDay, a.CreatedAt, a.UpdatedAt, a.LastUsed, a.MaxConcurrent, a.LeaseUntil)
 		}
 		q := `INSERT INTO accounts (` + accountCols + `) VALUES ` + joinStrings(ph, ",")
 		if _, err := s.execTx(ctx, tx, q, args...); err != nil {
@@ -656,7 +669,8 @@ func (s *Store) verifyTargetCounts(ctx context.Context, tx *sql.Tx, d *sqliteDum
 // 只检查用户数据表：schema_migrations / migration_state 是迁移自身的记账。
 func (s *Store) targetIsEmpty(ctx context.Context) (bool, error) {
 	for _, table := range []string{"accounts", "api_keys", "model_cooldowns", "account_cooldowns",
-		"checkin_history", "usage_logs", "settings", "runtime_events"} {
+		"checkin_history", "usage_logs", "settings", "runtime_events",
+		"session_affinity", "account_backoffs"} {
 		var n int64
 		if err := s.queryRow(ctx, `SELECT COUNT(*) FROM `+table).Scan(&n); err != nil {
 			return false, err

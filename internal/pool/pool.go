@@ -69,6 +69,48 @@ type Pool struct {
 	// LastUsed 只到毫秒，连续几个请求落在同一毫秒里会打平，轮询就会退化成固定选同一个号。
 	pickSeq  map[string]uint64
 	pickTick uint64
+
+	// preferID 是本轮请求「最好用这个号」的提示（会话粘性绑定 / 客户端指定）。
+	// 传入时它排到候选队首，失败换号时由引擎清空，避免一直撞同一个号。
+	preferID string
+	// lease 是单号串行（在途租约）配置；held 是本进程当前持有的租约。
+	lease LeaseConfig
+	held  map[string]*leaseState
+	// backoff 是失败后的换号退避参数。
+	backoff BackoffPolicy
+	// now 供测试注入时钟。nil 用 time.Now。
+	now func() time.Time
+}
+
+// SetPrefer 设置本次请求优先使用的账号 id。传空串清除。
+func (p *Pool) SetPrefer(accountID string) {
+	p.mu.Lock()
+	p.preferID = accountID
+	p.mu.Unlock()
+}
+
+// Prefer 返回当前优先账号。
+func (p *Pool) Prefer() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.preferID
+}
+
+// SetClock 供测试注入时钟。
+func (p *Pool) SetClock(fn func() time.Time) {
+	p.mu.Lock()
+	p.now = fn
+	p.mu.Unlock()
+}
+
+func (p *Pool) clock() time.Time {
+	p.mu.Lock()
+	fn := p.now
+	p.mu.Unlock()
+	if fn == nil {
+		return time.Now()
+	}
+	return fn()
 }
 
 func New(st *store.Store, strategy string, cooldown *CooldownBook) *Pool {
@@ -80,6 +122,8 @@ func New(st *store.Store, strategy string, cooldown *CooldownBook) *Pool {
 	return &Pool{
 		st: st, strategy: strategy, cooldown: cooldown,
 		inFlight: map[string]int{}, pickSeq: map[string]uint64{},
+		lease: DefaultLeaseConfig(), held: map[string]*leaseState{},
+		backoff: DefaultBackoffPolicy(),
 	}
 }
 
@@ -144,15 +188,20 @@ func (p *Pool) inFlightOf(id string) int {
 
 // Pick 选一个可用账号。excluded 是本轮已试过的 id；model 用于模型级冷却过滤。
 // 返回 nil 表示全池无可选。
+//
+// 过滤顺序即「这个号现在能不能接活」：停用/非在线/无凭证/积分耗尽/到期/
+// 积分阈值/模型级冷却/在途租约/退避窗口。
+// 排序时优先账号（会话绑定或客户端指定）排第一，其余按策略排。
 func (p *Pool) Pick(ctx context.Context, model string, excluded map[string]bool) (*Lease, error) {
 	accounts, err := p.st.ListAccounts(ctx)
 	if err != nil {
 		return nil, err
 	}
-	now := time.Now().UnixMilli()
+	now := p.clock().UnixMilli()
 	p.mu.Lock()
 	strategy := p.strategy
 	creditPol := p.credit
+	prefer := p.preferID
 	loads := make(map[string]int, len(accounts))
 	for id, n := range p.inFlight {
 		loads[id] = n
@@ -163,6 +212,9 @@ func (p *Pool) Pick(ctx context.Context, model string, excluded map[string]bool)
 	}
 	p.mu.Unlock()
 
+	// 退避门闸一次读出：逐个查会变成 N 次往返。
+	backoffs, _ := p.st.ListBackoffs(ctx)
+
 	type cand struct {
 		acc    *store.Account
 		cred   int64
@@ -170,6 +222,7 @@ func (p *Pool) Pick(ctx context.Context, model string, excluded map[string]bool)
 		last   int64
 		seq    uint64
 		load   int
+		prefer bool
 	}
 	var cands []cand
 	for _, a := range accounts {
@@ -199,6 +252,15 @@ func (p *Pool) Pick(ctx context.Context, model string, excluded map[string]bool)
 		if a.MaxConcurrent > 0 && int64(loads[a.ID]) >= a.MaxConcurrent {
 			continue
 		}
+		// 在途租约：同号请求串行。租约到期后自动失效，进程崩溃留下的残租约
+		// 也不会永远占着号（TTL 由面板配置）。
+		if a.LeaseUntil > now {
+			continue
+		}
+		// 退避门闸：刚失败过的号在窗口内不接新请求。
+		if b, ok := backoffs[a.ID]; ok && b.Until > now {
+			continue
+		}
 		cands = append(cands, cand{
 			acc:    a,
 			cred:   creditRank(a),
@@ -206,6 +268,7 @@ func (p *Pool) Pick(ctx context.Context, model string, excluded map[string]bool)
 			last:   a.LastUsed,
 			seq:    seqs[a.ID],
 			load:   loads[a.ID],
+			prefer: prefer != "" && a.ID == prefer,
 		})
 	}
 	if len(cands) == 0 {
@@ -214,6 +277,10 @@ func (p *Pool) Pick(ctx context.Context, model string, excluded map[string]bool)
 
 	sort.SliceStable(cands, func(i, j int) bool {
 		a, b := cands[i], cands[j]
+		// 会话绑定/客户端指定的号排最前：同一段对话尽量不跳号。
+		if a.prefer != b.prefer {
+			return a.prefer
+		}
 		switch strategy {
 		case StrategyRoundRobin:
 			// 轮询：最久没被选中的优先，让请求均匀摊到每个号上。
@@ -248,9 +315,8 @@ func (p *Pool) Pick(ctx context.Context, model string, excluded map[string]bool)
 	p.pickTick++
 	p.pickSeq[chosen.ID] = p.pickTick
 	p.mu.Unlock()
-	nowMs := time.Now().UnixMilli()
-	_ = p.st.UpdateAccount(ctx, chosen.ID, store.AccountPatch{LastUsed: &nowMs})
-	chosen.LastUsed = nowMs
+	_ = p.st.UpdateAccount(ctx, chosen.ID, store.AccountPatch{LastUsed: &now})
+	chosen.LastUsed = now
 	return &Lease{Account: chosen}, nil
 }
 

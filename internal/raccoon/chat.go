@@ -149,7 +149,7 @@ func (r ChatRequest) summary(turnID string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "模型：%s\n", model)
 	fmt.Fprintf(&b, "turn：%s\n", turnID)
-	fmt.Fprintf(&b, "客户端：%s / %s / %s\n", ClientName, ClientVersion, r.IDN.ClientChannel)
+	fmt.Fprintf(&b, "客户端：%s / %s / %s\n", ClientName, CurrentFingerprint().ClientVersion, r.IDN.ClientChannel)
 	fmt.Fprintf(&b, "平台：%s\n", r.IDN.Platform)
 	fmt.Fprintf(&b, "设备：%s\n", r.IDN.DeviceID)
 	fmt.Fprintf(&b, "会话：%s\n", r.Session)

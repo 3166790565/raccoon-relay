@@ -42,13 +42,26 @@ type Config struct {
 	// RetryUntilExhausted 为 true 时，遇到可换号的错误会按序试完整个号池
 	// （直到没有可用账号），而不是提前被 MaxRetries 截断。
 	RetryUntilExhausted bool
-	CheckinEnable       bool
-	CheckinHour         int
-	CheckinMinute       int
-	CheckinJitterMin    int
-	CheckinGapMinMS     int
-	CheckinGapMaxMS     int
-	RefreshWindowSec    int
+	// RetryDelayMS 是两次换号之间的等待毫秒数。0 = 不等待。
+	RetryDelayMS int
+	// 单号串行：开启后同一账号同时只处理一个请求，其余请求换号。
+	// 关掉则同号并发（升级前的行为）。
+	LeaseEnabled bool
+	LeaseTTLSec  int
+	// 换号退避：失败后在窗口内不再选中该号，时长从 BaseMS 起逐次翻倍、封顶 MaxMS。
+	BackoffEnabled bool
+	BackoffBaseMS  int
+	BackoffMaxMS   int
+	// 会话粘性：同一段对话优先复用上次成功的账号。
+	AffinityEnabled  bool
+	AffinityTTLSec   int
+	CheckinEnable    bool
+	CheckinHour      int
+	CheckinMinute    int
+	CheckinJitterMin int
+	CheckinGapMinMS  int
+	CheckinGapMaxMS  int
+	RefreshWindowSec int
 	// 主动续期：token 30 天有效，后台提前 RenewWindowSec 秒统一刷新，
 	// 避免冷门号因长期不被选中而静默过期。RenewIntervalM 是扫描间隔。
 	RenewWindowSec int
@@ -70,6 +83,14 @@ type Config struct {
 	OAuthRedirectBase string
 	Timezone          string
 	UpstreamBase      string
+	// 上游客户端指纹：对话/管理面发的版本号与 User-Agent。
+	// 上游桌面客户端发版后会过期，面板里可随时修改并持久化到 settings。
+	ClientVersion    string
+	WebClientVersion string
+	OSVersion        string
+	DesktopPlatform  string
+	ChatUserAgent    string // 留空 = 按 ClientVersion 自动派生
+	WebUserAgent     string // 留空 = 按 WebClientVersion 自动派生
 
 	// 日志管理：文件落盘/轮转/过期清理。面板里可覆盖并持久化到 settings 表。
 	LogFileEnable     bool
@@ -161,13 +182,23 @@ func Load() (*Config, error) {
 		PoolStrategy:        env("POOL_STRATEGY", "load_balance"),
 		MaxRetries:          envInt("MAX_RETRIES", 3),
 		RetryUntilExhausted: envBool("RETRY_UNTIL_EXHAUSTED", false),
-		CheckinEnable:       envBool("CHECKIN_ENABLE", true),
-		CheckinHour:         envInt("CHECKIN_HOUR", 0),
-		CheckinMinute:       envInt("CHECKIN_MINUTE", 10),
-		CheckinJitterMin:    envInt("CHECKIN_JITTER_MINUTES", 30),
-		CheckinGapMinMS:     envInt("CHECKIN_GAP_MIN_MS", 800),
-		CheckinGapMaxMS:     envInt("CHECKIN_GAP_MAX_MS", 2000),
-		RefreshWindowSec:    envInt("REFRESH_WINDOW_SEC", 300),
+		RetryDelayMS:        envInt("RETRY_DELAY_MS", 800),
+		// 默认开启单号串行：同号并发是最容易被上游判成第三方客户端的特征。
+		LeaseEnabled: envBool("LEASE_ENABLE", true),
+		LeaseTTLSec:  envInt("LEASE_TTL_SEC", 300),
+		// 退避默认开启、起点很短：只用来错开同一瞬间的密集重试，不是惩罚账号。
+		BackoffEnabled:   envBool("BACKOFF_ENABLE", true),
+		BackoffBaseMS:    envInt("BACKOFF_BASE_MS", 2000),
+		BackoffMaxMS:     envInt("BACKOFF_MAX_MS", 60000),
+		AffinityEnabled:  envBool("SESSION_AFFINITY_ENABLE", true),
+		AffinityTTLSec:   envInt("SESSION_AFFINITY_TTL_SEC", 86400),
+		CheckinEnable:    envBool("CHECKIN_ENABLE", true),
+		CheckinHour:      envInt("CHECKIN_HOUR", 0),
+		CheckinMinute:    envInt("CHECKIN_MINUTE", 10),
+		CheckinJitterMin: envInt("CHECKIN_JITTER_MINUTES", 30),
+		CheckinGapMinMS:  envInt("CHECKIN_GAP_MIN_MS", 800),
+		CheckinGapMaxMS:  envInt("CHECKIN_GAP_MAX_MS", 2000),
+		RefreshWindowSec: envInt("REFRESH_WINDOW_SEC", 300),
 		// 默认提前 3 天续期、每 6 小时扫一次、账号间隔 1 秒：避开了「提前太久轮换凭据」
 		// 的坑，也给长时间停机留够余量。
 		RenewWindowSec:      envInt("RENEW_WINDOW_SEC", 3*24*3600),
@@ -184,6 +215,14 @@ func Load() (*Config, error) {
 		OAuthRedirectBase:   strings.TrimRight(env("OAUTH_REDIRECT_BASE", ""), "/"),
 		Timezone:            env("TZ", "Asia/Shanghai"),
 		UpstreamBase:        strings.TrimRight(env("UPSTREAM_BASE", "https://xiaohuanxiong.com"), "/"),
+
+		// 指纹默认值与 raccoon 包的出厂常量一致；面板保存后以库里为准。
+		ClientVersion:    env("CLIENT_VERSION", "1.0.35"),
+		WebClientVersion: env("WEB_CLIENT_VERSION", "v1.1.3"),
+		OSVersion:        env("CLIENT_OS_VERSION", "10.0.26200"),
+		DesktopPlatform:  env("CLIENT_PLATFORM", "desktop-windows-x64"),
+		ChatUserAgent:    env("CLIENT_USER_AGENT", ""),
+		WebUserAgent:     env("WEB_USER_AGENT", ""),
 
 		LogFileEnable:     envBool("LOG_FILE_ENABLE", true),
 		LogDir:            env("LOG_DIR", filepath.Join(env("DATA_DIR", "/data"), "logs")),

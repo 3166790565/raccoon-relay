@@ -527,14 +527,15 @@ func (c *Client) BindDevice(ctx context.Context, token, deviceID string) error {
 	}
 	seed := hashHex(deviceID)
 	name := "DESKTOP-" + strings.ToUpper(sanitizeAlnum(seed[:7]))
+	fp := CurrentFingerprint()
 	payload := map[string]any{
 		"client_device_id_source": "unknown",
 		"client_device_id":        deviceID,
 		"client_platform":         "desktop-windows",
-		"client_version":          ClientVersion,
+		"client_version":          fp.ClientVersion,
 		"device_name":             name,
 		"os":                      "windows",
-		"os_version":              DefaultOSVersion,
+		"os_version":              fp.OSVersion,
 		"application":             "desktop",
 		"push_permission":         "unknown",
 	}
