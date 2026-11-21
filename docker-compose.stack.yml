@@ -1,28 +1,49 @@
-# 全栈部署：relay + Postgres + Redis
+# 小浣熊反代：全栈部署（relay + Postgres + Redis）
 #
-# 用法：
-#   cp .env.example .env && 填好 SECRET_KEY、ADMIN_TOKEN、POSTGRES_PASSWORD、REDIS_PASSWORD
-#   docker compose -f docker-compose.yml -f docker-compose.stack.yml up -d
+# 这是一个完整、自包含的编排文件，单独使用即可：
+#   docker compose up -d
 #
-# 只想用 SQLite 单容器：不要带这个文件，直接 docker compose up -d。
-# 想连外部 Postgres/Redis：不启用本文件，在 .env 里设 DATABASE_URL / REDIS_URL 即可。
+# 前提：.env 里必须有 SECRET_KEY、ADMIN_TOKEN、POSTGRES_PASSWORD、REDIS_PASSWORD。
 #
-# 首次从 SQLite 切到这套栈：把旧的 ./data/relay.db* 放进 ./data 再启动，
-# relay 会自动导入并在启动日志里打印账号数；成功后旧库改名为 relay.db.migrated-*。
+# 只想用 SQLite 单容器（不用 Postgres/Redis）：
+#   把 relay 服务里的 DATABASE_URL / REDIS_URL 两行删掉（或注释），
+#   并去掉 depends_on 与文件末尾的 postgres / redis 服务。
 
 services:
   relay:
+    image: bxacc123/raccoon-relay:${IMAGE_TAG:-latest}
+    container_name: raccoon-relay
+    restart: unless-stopped
+    env_file:
+      - .env
     environment:
+      DATA_DIR: /data
+      # 容器内监听全部地址，宿主机端口映射决定对外暴露面
+      LISTEN_ADDR: 0.0.0.0:8080
+      TZ: ${TZ:-Asia/Shanghai}
       DATABASE_URL: postgres://relay:${POSTGRES_PASSWORD:?请在 .env 设置 POSTGRES_PASSWORD}@postgres:5432/relay?sslmode=disable
       REDIS_URL: redis://:${REDIS_PASSWORD:?请在 .env 设置 REDIS_PASSWORD}@redis:6379/0
       REDIS_PREFIX: ${REDIS_PREFIX:-raccoon:}
       # 多副本部署建议打开；单实例也开着无害
       REDIS_REQUIRED: ${REDIS_REQUIRED:-0}
+    ports:
+      # 数据面与管理面同端口，全部对外开放
+      - "8080:8080"
+    volumes:
+      # 数据目录必须持久化：旧 relay.db（迁移源）、日志都在这里
+      - ./data:/data
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
 
   postgres:
     image: postgres:16-alpine
