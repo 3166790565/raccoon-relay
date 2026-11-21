@@ -10,12 +10,16 @@ type Model struct {
 	SupportsImage bool
 }
 
-// FallbackModels 是日日新当前的模型阵容。数字取自平台接口，不是营销页。
+// FallbackModels 是日日新的模型阵容快照，只在实时清单拉不到时兜底
+// （没有可用账号、上游故障、首次启动还没拿到登录票）。
+// 数字取自平台 /v1/models，不是营销页；平时请以 LiveModels 的实时结果为准。
 var FallbackModels = []Model{
 	{ID: "sensenova-6.8-flash-lite", Name: "SenseNova 6.8 Flash Lite", ContextLength: 262144, MaxOutput: 65536, SupportsImage: true},
-	{ID: "deepseek-flash", Name: "DeepSeek Flash", ContextLength: 1048576, MaxOutput: 393216},
-	{ID: "deepseek-v4.1-flash", Name: "DeepSeek V4.1 Flash", ContextLength: 1048576, MaxOutput: 393216},
+	{ID: "sensenova-6.8-flash", Name: "SenseNova 6.8 Flash", ContextLength: 262144, MaxOutput: 65536, SupportsImage: true},
+	{ID: "deepseek-flash", Name: "DeepSeek Flash", ContextLength: 1048576, MaxOutput: 65536},
+	{ID: "deepseek-v4.1-flash", Name: "DeepSeek V4.1 Flash", ContextLength: 1048576, MaxOutput: 65536},
 	{ID: "glm-5.2", Name: "GLM 5.2", ContextLength: 1048576, MaxOutput: 131072},
+	{ID: "glm-5.3", Name: "GLM 5.3", ContextLength: 1048576, MaxOutput: 131072},
 	{ID: "kimi-k3", Name: "Kimi K3", ContextLength: 1048576, MaxOutput: 65536},
 }
 

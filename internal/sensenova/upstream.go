@@ -119,6 +119,37 @@ func (u *Upstream) ProvisionKey(ctx context.Context, acc *store.Account) (string
 	return key, nil
 }
 
+// ModelsFor 实现 relay.SNModelSource：用该账号的推理 Key 拉实时模型清单。
+// 账号没有 Key 时先补建一枚；任何一步失败都返回 nil，让调用方回落内置快照。
+func (u *Upstream) ModelsFor(ctx context.Context, acc *store.Account) []raccoon.Model {
+	if acc == nil || !acc.IsSenseNova() {
+		return nil
+	}
+	key := strings.TrimSpace(acc.Token)
+	if key == "" {
+		k, err := u.ProvisionKey(ctx, acc)
+		if err != nil {
+			return nil
+		}
+		key = k
+	}
+	live := u.C.LiveModels(ctx, key)
+	if len(live) == 0 {
+		return nil
+	}
+	out := make([]raccoon.Model, 0, len(live))
+	for _, m := range live {
+		out = append(out, raccoon.Model{
+			ID:              m.ID,
+			Name:            m.Name,
+			ContextLength:   m.ContextLength,
+			MaxOutputTokens: m.MaxOutput,
+			SupportsImages:  m.SupportsImage,
+		})
+	}
+	return out
+}
+
 // OpenChat 实现 relay.SNUpstream。
 func (u *Upstream) OpenChat(ctx context.Context, apiKey string, body map[string]any) (*raccoon.ChatStream, error) {
 	return u.C.OpenChat(ctx, apiKey, body)

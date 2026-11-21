@@ -54,7 +54,62 @@ func (c *Client) OpenChat(ctx context.Context, apiKey string, body map[string]an
 	return stream, nil
 }
 
-// ListModels 拉日日新的实时模型清单。失败返回空（调用方回落到内置快照）。
+// LiveModels 拉日日新实时的模型清单（含上下文长度等元数据）。
+//
+// 这是 /v1/models 与模型管理页的权威来源：上游新上/下线模型时不需要改代码。
+// 失败返回 nil，调用方自行回落到 FallbackModels。
+func (c *Client) LiveModels(ctx context.Context, apiKey string) []Model {
+	if strings.TrimSpace(apiKey) == "" {
+		return nil
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.Token+"/models", nil)
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Accept", "application/json")
+	res, err := c.httpClient().Do(req)
+	if err != nil {
+		return nil
+	}
+	defer res.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(res.Body, 4<<20))
+	if res.StatusCode >= 400 {
+		return nil
+	}
+	var data struct {
+		Data []struct {
+			ID               string   `json:"id"`
+			ContextLength    int      `json:"context_length"`
+			MaxOutputLength  int      `json:"max_output_length"`
+			InputModalities  []string `json:"input_modalities"`
+			OutputModalities []string `json:"output_modalities"`
+		} `json:"data"`
+	}
+	if json.Unmarshal(raw, &data) != nil {
+		return nil
+	}
+	out := make([]Model, 0, len(data.Data))
+	for _, m := range data.Data {
+		if m.ID == "" {
+			continue
+		}
+		// 只收会写文本的模型：日日新还有生图模型，chat 端点对它回 404。
+		if len(m.OutputModalities) > 0 && !containsStr(m.OutputModalities, "text") {
+			continue
+		}
+		out = append(out, Model{
+			ID:            m.ID,
+			Name:          m.ID,
+			ContextLength: m.ContextLength,
+			MaxOutput:     m.MaxOutputLength,
+			SupportsImage: containsStr(m.InputModalities, "image"),
+		})
+	}
+	return out
+}
+
+// ListModels 拉日日新的实时模型 id 清单。失败返回空（调用方回落到内置快照）。
 func (c *Client) ListModels(ctx context.Context, apiKey string) []string {
 	if strings.TrimSpace(apiKey) == "" {
 		return nil

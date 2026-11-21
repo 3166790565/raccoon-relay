@@ -161,6 +161,41 @@ func TestEncryptPasswordRoundTrip(t *testing.T) {
 	}
 }
 
+// LiveModels 要读上游真实字段：上下文长度、最大输出、图片输入，
+// 并过滤掉只输出图片的模型（chat 端点对它回 404）。
+func TestLiveModelsParsesUpstreamFields(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			t.Errorf("路径=%q", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer sk-test" {
+			t.Errorf("Authorization=%q", got)
+		}
+		_, _ = w.Write([]byte(`{"data":[
+			{"id":"glm-5.3","context_length":1048576,"max_output_length":131072,
+			 "input_modalities":["text"],"output_modalities":["text"]},
+			{"id":"sensenova-6.8-flash","context_length":262144,"max_output_length":65536,
+			 "input_modalities":["text","image"],"output_modalities":["text"]},
+			{"id":"sensenova-u1.5-lite","context_length":262144,"max_output_length":65536,
+			 "input_modalities":["text"],"output_modalities":["image"]}
+		]}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient(5 * time.Second)
+	c.Token = srv.URL + "/v1"
+	got := c.LiveModels(context.Background(), "sk-test")
+	if len(got) != 2 {
+		t.Fatalf("只应收 2 个文本模型，实际 %d：%+v", len(got), got)
+	}
+	if got[0].ID != "glm-5.3" || got[0].ContextLength != 1048576 || got[0].MaxOutput != 131072 {
+		t.Fatalf("glm-5.3 解析不对: %+v", got[0])
+	}
+	if !got[1].SupportsImage {
+		t.Fatalf("sensenova-6.8-flash 应支持图片输入: %+v", got[1])
+	}
+}
+
 // 建 Key 必须走 lite 控制台接口并带 key_type，否则建出来的 Key 调推理恒 401。
 func TestCreateAPIKeyUsesTokenPlanType(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

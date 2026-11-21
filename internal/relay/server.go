@@ -23,6 +23,8 @@ type Catalog struct {
 	Client  *raccoon.Client
 	Default string
 	TTL     time.Duration
+	// SN 是日日新实时模型清单的来源；nil 时只用内置快照。
+	SN SNModelSource
 
 	mu     sync.Mutex
 	models []raccoon.Model
@@ -72,6 +74,18 @@ func (c *Catalog) fetch(ctx context.Context) []raccoon.Model {
 			continue
 		}
 		if a.IsSenseNova() {
+			// 实时清单优先；拉不到（账号没 Key、上游故障）再回落内置快照。
+			if len(snModels) == 0 && c.SN != nil {
+				if live := c.SN.ModelsFor(ctx, a); len(live) > 0 {
+					snModels = live
+					// 顺手记给路由层：上游新上线的模型名也能走对上游。
+					ids := make([]string, 0, len(live))
+					for _, m := range live {
+						ids = append(ids, m.ID)
+					}
+					liveSNModels.replace(ids)
+				}
+			}
 			if len(snModels) == 0 {
 				snModels = senseNovaModels()
 			}

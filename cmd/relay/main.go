@@ -171,6 +171,7 @@ func main() {
 	})
 	refresher := relay.NewRefresher(st, client, time.Duration(cfg.RefreshWindowSec)*time.Second)
 	catalog := relay.NewCatalog(st, client, relay.DefaultModel)
+	catalog.SN = snUpstream // 日日新模型清单实时拉取，拉不到才用内置快照
 	engine := relay.BuildEngine(cfg, st, po, cool, client, refresher)
 	engine.SN = snUpstream
 	engine.Event = func(ev store.RuntimeEvent) { events.Emit(ev) }
