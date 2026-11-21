@@ -326,7 +326,7 @@ func (s *Store) deleteAccountRows(ctx context.Context, tx *sql.Tx, id string) er
 //   - 凭证失效：状态为 relogin。refresh_token 也刷不动，只能靠重新登录拿新凭据；
 //   - 订阅过期：expires_at 已过。凭据也许还能用，但这个号不会再产出可用的额度。
 //
-// 积分耗尽（exhausted）不算：它会在次日 04:00 自动复活，删了就再也回不来。
+// 积分耗尽（exhausted）不算：它会在下一次签到补分时自动复活，删了就再也回不来。
 // 冷却（cooling）更不算，那只是临时限流。
 func (a *Account) DeadReason(nowMS int64) string {
 	if a.Status == StatusRelogin {

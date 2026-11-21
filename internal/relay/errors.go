@@ -37,6 +37,12 @@ func classify(err error) (pool.FailKind, bool, int, string) {
 		// 换号重试只会拿另一个号再问一遍同样的话，必然还是拒答。
 		// 不冷却、不换号，直接把错误交给调用方。
 		return pool.FailRejected, false, http.StatusBadRequest, msg
+	case ue.Code == codePointsInsufficient:
+		// 1000007「积分余额不足，请充值后重试」通常挂在 HTTP 400 的
+		// {error:{code,message}} 体里，只看状态码会落到「不值得换号」的兜底分支，
+		// 让一个已经没钱的号反复接单、每次都把错误原样丢给调用方。
+		// 语义与 402 相同：整号冷却到下一次签到补分，换号继续消化请求。
+		return pool.FailQuota, true, http.StatusPaymentRequired, msg
 	case ue.Code == codeAccountAbnormal:
 		// 200108「系统检测到当前账号存在异常调用」：上游罚的是整个账号，
 		// 不是某一次调用，换模型也绕不过去。按账号级阶梯冷却处理。
@@ -108,6 +114,9 @@ const (
 	// codeSensitiveContent = 100042：上游另一条「请求内容包含敏感内容」的拒答码，
 	// 与 100041 同义（下游请求里的内容被判敏感），走同一套处理：不重试、回 400。
 	codeSensitiveContent = 100042
+	// codePointsInsufficient = 1000007：上游「积分余额不足，请充值后重试」。
+	// 这条错误经常以 HTTP 400 返回，必须按业务码识别，否则会被当成请求本身有问题。
+	codePointsInsufficient = 1000007
 )
 
 // isContentRejectedCode 判断业务码是否属于「请求内容被上游拒答」。

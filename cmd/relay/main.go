@@ -155,6 +155,15 @@ func main() {
 	sch := scheduler.New(cfg, st, client, refresher, balancer)
 	sch.SetEventHook(func(ev store.RuntimeEvent) { events.Emit(ev) })
 	sch.SetLocker(rds)
+	// 积分耗尽（402 / 1000007）的账号停到「下一次签到补分」，而不是写死次日 04:00。
+	// 调度器每次现读签到配置，面板里改签到时间后这里自动跟上。
+	cool.SetQuotaResume(func(ctx context.Context, acc *store.Account) (int64, bool) {
+		t, ok := sch.NextPlannedCheckin(acc)
+		if !ok {
+			return 0, false
+		}
+		return t.UnixMilli(), true
+	})
 
 	// 主动续期：面板可热更新，配置改动由 ApplyStoredSettings 盖回。
 	renewer := relay.NewRenewer(refresher, relay.RenewConfig{

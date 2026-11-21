@@ -370,6 +370,24 @@ func plannedTime(uid string, loc *time.Location, hour, minute, jitterMin int) ti
 	return base.Add(time.Duration(off) * time.Minute)
 }
 
+// NextPlannedCheckin 返回该账号下一次自动签到的时刻（今日未到就是今日，已过算明日）。
+//
+// 供号池的 402/1000007 冷却使用：积分耗尽的号要停在「下一次签到补分」之前，
+// 而不是写死一个和签到时间无关的次日 04:00。自动签到关闭时返回 false，
+// 调用方自行回退到默认恢复时刻。
+func (s *Scheduler) NextPlannedCheckin(a *store.Account) (time.Time, bool) {
+	if a == nil || !s.enabled() {
+		return time.Time{}, false
+	}
+	loc := s.cfg.Location()
+	now := time.Now().In(loc)
+	t := plannedTime(a.UID, loc, s.cfg.CheckinHour, s.cfg.CheckinMinute, s.cfg.CheckinJitterMin)
+	if !t.After(now) {
+		t = t.AddDate(0, 0, 1)
+	}
+	return t, true
+}
+
 func readLedger(meta map[string]any) map[string]int64 {
 	out := map[string]int64{}
 	raw, ok := meta["onboardingGrants"].(map[string]any)

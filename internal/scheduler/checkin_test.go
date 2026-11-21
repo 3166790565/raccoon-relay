@@ -44,6 +44,45 @@ func TestPlannedTimeZeroJitter(t *testing.T) {
 	}
 }
 
+// NextPlannedCheckin：今日计划时刻已过就顺延到明日，且落在「基准 + 抖动」窗口内。
+// 号池的积分耗尽冷却用它决定什么时候把号放回在线。
+func TestNextPlannedCheckin(t *testing.T) {
+	cfg := &config.Config{
+		CheckinEnable: true, CheckinHour: 0, CheckinMinute: 0, CheckinJitterMin: 30,
+		Timezone: "UTC",
+	}
+	st, err := store.Open(t.TempDir(), "k", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	sch := New(cfg, st, nil, nil, nil)
+	acc := &store.Account{UID: "pu-a"}
+
+	got, ok := sch.NextPlannedCheckin(acc)
+	if !ok {
+		t.Fatal("自动签到开启时应给出计划时刻")
+	}
+	if !got.After(time.Now()) {
+		t.Fatalf("计划时刻必须在未来，实际 %s", got.Format(time.RFC3339))
+	}
+	today := plannedTime(acc.UID, time.UTC, 0, 0, 30)
+	base := time.Date(got.Year(), got.Month(), got.Day(), 0, 0, 0, 0, time.UTC)
+	off := got.Sub(base)
+	if off < 0 || off > 30*time.Minute {
+		t.Fatalf("应落在基准 + 0~30 分钟，实际 %v", off)
+	}
+	// 同一天内要么等于今日计划，要么就是明日计划（不出现第三种时刻）。
+	if got.Hour() != today.Hour() || got.Minute() != today.Minute() {
+		t.Fatalf("时刻应与计划一致：got %s want %s", got.Format("15:04"), today.Format("15:04"))
+	}
+
+	cfg.CheckinEnable = false
+	if _, ok := sch.NextPlannedCheckin(acc); ok {
+		t.Fatal("自动签到关闭时不应给出计划时刻，调用方应回退默认恢复时间")
+	}
+}
+
 // 自动签到端到端：mock 上游，验证两步顺序、last_checkin_day 写入、台账落库。
 func TestSweepCheckinsDueAccounts(t *testing.T) {
 	var mu sync.Mutex

@@ -12,7 +12,8 @@ import (
 )
 
 // 冷却分级（只有这条列表里的失败会停号）：
-//   402 积分耗尽 → exhausted 至次日 04:00
+//   402 / 1000007 积分耗尽 → exhausted 至该账号下一次签到补分；
+//                  拿不到签到计划（自动签到关闭）时回退到次日 04:00
 //   429 限流     → 默认只罚「账号 × 模型」，阶梯 3 → 5 → 10 → 20… 分钟；
 //                  关闭模型级冷却时才退化为整号 60s
 //   200108 账号异常 → 账号级阶梯冷却，同样 3 → 5 → 10… 分钟；换模型绕不过去
@@ -43,6 +44,20 @@ type CooldownBook struct {
 	// 用回调而不是直接依赖 store 的写入封装，是为了让号池保持无副作用、易测试；
 	// 事件写入失败也不会影响冷却本身（回调内部吞错）。
 	onEvent func(Event)
+
+	// quotaResume 由装配层注入（读签到计划），给出「积分耗尽」账号的恢复时刻。
+	// nil 时回退到次日 04:00。号池不直接依赖签到调度器，避免两个包互相引用。
+	quotaResume ResumeFunc
+}
+
+// ResumeFunc 返回某账号可以恢复选号的绝对毫秒时刻；ok=false 表示没有可靠依据。
+type ResumeFunc func(ctx context.Context, acc *store.Account) (until int64, ok bool)
+
+// SetQuotaResume 注入积分耗尽账号的恢复时刻来源。
+func (c *CooldownBook) SetQuotaResume(fn ResumeFunc) {
+	c.mu.Lock()
+	c.quotaResume = fn
+	c.mu.Unlock()
 }
 
 // Event 是从号池抛给运行日志的一条事件。
@@ -407,6 +422,7 @@ func (c *CooldownBook) Cool(ctx context.Context, accID string, kind FailKind, de
 	var status, msg, level string
 	switch kind {
 	case FailQuota:
+		// 正常路径由 CoolQuota 处理（它知道签到计划）；这里保留兜底。
 		until = nextDay4AM()
 		status, msg, level = store.StatusExhausted, defaultStr(detail, "积分耗尽"), store.LevelWarn
 	case FailRate:
@@ -428,6 +444,31 @@ func (c *CooldownBook) Cool(ctx context.Context, accID string, kind FailKind, de
 	}
 	c.setAccount(ctx, accID, status, until, msg)
 	c.emitWhy(accID, level, "停用账号 "+statusLabel(status), msg, until)
+}
+
+// CoolQuota 记一次「积分耗尽」（402 / 1000007）：整号停到下一次签到补分。
+//
+// 恢复时刻优先取签到计划（每个账号的基准时刻 + 固定抖动），这样号会在
+// 自动签到领到积分之后立刻回到池子里；拿不到计划（自动签到关闭 / 未注入）时
+// 回退到次日 04:00，与旧行为一致。换号重试由转发层决定，不在这里。
+func (c *CooldownBook) CoolQuota(ctx context.Context, acc *store.Account, detail string) int64 {
+	if acc == nil {
+		return 0
+	}
+	now := time.Now().UnixMilli()
+	until := nextDay4AM()
+	c.mu.Lock()
+	fn := c.quotaResume
+	c.mu.Unlock()
+	if fn != nil {
+		if t, ok := fn(ctx, acc); ok && t > now {
+			until = t
+		}
+	}
+	msg := defaultStr(detail, "积分耗尽")
+	c.setAccount(ctx, acc.ID, store.StatusExhausted, until, msg)
+	c.emitWhy(acc.ID, store.LevelWarn, "停用账号 "+statusLabel(store.StatusExhausted), msg, until)
+	return until
 }
 
 // NonCooling 判断这类失败是否不冷却账号、只换号重试。
@@ -494,7 +535,8 @@ func (c *CooldownBook) MarkOnline(ctx context.Context, accID string) {
 //
 // 两种状态都会到期：
 //   - cooling：429/5xx/风控的临时冷却；
-//   - exhausted 且 CoolUntil > 0：402 积分耗尽，冷却到次日 04:00。
+//   - exhausted 且 CoolUntil > 0：积分耗尽，冷却到下一次签到补分
+//     （没有签到计划时回退到次日 04:00）。
 //
 // CoolUntil 为 0 的 exhausted 是「等签到/余额回升」的阈值暂停，交给
 // ApplyCreditPolicy 处理，这里不碰，否则会绕过低积分规则把它放出来。

@@ -8,6 +8,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/3166790565/raccoon-relay/internal/pool"
 	"github.com/3166790565/raccoon-relay/internal/raccoon"
@@ -151,6 +152,21 @@ func (e *Engine) RunOpenAI(ctx context.Context, req *ChatContext, sink OpenAISin
 			// 开关关闭：不再冷却账号，按上游波动只换号。
 			e.report(level, "上游失败："+publicMsg,
 				detail+"\n处置：账号异常冷却已关闭，未冷却账号，已换号重试", acc.ID)
+			if at.Started {
+				return Result{AccountID: acc.ID, Model: req.Model}, leaseErr
+			}
+			continue
+		}
+		// 积分耗尽（402 / 上游 1000007）：整号停到下一次签到补分，请求换号继续。
+		// 单独处理是为了让恢复时刻对齐该账号的签到计划，而不是写死次日 04:00。
+		if kind == pool.FailQuota {
+			until := e.Cool.CoolQuota(ctx, acc, publicMsg)
+			resume := "未知"
+			if until > 0 {
+				resume = time.UnixMilli(until).Format("2006-01-02 15:04:05")
+			}
+			e.report(level, "积分耗尽："+publicMsg,
+				detail+"\n处置：冷却账号至下一次签到（"+resume+"），已换号重试", acc.ID)
 			if at.Started {
 				return Result{AccountID: acc.ID, Model: req.Model}, leaseErr
 			}

@@ -328,6 +328,42 @@ func TestReviveExpiredHandlesExhaustedWithDeadline(t *testing.T) {
 	}
 }
 
+// CoolQuota：恢复了签到计划就停到计划时刻；没有计划才回退到次日 04:00。
+func TestCoolQuotaUsesResumeFunc(t *testing.T) {
+	st := newStore(t)
+	cool := NewCooldownBook(st, true)
+	ctx := context.Background()
+	a := addAcc(t, st, "quota", 0)
+
+	want := time.Now().Add(3 * time.Hour).Truncate(time.Second).UnixMilli()
+	cool.SetQuotaResume(func(_ context.Context, acc *store.Account) (int64, bool) {
+		if acc.ID != a.ID {
+			t.Fatalf("应收到被冷却的账号，实际 %s", acc.ID)
+		}
+		return want, true
+	})
+	got := cool.CoolQuota(ctx, a, "积分余额不足")
+	if got != want {
+		t.Fatalf("应停在签到计划时刻 %d，实际 %d", want, got)
+	}
+	acc, _ := st.GetAccount(ctx, a.ID)
+	if acc.Status != store.StatusExhausted || acc.CoolUntil != want {
+		t.Fatalf("账号应 exhausted 且带计划到期时刻，实际 %s/%d", acc.Status, acc.CoolUntil)
+	}
+
+	// 没有可靠计划时回退到次日 04:00，而不是立刻放行。
+	b := addAcc(t, st, "quota2", 0)
+	cool.SetQuotaResume(func(context.Context, *store.Account) (int64, bool) { return 0, false })
+	fallback := cool.CoolQuota(ctx, b, "积分余额不足")
+	if fallback <= time.Now().UnixMilli() {
+		t.Fatalf("回退时刻必须在未来，实际 %d", fallback)
+	}
+	accB, _ := st.GetAccount(ctx, b.ID)
+	if accB.Status != store.StatusExhausted {
+		t.Fatalf("回退时也应判积分耗尽，实际 %s", accB.Status)
+	}
+}
+
 // 冷却早已结束且长期没再失败：失败链重置，不该无限累加冷却时长。
 func TestCoolModelResetsAfterIdle(t *testing.T) {
 	st := newStore(t)

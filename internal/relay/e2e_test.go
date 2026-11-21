@@ -336,6 +336,37 @@ func TestFailoverOn402(t *testing.T) {
 	}
 }
 
+// 上游把「积分余额不足」放在 HTTP 400 + {error:{code:1000007}} 里：
+// 这不是请求本身的问题，必须冷却该号并换号重试，而不是把错误原样丢给调用方。
+func TestFailoverOnPointsInsufficient400(t *testing.T) {
+	h := newHarness(t, []chatResult{
+		{status: 400, errBody: `{"error":{"code":1000007,"message":"积分余额不足，请充值后重试","param":null,"type":"invalid_request_error"}}`},
+		{status: 200, frames: sseFrames("换号成功"), usage: usageFrame},
+	})
+	h.addAccount(t, "pu-rich", 9000)
+	h.addAccount(t, "pu-poor", 1)
+
+	w := h.do(t, "POST", "/v1/chat/completions",
+		`{"model":"sn-test-model","messages":[{"role":"user","content":"hi"}]}`)
+	if w.Code != 200 {
+		t.Fatalf("换号后应成功，实际 %d：%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "换号成功") {
+		t.Fatalf("内容不对: %s", w.Body.String())
+	}
+
+	accounts, _ := h.st.ListAccounts(context.Background())
+	exhausted := 0
+	for _, a := range accounts {
+		if a.Status == store.StatusExhausted {
+			exhausted++
+		}
+	}
+	if exhausted != 1 {
+		t.Fatalf("应恰好一个号被判积分耗尽，实际 %d", exhausted)
+	}
+}
+
 // 401 不能把还有效的号打成 relogin：应强刷一次并在同一号上重放成功。
 func TestUnauthorizedRefreshesInsteadOfRelogin(t *testing.T) {
 	h := newHarness(t, []chatResult{
