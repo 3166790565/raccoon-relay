@@ -22,6 +22,10 @@ func classify(err error) (pool.FailKind, bool, int, string) {
 	if isClientGone(err) {
 		return pool.FailOther, false, 499, "客户端已断开"
 	}
+	// 排队超时是我们自己的准入控制，不是上游故障：不换号、不冷却。
+	if isQueueTimeout(err) {
+		return pool.FailOther, false, http.StatusServiceUnavailable, err.Error()
+	}
 	var ue *raccoon.UpstreamError
 	if !errors.As(err, &ue) {
 		return pool.FailTransient, true, http.StatusBadGateway, "上游请求失败"

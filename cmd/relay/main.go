@@ -101,6 +101,14 @@ func main() {
 	// 否则新副本要各自查一遍库。
 	st.SetKV(rds)
 
+	if cfg.MaxConcurrent > 0 {
+		if rds.Enabled() {
+			log.Printf("并发上限: %d（超出排队，跨实例共享计数）", cfg.MaxConcurrent)
+		} else {
+			log.Printf("并发上限: %d（超出排队，仅本进程计数；配置 REDIS_URL 可跨实例）", cfg.MaxConcurrent)
+		}
+	}
+
 	lmgr := logmgr.New(logmgr.ConfigOf(cfg), st)
 	lmgr.SetLocker(rds)
 	lmgr.Start(ctx)
@@ -132,6 +140,10 @@ func main() {
 	engine := relay.BuildEngine(cfg, st, po, cool, client, refresher)
 	engine.Event = func(ev store.RuntimeEvent) { events.Emit(ev) }
 	srv := relay.NewServer(cfg, st, engine, catalog)
+	// 并发闸门：Redis 可用时跨实例共享计数，否则退化为进程内。
+	if cfg.MaxConcurrent > 0 {
+		srv.SetSemaphore(rds.NewSemaphore("relay"))
+	}
 
 	lm := login.New(st, client, cfg.UpstreamBase, "办公小浣熊客户端", cfg.OAuthRedirectBase)
 

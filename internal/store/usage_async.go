@@ -51,6 +51,23 @@ func (s *Store) FlushUsage() {
 	}
 }
 
+// StopUsage 结束异步写手并等待它把最后一批刷完。
+// 调用后不应再有 AddUsageAsync。
+func (s *Store) StopUsage() {
+	if s.usageQ == nil {
+		return
+	}
+	s.usageStopOnce.Do(func() { close(s.usageQ) })
+	// 写手收到 channel 关闭后会 flush 并退出，等 pending 归零即可。
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if atomic.LoadInt64(&s.usagePending) == 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func (s *Store) startUsageWriter() {
 	s.usageOnce.Do(func() {
 		s.usageQ = make(chan UsageLog, usageQueueSize)

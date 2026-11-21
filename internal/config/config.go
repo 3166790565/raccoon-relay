@@ -32,6 +32,11 @@ type Config struct {
 	// RedisRequired：true 时 Redis 连不上就拒绝启动。
 	// 多副本部署建议开启——锁静默失效比启动失败更难排查。
 	RedisRequired bool
+	// MaxConcurrent 限制同时转发到上游的请求数；超出的请求排队等待，而不是直接拒绝。
+	// 0 表示不限制（默认，保持原有行为）。
+	MaxConcurrent int
+	// QueueWaitSec 是请求最长排队时间，超时返回 503。
+	QueueWaitSec int
 	PoolStrategy   string
 	MaxRetries     int
 	// RetryUntilExhausted 为 true 时，遇到可换号的错误会按序试完整个号池
@@ -151,6 +156,8 @@ func Load() (*Config, error) {
 		RedisURL:            strings.TrimSpace(os.Getenv("REDIS_URL")),
 		RedisPrefix:         env("REDIS_PREFIX", "raccoon:"),
 		RedisRequired:       envBool("REDIS_REQUIRED", false),
+		MaxConcurrent:       envInt("MAX_CONCURRENT", 0),
+		QueueWaitSec:        envInt("QUEUE_WAIT_SEC", 600),
 		PoolStrategy:        env("POOL_STRATEGY", "load_balance"),
 		MaxRetries:          envInt("MAX_RETRIES", 3),
 		RetryUntilExhausted: envBool("RETRY_UNTIL_EXHAUSTED", false),

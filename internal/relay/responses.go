@@ -405,6 +405,15 @@ func (s *Server) HandleResponses(w http.ResponseWriter, r *http.Request) {
 	cc := BuildChatContext(model, oaBody, DefaultModel)
 	start := time.Now()
 
+	// 并发上限：超出时排队，拿到槽位才继续。
+	release, qerr := s.acquireSlot(r.Context(), "responses", cc.Model)
+	if qerr != nil {
+		code, msg := publicError(qerr)
+		writeJSON(w, code, errorBody(code, msg))
+		return
+	}
+	defer release()
+
 	if streamReq {
 		sink := newResponsesSSE(w, cc.Model)
 		res, err := s.engine.RunOpenAI(r.Context(), cc, sink)

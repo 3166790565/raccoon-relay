@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/3166790565/raccoon-relay/internal/cache"
 	"github.com/3166790565/raccoon-relay/internal/config"
 	"github.com/3166790565/raccoon-relay/internal/pool"
 	"github.com/3166790565/raccoon-relay/internal/raccoon"
@@ -81,6 +82,8 @@ type Server struct {
 	st      *store.Store
 	engine  *Engine
 	catalog *Catalog
+	// sem 是跨实例并发闸门；nil 表示不限制并发。
+	sem cache.Semaphore
 }
 
 func NewServer(cfg *config.Config, st *store.Store, engine *Engine, catalog *Catalog) *Server {

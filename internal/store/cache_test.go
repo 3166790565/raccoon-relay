@@ -125,6 +125,35 @@ func TestAccountWriteInvalidatesSnapshot(t *testing.T) {
 	}
 }
 
+// Close 必须先停掉异步写手并刷完，不能留下 "database is closed" 的丢账。
+func TestCloseFlushesPendingUsage(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir, "k", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5; i++ {
+		s.AddUsageAsync(UsageLog{Model: "m", Status: 200})
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// 重新打开同一目录，确认 5 条都在。
+	s2, err := Open(dir, "k", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	var n int64
+	if err := s2.queryRow(context.Background(), `SELECT COUNT(*) FROM usage_logs`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 5 {
+		t.Fatalf("关闭时应把 5 条流水刷完，实际 %d", n)
+	}
+}
+
 func TestAddUsageAsyncFlushes(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)

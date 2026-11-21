@@ -25,9 +25,10 @@ type Store struct {
 	keys keyCacheState
 	snap accountSnapshot
 	// usage 异步写入器，见 usage_async.go。
-	usageOnce    sync.Once
-	usageQ       chan UsageLog
-	usagePending int64
+	usageOnce     sync.Once
+	usageStopOnce sync.Once
+	usageQ        chan UsageLog
+	usagePending  int64
 }
 
 // Options 是打开存储层的完整参数。零值等价于纯 SQLite 本地模式。
@@ -113,7 +114,11 @@ func OpenWithOptions(o Options) (*Store, error) {
 	return s, nil
 }
 
-func (s *Store) Close() error { return s.db.Close() }
+func (s *Store) Close() error {
+	// 先停异步写手再关库，否则最后一批流水会撞上 closed database。
+	s.StopUsage()
+	return s.db.Close()
+}
 
 // Dialect 返回当前方言，供需要逐条改写 SQL 的调用方判断。
 func (s *Store) Dialect() dialect { return s.dialect }

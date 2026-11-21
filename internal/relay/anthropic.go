@@ -28,6 +28,15 @@ func (s *Server) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 	cc := BuildChatContext(model, oaBody, DefaultModel)
 	start := time.Now()
 
+	// 并发上限：超出时排队，拿到槽位才继续。
+	release, qerr := s.acquireSlot(r.Context(), "anthropic", cc.Model)
+	if qerr != nil {
+		code, msg := publicError(qerr)
+		writeJSON(w, code, anthropicError("api_error", msg))
+		return
+	}
+	defer release()
+
 	if streamReq {
 		sink := newAnthropicSSE(w, cc.Model)
 		res, err := s.engine.RunOpenAI(r.Context(), cc, sink)
