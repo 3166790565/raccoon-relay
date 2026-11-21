@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"golang.org/x/text/encoding/simplifiedchinese"
 )
 
 // 403 的现场必须带出来：只有一句「HTTP 403」用户没法排查，
@@ -105,5 +107,41 @@ func TestRequestIDHeaders(t *testing.T) {
 	}
 	if requestIDOf(map[string]string{"server": "nginx"}) != "" {
 		t.Fatal("没有请求 ID 头时应返回空")
+	}
+}
+
+// 上游可能用 GBK 发错误文案：要转成 UTF-8，否则面板上全是乱码。
+func TestUpstreamErrTextDecodesGBK(t *testing.T) {
+	msg := "系统检测到当前账号存在异常调用，请稍后重试"
+	gbk, err := simplifiedchinese.GBK.NewEncoder().Bytes([]byte(`{"code":200108,"message":"` + msg + `"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := upstreamErrText(429, gbk)
+	if got != msg {
+		t.Fatalf("GBK 文案应转成可读中文，实际 %q", got)
+	}
+}
+
+// 合法 UTF-8 不能被误转。
+func TestUpstreamErrTextKeepsUTF8(t *testing.T) {
+	body := []byte(`{"code":200108,"message":"账号异常"}`)
+	if got := upstreamErrText(429, body); got != "账号异常" {
+		t.Fatalf("UTF-8 文案应原样返回，实际 %q", got)
+	}
+}
+
+// 业务错误码要能从两种信封里取出来：{code} 与 {error:{code}}。
+func TestCodeFromBody(t *testing.T) {
+	cases := map[string]int{
+		`{"code":200108,"message":"x"}`:           200108,
+		`{"error":{"code":200108,"message":"x"}}`: 200108,
+		`{"code":0,"data":{}}`:                    0,
+		`not json`:                                0,
+	}
+	for body, want := range cases {
+		if got := codeFromBody([]byte(body)); got != want {
+			t.Fatalf("%s 应取出 %d，实际 %d", body, want, got)
+		}
 	}
 }

@@ -282,6 +282,7 @@ func deleteAccountRows(ctx context.Context, ex interface {
 }, id string) error {
 	for _, q := range []string{
 		`DELETE FROM model_cooldowns WHERE account_id = ?`,
+		`DELETE FROM account_cooldowns WHERE account_id = ?`,
 		`DELETE FROM checkin_history WHERE account_id = ?`,
 		`DELETE FROM accounts WHERE id = ?`,
 	} {

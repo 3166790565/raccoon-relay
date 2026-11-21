@@ -1,4 +1,5 @@
 :root {
+  color-scheme: dark; /* 让滚动条/表单控件跟随深色，否则右侧和底部是一条白边 */
   --bg: #0f1115;
   --card: #171a21;
   --line: #262b36;
@@ -14,6 +15,19 @@ body {
   margin: 0; background: var(--bg); color: var(--fg);
   font: 14px/1.5 -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
 }
+/* 深色滚动条：默认的白色滚动条贴在深色表格边上像两条白边 */
+html { scrollbar-color: #333a48 #12151b; scrollbar-width: thin; }
+.ev-wrap, .pool-wrap, .tablewrap, .out, .modal-body, .pop-body, .log-wrap {
+  scrollbar-color: #333a48 #12151b;
+}
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: #12151b; }
+*::-webkit-scrollbar-thumb {
+  background: #333a48; border-radius: 6px;
+  border: 2px solid #12151b; background-clip: padding-box;
+}
+*::-webkit-scrollbar-thumb:hover { background: #475064; background-clip: padding-box; }
+*::-webkit-scrollbar-corner { background: #12151b; }
 code { background: #22262f; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
 
 .topbar {
@@ -600,6 +614,52 @@ body.modal-open { overflow: hidden; }
   .ev-wrap { max-height: none; }
   .ev-tabs .log-search { max-width: none; }
   .ev-c-account { display: none; }
+}
+
+/* ---------- 签到中心 ---------- */
+.ck-overview {
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px;
+  margin-bottom: 16px;
+}
+.ck-stat { padding: 14px 16px; }
+.ck-stat .k { font-size: 12px; color: var(--dim); }
+.ck-stat .v { font-size: 26px; font-weight: 700; margin-top: 2px; font-variant-numeric: tabular-nums; }
+.ck-stat .v small { font-size: 14px; font-weight: 500; color: var(--dim); margin-left: 1px; }
+.ck-stat .v.warn { color: var(--warn); }
+.ck-stat .v.bad { color: var(--bad); }
+.ck-sub { font-size: 11px; color: var(--dim); margin-top: 4px; line-height: 1.4; }
+.ck-bar {
+  height: 6px; border-radius: 4px; background: #232833; overflow: hidden; margin-top: 10px;
+}
+.ck-bar i { display: block; height: 100%; background: var(--ok); border-radius: 4px; transition: width .25s; }
+
+.ck-sched { display: flex; align-items: center; justify-content: space-between; gap: 20px; flex-wrap: wrap; margin-bottom: 16px; }
+.ck-sched-left { min-width: 0; flex: 1; }
+.ck-sched-title { display: flex; align-items: center; gap: 10px; }
+.ck-dot { width: 8px; height: 8px; border-radius: 50%; background: #4a4f5c; flex: none; }
+.ck-dot.on { background: var(--ok); box-shadow: 0 0 0 3px rgba(63,185,106,.18); }
+.ck-sched-left .hint { margin-top: 8px; max-width: 640px; }
+.ck-sched-right { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
+.ck-next { text-align: right; }
+.ck-next .k { font-size: 12px; color: var(--dim); }
+.ck-next .v { font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.ck-sched-ops { display: flex; gap: 8px; }
+
+.ck-card { padding: 0; overflow: visible; margin-bottom: 16px; }
+.ck-head { padding: 14px 16px 10px; margin: 0; }
+.ck-head .row { flex-wrap: wrap; }
+.ck-acc-wrap { max-height: calc(100vh - 400px); min-height: 180px; overflow: auto; }
+.ck-state { font-size: 12px; font-weight: 600; }
+.ck-state.ok { color: var(--ok); }
+.ck-state.warn { color: var(--warn); }
+.ck-state.bad { color: var(--bad); }
+.ck-state.dim { color: var(--dim); }
+.ck-card #ckRecMsg { padding: 0 16px 10px; margin: 0; }
+.ck-card .log-foot { padding: 10px 16px; }
+
+@media (max-width: 900px) {
+  .ck-overview { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ck-next { text-align: left; }
 }
 
 /* ---------- 版本更新 ---------- */

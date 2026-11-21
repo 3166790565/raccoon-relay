@@ -52,6 +52,16 @@ var schema = []string{
 		PRIMARY KEY (account_id, model)
 	)`,
 
+	// 账号级失败链：200108「账号异常调用」这类上游处罚针对整个账号，换模型也没用。
+	// 和模型级冷却一样按 3 → 5 → 10… 阶梯累加，所以命中次数要单独落库，
+	// 否则进程重启后阶梯会退回第一档。
+	`CREATE TABLE IF NOT EXISTS account_cooldowns (
+		account_id TEXT PRIMARY KEY,
+		until      INTEGER NOT NULL DEFAULT 0,
+		reason     TEXT NOT NULL DEFAULT '',
+		hits       INTEGER NOT NULL DEFAULT 0
+	)`,
+
 	`CREATE TABLE IF NOT EXISTS checkin_history (
 		id         INTEGER PRIMARY KEY AUTOINCREMENT,
 		account_id TEXT NOT NULL,
@@ -61,6 +71,8 @@ var schema = []string{
 		already    INTEGER NOT NULL DEFAULT 0,
 		credit     INTEGER NOT NULL DEFAULT 0,
 		message    TEXT NOT NULL DEFAULT '',
+		-- 触发来源：auto 定时 / manual 手动 / onboard 新号落地。老数据为空。
+		source     TEXT NOT NULL DEFAULT '',
 		at         INTEGER NOT NULL DEFAULT 0
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_checkin_day ON checkin_history(account_id, day)`,

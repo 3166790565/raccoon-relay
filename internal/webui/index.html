@@ -30,6 +30,7 @@
     <nav class="navtabs" id="navTabs">
       <button class="navtab active" data-page="overview">概览</button>
       <button class="navtab" data-page="accounts">号池</button>
+      <button class="navtab" data-page="checkin">签到中心</button>
       <button class="navtab" data-page="add">添加账号</button>
       <button class="navtab" data-page="keys">API Keys</button>
       <button class="navtab" data-page="logs">调用日志</button>
@@ -110,6 +111,182 @@
           <span class="hint" id="poolFootInfo">共 0 条（全部显示）</span>
         </div>
         <p class="msg" id="tableMsg"></p>
+      </section>
+    </section>
+
+    <!-- 签到中心 -->
+    <section class="page xwide" id="page-checkin">
+      <!-- 概览卡 -->
+      <section class="ck-overview">
+        <div class="stat ck-stat">
+          <div class="k">今日签到</div>
+          <div class="v" id="ckDone">0<small>/0</small></div>
+          <div class="ck-bar"><i id="ckBar" style="width:0%"></i></div>
+          <div class="ck-sub" id="ckDoneSub">还没有账号</div>
+        </div>
+        <div class="stat ck-stat">
+          <div class="k">待签到</div>
+          <div class="v warn" id="ckPending">0</div>
+          <div class="ck-sub" id="ckPendingSub">-</div>
+        </div>
+        <div class="stat ck-stat">
+          <div class="k">签到失败</div>
+          <div class="v bad" id="ckFailed">0</div>
+          <div class="ck-sub" id="ckFailedSub">今日已尝试但失败</div>
+        </div>
+        <div class="stat ck-stat">
+          <div class="k">累计记录</div>
+          <div class="v" id="ckTotal">0</div>
+          <div class="ck-sub" id="ckTotalSub">全部签到流水</div>
+        </div>
+      </section>
+
+      <!-- 定时计划 -->
+      <section class="card ck-sched">
+        <div class="ck-sched-left">
+          <div class="ck-sched-title">
+            <span class="ck-dot" id="ckSchedDot"></span>
+            <h2 style="margin:0">定时签到</h2>
+            <span class="tag" id="ckSchedState">-</span>
+          </div>
+          <p class="hint" id="ckSchedDesc">-</p>
+        </div>
+        <div class="ck-sched-right">
+          <div class="ck-next">
+            <div class="k">下次执行</div>
+            <div class="v" id="ckNextRun">-</div>
+            <div class="ck-sub" id="ckNextSub">-</div>
+          </div>
+          <div class="ck-sched-ops">
+            <button class="primary" id="ckRunAllBtn">立即签到</button>
+            <button class="ghost" id="ckSchedBtn">去设置</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- 账号签到列表 -->
+      <section class="card ck-card">
+        <div class="log-head ck-head">
+          <div class="log-title">
+            <h2>账号签到</h2>
+            <span class="log-count" id="ckAccCount">-</span>
+            <span class="hint">点击行内按钮可单独补签</span>
+          </div>
+          <div class="row">
+            <div class="seg" id="ckAccFilter" role="tablist">
+              <button class="on" data-v="all">全部 <b id="ckAccAll">0</b></button>
+              <button data-v="done">已签 <b id="ckAccDone">0</b></button>
+              <button data-v="pending">待签 <b id="ckAccPending">0</b></button>
+              <button data-v="failed">失败 <b id="ckAccFailed">0</b></button>
+            </div>
+            <div class="search log-search">
+              <span>⌕</span>
+              <input id="ckAccSearch" placeholder="账号 / uid / 备注" autocomplete="off">
+            </div>
+            <button class="ghost" id="ckRefreshBtn">刷新</button>
+          </div>
+        </div>
+        <div class="log-wrap ck-acc-wrap">
+          <table id="ckAccTable" class="log-table">
+            <thead><tr>
+              <th class="lc-account">账号</th>
+              <th>状态</th>
+              <th>今日结果</th>
+              <th class="lc-time">时间</th>
+              <th>来源</th>
+              <th class="lc-detail"></th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+          <p class="empty" id="ckAccEmpty" hidden>当前筛选下没有账号</p>
+        </div>
+      </section>
+
+      <!-- 签到记录 -->
+      <section class="card ck-card">
+        <div class="log-head ck-head">
+          <div class="log-title">
+            <h2>签到记录</h2>
+            <span class="log-count" id="ckRecCount">-</span>
+            <span class="hint">每次签到一行，按时间倒序</span>
+          </div>
+          <div class="row">
+            <label class="auto-refresh" title="停留在本页且标签可见时，按所选间隔自动刷新">
+              <input type="checkbox" id="ckAuto">
+              <span>自动刷新</span>
+              <select id="ckAutoSec">
+                <option value="10" selected>10 秒</option>
+                <option value="30">30 秒</option>
+                <option value="60">60 秒</option>
+              </select>
+              <i class="auto-dot" id="ckAutoDot"></i>
+            </label>
+            <button class="ghost" id="ckRecRefreshBtn">刷新</button>
+          </div>
+        </div>
+        <div class="log-filters">
+          <div class="seg log-range" id="ckRange">
+            <button class="on" data-v="today">今天</button>
+            <button data-v="yesterday">昨天</button>
+            <button data-v="7d">7 天</button>
+            <button data-v="30d">30 天</button>
+            <button data-v="all">全部</button>
+          </div>
+          <label class="lf-field"><span>结果</span>
+            <select id="ckResult">
+              <option value="">全部结果</option>
+              <option value="claimed">领取成功</option>
+              <option value="already">今日已领</option>
+              <option value="fail">失败</option>
+            </select>
+          </label>
+          <label class="lf-field"><span>来源</span>
+            <select id="ckSource">
+              <option value="">全部来源</option>
+              <option value="auto">定时任务</option>
+              <option value="manual">手动签到</option>
+              <option value="onboard">新号落地</option>
+            </select>
+          </label>
+          <label class="lf-field"><span>账号</span>
+            <select id="ckAccount"><option value="">全部账号</option></select>
+          </label>
+          <div class="search log-search">
+            <span>⌕</span>
+            <input id="ckRecSearch" placeholder="原因 / 账号" autocomplete="off">
+          </div>
+          <button class="ghost tiny" id="ckRecReset">重置</button>
+        </div>
+        <div class="log-wrap">
+          <table id="ckRecTable" class="log-table">
+            <thead><tr>
+              <th class="lc-time">时间</th>
+              <th class="lc-account">账号</th>
+              <th>日</th>
+              <th>结果</th>
+              <th>来源</th>
+              <th class="lc-error">说明</th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+          <p class="empty" id="ckRecEmpty" hidden>还没有签到记录</p>
+        </div>
+        <div class="log-foot">
+          <span class="hint" id="ckRecRangeInfo">共 0 条</span>
+          <span class="grow"></span>
+          <span class="hint" id="ckRecPageInfo">第 1 / 1 页</span>
+          <label class="lf-field tiny-field">每页
+            <select id="ckPageSize">
+              <option value="20">20</option>
+              <option value="50" selected>50</option>
+              <option value="100">100</option>
+              <option value="200">200</option>
+            </select>
+          </label>
+          <button class="ghost tiny" id="ckPrev">上一页</button>
+          <button class="ghost tiny" id="ckNext">下一页</button>
+        </div>
+        <p class="msg" id="ckRecMsg"></p>
       </section>
     </section>
 
@@ -518,6 +695,12 @@
               <option value="false">关闭 · 冷却整个账号 60 秒</option>
             </select>
           </div>
+          <div class="field"><label>200108 账号异常按账号冷却</label>
+            <select id="setAccountAbnormalCool">
+              <option value="true">开启 · 整个账号阶梯冷却</option>
+              <option value="false">关闭 · 按普通上游失败冷却 10 分钟</option>
+            </select>
+          </div>
           <div class="field"><label>积分过低暂停</label>
             <select id="setCreditStopEnable">
               <option value="false">关闭</option>
@@ -530,6 +713,8 @@
         <p class="hint">429 默认只冷却出问题的那一个「账号 × 模型」：同一账号换别的模型仍然可用。
           冷却阶梯为 3 分钟 → 5 分钟 → 10 分钟，之后每次翻倍（封顶 24 小时）；冷却结束后该模型一旦调用成功即清零，
           下次再从 3 分钟算起。<br>
+          上游返回 200108「账号存在异常调用」时罚的是整个账号，换模型绕不过去：默认按账号级冷却，
+          用的也是同一条阶梯（3 → 5 → 10… 分钟），到期自动恢复，调用成功即清零。<br>
           积分阈值独立于账号冷却：已知余额 ≤「暂停阈值」时该号暂停选号，等到 ≥「解除阈值」时自动恢复——
           通常配合签到使用，签到补上积分后立即解除，无需等冷却时间。<strong>解除阈值不能小于暂停阈值</strong>。</p>
         <button class="primary" id="saveCooldownBtn">保存冷却设置</button>

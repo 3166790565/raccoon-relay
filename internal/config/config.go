@@ -41,6 +41,9 @@ type Config struct {
 	UpstreamTimeoutSec int
 	MaxBodyMB          int
 	ModelCooldown      bool
+	// AccountAbnormalCool：上游 200108「账号异常」是否按账号级阶梯冷却。
+	// 默认开启；面板可热更新并持久化到 settings。
+	AccountAbnormalCool bool
 	// 积分阈值：低于 StopBelow 暂停该号，回升到 ResumeAbove 解除。
 	CreditStopEnable  bool
 	CreditStopBelow   int64
@@ -139,19 +142,20 @@ func Load() (*Config, error) {
 		RefreshWindowSec:    envInt("REFRESH_WINDOW_SEC", 300),
 		// 默认提前 3 天续期、每 6 小时扫一次、账号间隔 1 秒：避开了「提前太久轮换凭据」
 		// 的坑，也给长时间停机留够余量。
-		RenewWindowSec:     envInt("RENEW_WINDOW_SEC", 3*24*3600),
-		RenewIntervalM:     envInt("RENEW_INTERVAL_MIN", 360),
-		RenewGapMS:         envInt("RENEW_GAP_MS", 1000),
-		StreamIdleTimeout:  time.Duration(envInt("STREAM_IDLE_TIMEOUT_SEC", 120)) * time.Second,
-		UpstreamTimeoutSec: envInt("UPSTREAM_TIMEOUT_SEC", 120),
-		MaxBodyMB:          envInt("MAX_BODY_MB", 32),
-		ModelCooldown:      envBool("MODEL_COOLDOWN_ENABLE", true),
-		CreditStopEnable:   envBool("CREDIT_STOP_ENABLE", false),
-		CreditStopBelow:    envInt64("CREDIT_STOP_BELOW", 0),
-		CreditResumeAbove:  envInt64("CREDIT_RESUME_ABOVE", 0),
-		OAuthRedirectBase:  strings.TrimRight(env("OAUTH_REDIRECT_BASE", ""), "/"),
-		Timezone:           env("TZ", "Asia/Shanghai"),
-		UpstreamBase:       strings.TrimRight(env("UPSTREAM_BASE", "https://xiaohuanxiong.com"), "/"),
+		RenewWindowSec:      envInt("RENEW_WINDOW_SEC", 3*24*3600),
+		RenewIntervalM:      envInt("RENEW_INTERVAL_MIN", 360),
+		RenewGapMS:          envInt("RENEW_GAP_MS", 1000),
+		StreamIdleTimeout:   time.Duration(envInt("STREAM_IDLE_TIMEOUT_SEC", 120)) * time.Second,
+		UpstreamTimeoutSec:  envInt("UPSTREAM_TIMEOUT_SEC", 120),
+		MaxBodyMB:           envInt("MAX_BODY_MB", 32),
+		ModelCooldown:       envBool("MODEL_COOLDOWN_ENABLE", true),
+		AccountAbnormalCool: envBool("ACCOUNT_ABNORMAL_COOL", true),
+		CreditStopEnable:    envBool("CREDIT_STOP_ENABLE", false),
+		CreditStopBelow:     envInt64("CREDIT_STOP_BELOW", 0),
+		CreditResumeAbove:   envInt64("CREDIT_RESUME_ABOVE", 0),
+		OAuthRedirectBase:   strings.TrimRight(env("OAUTH_REDIRECT_BASE", ""), "/"),
+		Timezone:            env("TZ", "Asia/Shanghai"),
+		UpstreamBase:        strings.TrimRight(env("UPSTREAM_BASE", "https://xiaohuanxiong.com"), "/"),
 
 		LogFileEnable:     envBool("LOG_FILE_ENABLE", true),
 		LogDir:            env("LOG_DIR", filepath.Join(env("DATA_DIR", "/data"), "logs")),

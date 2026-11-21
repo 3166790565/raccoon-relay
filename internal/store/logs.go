@@ -10,6 +10,7 @@ type CheckinRecord struct {
 	AccountID string
 	Day       string
 	Action    string
+	Source    string // auto / manual / onboard，见 CheckinSourceXxx
 	OK        bool
 	Already   bool
 	Credit    int64
@@ -29,8 +30,8 @@ func (s *Store) AddCheckin(ctx context.Context, r CheckinRecord) error {
 		r.At = time.Now().UnixMilli()
 	}
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO checkin_history (account_id, day, action, ok, already, credit, message, at) VALUES (?,?,?,?,?,?,?,?)`,
-		r.AccountID, r.Day, r.Action, ok, already, r.Credit, r.Message, r.At)
+		`INSERT INTO checkin_history (account_id, day, action, source, ok, already, credit, message, at) VALUES (?,?,?,?,?,?,?,?,?)`,
+		r.AccountID, r.Day, r.Action, r.Source, ok, already, r.Credit, r.Message, r.At)
 	return err
 }
 

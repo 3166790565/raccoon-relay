@@ -53,6 +53,9 @@ func (s *sseWriter) writeFrame(obj any) error {
 	return nil
 }
 
+// Commitment 实现 committingSink：Begin 已经写出首帧，之后不能换号。
+func (s *sseWriter) Commitment() bool { return s.started }
+
 func (s *sseWriter) Begin() error {
 	h := s.w.Header()
 	h.Set("Content-Type", "text/event-stream; charset=utf-8")

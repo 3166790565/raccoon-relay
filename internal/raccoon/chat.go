@@ -11,6 +11,9 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
+
+	"golang.org/x/text/encoding/simplifiedchinese"
 )
 
 // Delta 是流式增量。Reasoning 单独拆出来，便于 Anthropic 侧映射成 thinking 块。
@@ -184,9 +187,13 @@ func (c *Client) OpenChat(ctx context.Context, req ChatRequest) (*ChatStream, er
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+		body = normalizeBodyEncoding(body)
 		resp.Body.Close()
 		cancel()
-		ue := &UpstreamError{Status: resp.StatusCode, Message: upstreamErrText(resp.StatusCode, body),
+		// 业务错误码必须带出来：200108（账号异常）、6004（模型限流）这些
+		// 都挂在响应体的 {code,message} 上，只看 HTTP 状态会全部退化成 429/4xx。
+		ue := &UpstreamError{Status: resp.StatusCode, Code: codeFromBody(body),
+			Message:  upstreamErrText(resp.StatusCode, body),
 			Endpoint: PathChat, TurnID: turnID, RequestSummary: req.summary(turnID)}
 		ue.attachDiagnostics(resp.Header, body)
 		return nil, ue
@@ -383,8 +390,48 @@ func firstNonZero(vals ...int64) int64 {
 	return 0
 }
 
+// codeFromBody 从错误体里取业务错误码。
+//
+// 上游两种形态都有：{code,message} 信封，以及 {error:{code,message}} 嵌套体；
+// HTTP 状态码只是传输层的结果，200108 这类业务码才是分类依据。
+func codeFromBody(body []byte) int {
+	var outer struct {
+		Code  int `json:"code"`
+		Error *struct {
+			Code int `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &outer); err != nil {
+		return 0
+	}
+	if outer.Code != 0 {
+		return outer.Code
+	}
+	if outer.Error != nil {
+		return outer.Error.Code
+	}
+	return 0
+}
+
+// normalizeBodyEncoding 把上游错误体统一成 UTF-8。
+//
+// 小浣熊的部分错误文案是 GBK 编码发出的（Windows 客户端链路常见），
+// 直接 json.Unmarshal 会得到一串「ϵͳ��⵽」：字段能解出来，但人在面板上看不懂，
+// 也无法按 error.code 之外的条件检索。这里只在「不是合法 UTF-8」时按 GB18030 转码，
+// 合法 UTF-8 原样返回，正常的 JSON 不会被误伤。
+func normalizeBodyEncoding(body []byte) []byte {
+	if len(body) == 0 || utf8.Valid(body) {
+		return body
+	}
+	if out, err := simplifiedchinese.GB18030.NewDecoder().Bytes(body); err == nil {
+		return out
+	}
+	return body
+}
+
 // upstreamErrText 尽量从错误体里抠出可读文案。
 func upstreamErrText(status int, body []byte) string {
+	body = normalizeBodyEncoding(body)
 	var env Envelope
 	if err := json.Unmarshal(body, &env); err == nil {
 		if m := env.ErrMessage(); m != "" {

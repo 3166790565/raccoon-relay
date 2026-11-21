@@ -72,11 +72,21 @@ type Attempt struct {
 	Started bool
 }
 
+// committingSink 由「会立刻把字节写给客户端」的 sink 实现（流式 SSE）。
+// 聚合型 sink（非流式）的 Begin 只是空实现，上游 200 却不吐帧时换号重试仍然安全：
+// 此时客户端一个字节都没收到。没有实现这个接口的 sink 不因 Begin 而锁死重试。
+type committingSink interface {
+	Commitment() bool
+}
+
 // RunOpenAI 执行 OpenAI 协议的一次完整转发（含换号重试）。
 // 返回的 usage 与 account 用于写流水。
 func (e *Engine) RunOpenAI(ctx context.Context, req *ChatContext, sink OpenAISink) (Result, error) {
 	var excluded = map[string]bool{}
 	var lastErr error
+	// lastAcc 记住最后一次尝试的账号：全池失败时返回它，流水与面板才不会只显示一个「-」，
+	// 事后至少知道「最后卡在哪个号上」。
+	var lastAcc string
 
 	for attemptNo := 0; ; attemptNo++ {
 		untilExhausted, maxRetry := e.RetryPolicy()
@@ -92,6 +102,7 @@ func (e *Engine) RunOpenAI(ctx context.Context, req *ChatContext, sink OpenAISin
 		}
 		acc := lease.Account
 		excluded[acc.ID] = true
+		lastAcc = acc.ID
 
 		at := &Attempt{Account: acc, Lease: lease, IDN: identityOf(acc)}
 		leaseErr := e.runOne(ctx, at, req, sink)
@@ -101,6 +112,15 @@ func (e *Engine) RunOpenAI(ctx context.Context, req *ChatContext, sink OpenAISin
 			return Result{AccountID: acc.ID, Model: req.Model}, nil
 		}
 		lastErr = leaseErr
+
+		// 客户端已经断开：不罚号、不换号。继续重试只会拿别的号再打一次上游，
+		// 结果仍然写不出去，还会在号池里制造假故障。
+		if isClientGone(leaseErr) {
+			e.report(store.LevelWarn, "客户端已断开，本次请求终止",
+				fmt.Sprintf("模型：%s\n账号：%s\n尝试序号：%d\n原因：%s",
+					req.Model, acc.Name, attemptNo+1, strings.TrimSpace(leaseErr.Error())), acc.ID)
+			return Result{AccountID: acc.ID, Model: req.Model}, errClientGone
+		}
 
 		kind, switchable, code, publicMsg := classify(leaseErr)
 		level := store.LevelWarn
@@ -117,15 +137,38 @@ func (e *Engine) RunOpenAI(ctx context.Context, req *ChatContext, sink OpenAISin
 				detail += "\n" + block
 			}
 		}
-		// 429 只罚「这个号 × 这个模型」，不把整个号停掉：同一个号换个模型往往还是好的。
-		// 只有模型级冷却被关闭时才退化为整号短冷却。
-		if isModelScoped(leaseErr) || (kind == pool.FailRate && e.Cool.ModelEnabled()) {
-			e.Cool.CoolModel(ctx, acc.ID, req.Model, leaseErr.Error())
-			e.report(level, "模型级冷却："+req.Model+" · "+publicMsg, detail+"\n处置：仅冷却该模型", acc.ID)
+		// 200108 这类「上游判定账号异常」处罚的是整个账号：换模型也绕不过去，
+		// 所以按账号级阶梯冷却（3 → 5 → 10… 分钟），阶梯到期自动恢复。
+		if kind == pool.FailAccountAbnormal && e.Cool.AccountAbnormalEnabled() {
+			e.Cool.CoolAccountLadder(ctx, acc.ID, publicMsg)
+			e.report(level, "账号级冷却 · "+publicMsg, detail+"\n处置：冷却整个账号，已换号重试", acc.ID)
 			if at.Started {
 				return Result{AccountID: acc.ID, Model: req.Model}, leaseErr
 			}
 			continue
+		}
+		// 429 只罚「这个号 × 这个模型」，不把整个号停掉：同一个号换个模型往往还是好的。
+		if kind == pool.FailAccountAbnormal {
+			// 开关关闭：按普通上游失败走下面的 10 分钟冷却路径。
+		} else if isModelScoped(leaseErr) || kind == pool.FailRate {
+			if e.Cool.ModelEnabled() {
+				e.Cool.CoolModel(ctx, acc.ID, req.Model, leaseErr.Error())
+				e.report(level, "模型级冷却："+req.Model+" · "+publicMsg, detail+"\n处置：仅冷却该模型", acc.ID)
+				if at.Started {
+					return Result{AccountID: acc.ID, Model: req.Model}, leaseErr
+				}
+				continue
+			}
+			// 模型级冷却被关闭：429 退化为整号 60 秒短冷却，但 6004/11102 是
+			// 「这个号确实用不了这个模型」，不该因此把整个号停掉——
+			// 选号层会继续选中它，至少换个模型还能用。
+			if isModelScoped(leaseErr) {
+				e.report(level, "模型不可用："+req.Model+" · "+publicMsg, detail+"\n处置：不冷却账号，换号重试", acc.ID)
+				if at.Started {
+					return Result{AccountID: acc.ID, Model: req.Model}, leaseErr
+				}
+				continue
+			}
 		}
 		e.Cool.Cool(ctx, acc.ID, kind, leaseErr.Error())
 		action := "已换号重试"
@@ -149,8 +192,8 @@ func (e *Engine) RunOpenAI(ctx context.Context, req *ChatContext, sink OpenAISin
 	}
 	// 号池抽干才到这里：这是要人处理的状态，按错误级别记。
 	e.report(store.LevelError, "号池无可用账号，请求失败",
-		"模型："+req.Model+"\n原因："+lastErr.Error(), "")
-	return Result{}, lastErr
+		"模型："+req.Model+"\n原因："+lastErr.Error(), lastAcc)
+	return Result{AccountID: lastAcc, Model: req.Model}, lastErr
 }
 
 var errNoAccount = errors.New("号池没有可用账号（全部冷却、积分耗尽或凭证失效）")
@@ -206,7 +249,12 @@ func (e *Engine) runOne(ctx context.Context, at *Attempt, req *ChatContext, sink
 	if err := sink.Begin(); err != nil {
 		return err
 	}
-	at.Started = true
+	// 只有真正往客户端字节流里写过东西，才算「已开始」。流式 sink 的 Begin
+	// 会立刻写出首帧，所以马上算已开始；聚合型 sink 的 Begin 是空实现，
+	// 此时上游若 200 却一帧不吐，换号重试完全安全。
+	if c, ok := sink.(committingSink); ok && c.Commitment() {
+		at.Started = true
+	}
 
 	for {
 		ev, err := stream.Next()
@@ -235,7 +283,8 @@ func (e *Engine) runOne(ctx context.Context, at *Attempt, req *ChatContext, sink
 		return &raccoon.UpstreamError{Status: 502, Message: "小浣熊上游返回空响应"}
 	}
 	e.Cool.MarkOnline(ctx, at.Account.ID)
-	// 成功即清零这条「账号×模型」的失败链，下次再 429 从 3 分钟重新计。
+	// 成功即清零这两条失败链，下次再出问题从 3 分钟重新计。
+	// 账号级链在 MarkOnline 里清零，这里只需要清「账号×模型」那条。
 	e.Cool.ClearModel(ctx, at.Account.ID, req.Model)
 	sink.Complete()
 	return nil

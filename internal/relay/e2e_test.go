@@ -716,3 +716,146 @@ func TestRateLimitCoolsModelNotAccount(t *testing.T) {
 		t.Fatal("冷却应只停留在被限流的那个号上")
 	}
 }
+
+// 200108「账号异常」处罚的是整个账号：应写成账号级冷却（状态 cooling），
+// 而不是只罚一个模型；换号后请求可以成功。
+func TestAccountAbnormalCoolsWholeAccount(t *testing.T) {
+	h := newHarness(t, []chatResult{
+		{status: 429, errCode: 200108, errMsg: "系统检测到当前账号存在异常调用，模型调用功能已暂时受限"},
+		{status: 200, frames: sseFrames("换号成功"), usage: usageFrame},
+	})
+	h.addAccount(t, "pu-1", 100)
+	h.addAccount(t, "pu-2", 100)
+
+	w := h.do(t, "POST", "/v1/chat/completions",
+		`{"model":"sn-test-model","messages":[{"role":"user","content":"hi"}]}`)
+	if w.Code != 200 {
+		t.Fatalf("换号后应成功，实际 %d：%s", w.Code, w.Body.String())
+	}
+
+	// 选号顺序取决于策略，不假设是哪个号吃到了 200108：
+	// 恰好一个号进入账号级冷却，另一个正常服务。
+	accounts, _ := h.st.ListAccounts(context.Background())
+	var cooled []*store.Account
+	for _, a := range accounts {
+		if a.Status == store.StatusCooling {
+			cooled = append(cooled, a)
+		}
+	}
+	if len(cooled) != 1 {
+		t.Fatalf("应恰好一个号被账号级冷却，实际 %d", len(cooled))
+	}
+	acc := cooled[0]
+	if acc.CoolUntil <= time.Now().UnixMilli() {
+		t.Fatalf("账号冷却应带未来到期时间，实际 %d", acc.CoolUntil)
+	}
+	if acc.CoolReason == "" {
+		t.Fatal("账号冷却应记录原因")
+	}
+	// 不是模型级罚单：那条路径只罚「账号×模型」并保持账号在线
+	if h.cool.IsModelCooled(acc.ID, "sn-test-model") {
+		t.Fatal("200108 不该退化成模型级冷却")
+	}
+	// 换模型也不能绕过：这个号整体在冷却里，同号其它模型请求不会再被选中
+	if lease, _ := h.engine.Pool.Pick(context.Background(), "另一个模型", map[string]bool{}); lease != nil && lease.Account.ID == acc.ID {
+		t.Fatal("账号级冷却中的号不该被再次选中")
+	}
+}
+
+// 200108 的冷却阶梯要像 429 一样逐次拉长：第二次命中应比第一次更久。
+func TestAccountAbnormalLadderEscalates(t *testing.T) {
+	h := newHarness(t, nil)
+	a := h.addAccount(t, "pu-1", 100)
+	ctx := context.Background()
+
+	h.cool.CoolAccountLadder(ctx, a.ID, "账号异常")
+	_, hits1, _ := h.cool.AccountCooldownOf(a.ID)
+	acc, _ := h.st.GetAccount(ctx, a.ID)
+	first := acc.CoolUntil - time.Now().UnixMilli()
+
+	h.cool.CoolAccountLadder(ctx, a.ID, "账号异常")
+	_, hits2, _ := h.cool.AccountCooldownOf(a.ID)
+	acc, _ = h.st.GetAccount(ctx, a.ID)
+	second := acc.CoolUntil - time.Now().UnixMilli()
+
+	if hits1 != 1 || hits2 != 2 {
+		t.Fatalf("命中次数应累加，实际 %d → %d", hits1, hits2)
+	}
+	if second <= first {
+		t.Fatalf("第二次冷却应更长：第一次约 %s，第二次约 %s",
+			time.Duration(first)*time.Millisecond, time.Duration(second)*time.Millisecond)
+	}
+
+	// 成功调用后失败链清零，下次从第一档重新开始
+	h.cool.MarkOnline(ctx, a.ID)
+	if _, hits, ok := h.cool.AccountCooldownOf(a.ID); ok && hits != 0 {
+		t.Fatalf("成功后失败链应清零，实际 hits=%d", hits)
+	}
+}
+
+// 客户端中途断开不能被当成上游故障：不能冷却账号，也不该继续换号重试。
+func TestClientCancelDoesNotPenalizeAccount(t *testing.T) {
+	h := newHarness(t, []chatResult{
+		{status: 200, frames: sseFrames("半截"), usage: usageFrame},
+	})
+	a := h.addAccount(t, "pu-1", 100)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // 请求方已经走了
+
+	sink := newAggWriter("sn-test-model")
+	_, err := h.engine.RunOpenAI(ctx, BuildChatContext("sn-test-model",
+		map[string]any{"messages": []any{map[string]any{"role": "user", "content": "hi"}}},
+		DefaultModel), sink)
+	if err == nil {
+		t.Fatal("已取消的请求应返回错误")
+	}
+
+	acc, _ := h.st.GetAccount(context.Background(), a.ID)
+	if acc.Status != store.StatusOnline {
+		t.Fatalf("客户端取消不该罚账号，实际状态 %s", acc.Status)
+	}
+	h.up.mu.Lock()
+	hits := h.up.chatHits
+	h.up.mu.Unlock()
+	if hits != 0 {
+		t.Fatalf("客户端已断开，不应再打上游，实际 %d 次", hits)
+	}
+}
+
+// 非流式请求遇到「上游 200 但一帧不发」时应换号重试，而不是直接 502。
+func TestEmptyStreamRetriesForNonStreaming(t *testing.T) {
+	h := newHarness(t, []chatResult{
+		{status: 200, frames: nil}, // 建连成功但没有任何数据块
+		{status: 200, frames: sseFrames("重试成功"), usage: usageFrame},
+	})
+	h.addAccount(t, "pu-1", 100)
+	h.addAccount(t, "pu-2", 100)
+
+	w := h.do(t, "POST", "/v1/chat/completions",
+		`{"model":"sn-test-model","messages":[{"role":"user","content":"hi"}]}`)
+	if w.Code != 200 {
+		t.Fatalf("空响应应换号重试后成功，实际 %d：%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "重试成功") {
+		t.Fatalf("内容不对: %s", w.Body.String())
+	}
+}
+
+// 全池失败时返回结果里要保留最后尝试的账号，流水与面板才能定位到号。
+func TestAllAccountsFailKeepsLastAccount(t *testing.T) {
+	h := newHarness(t, []chatResult{{status: 500, errCode: 500, errMsg: "上游炸了"}})
+	h.addAccount(t, "pu-1", 100)
+	h.addAccount(t, "pu-2", 100)
+
+	ctx := context.Background()
+	cc := BuildChatContext("sn-test-model",
+		map[string]any{"messages": []any{map[string]any{"role": "user", "content": "hi"}}}, DefaultModel)
+	res, err := h.engine.RunOpenAI(ctx, cc, newAggWriter("sn-test-model"))
+	if err == nil {
+		t.Fatal("全失败应返回错误")
+	}
+	if res.AccountID == "" {
+		t.Fatal("全池失败时应保留最后尝试的账号")
+	}
+}

@@ -164,6 +164,10 @@ func (p *Panel) Route(w http.ResponseWriter, r *http.Request) {
 		p.handleBatchAccounts(w, r)
 	case path == "/api/checkin/all" && r.Method == http.MethodPost:
 		p.handleCheckinAll(w, r)
+	case path == "/api/checkin/center" && r.Method == http.MethodGet:
+		p.handleCheckinCenter(w, r)
+	case path == "/api/checkin/history" && r.Method == http.MethodGet:
+		p.handleCheckinHistory(w, r)
 	case path == "/api/renew/run" && r.Method == http.MethodPost:
 		p.handleRenewRun(w, r)
 	case path == "/api/keys" && r.Method == http.MethodGet:
@@ -225,11 +229,14 @@ func (p *Panel) handleListAccounts(w http.ResponseWriter, r *http.Request) {
 		// 限流明细：429 只罚「账号 × 模型」，面板要把每条罚单列出来，
 		// 否则整号状态显示「正常」时用户看不到某些模型其实还在冷却。
 		modelCools := []pool.ModelCoolInfo{}
+		var accountCool *pool.AccountCoolInfo
 		if p.cool != nil {
 			modelCools = p.cool.ModelCooldownsOf(a.ID)
+			accountCool = p.cool.AccountCoolOf(a.ID)
 		}
 		out = append(out, map[string]any{
-			"id": a.ID, "uid": a.UID, "name": a.Name, "note": a.Note,
+			"accountCool": accountCool,
+			"id":          a.ID, "uid": a.UID, "name": a.Name, "note": a.Note,
 			"status": a.Status, "credits": a.Credits, "creditsAt": a.CreditsAt,
 			"coolUntil": a.CoolUntil, "coolReason": a.CoolReason,
 			"modelCools": modelCools,
@@ -598,7 +605,8 @@ func (p *Panel) actionUncool(w http.ResponseWriter, r *http.Request, acc *store.
 	// 手动解除 = 用户认为这个号现在就应该能跑：状态、冷却时刻、原因一起清掉。
 	// 积分阈值暂停（exhausted 且 CoolUntil = 0）也一并放行，否则用户点了没效果。
 	if p.cool != nil {
-		p.cool.MarkOnline(r.Context(), acc.ID)
+		// 账号级失败链也一并清掉，否则下次失败直接跳到高档冷却。
+		p.cool.ClearAccountNow(r.Context(), acc.ID)
 	} else {
 		online := store.StatusOnline
 		zero := int64(0)
@@ -625,8 +633,10 @@ func (p *Panel) handleAccountErrors(w http.ResponseWriter, r *http.Request, acc 
 		return
 	}
 	modelCools := []pool.ModelCoolInfo{}
+	var accountCool *pool.AccountCoolInfo
 	if p.cool != nil {
 		modelCools = p.cool.ModelCooldownsOf(acc.ID)
+		accountCool = p.cool.AccountCoolOf(acc.ID)
 	}
 	writeJSON(w, 200, map[string]any{
 		"ok":     true,
@@ -634,14 +644,25 @@ func (p *Panel) handleAccountErrors(w http.ResponseWriter, r *http.Request, acc 
 		"account": map[string]any{
 			"id": acc.ID, "name": acc.Name, "uid": acc.UID,
 			"status": acc.Status, "coolUntil": acc.CoolUntil, "coolReason": acc.CoolReason,
-			"modelCools": modelCools,
+			"modelCools": modelCools, "accountCool": accountCool,
 		},
 	})
 }
 
 func (p *Panel) actionCheckin(w http.ResponseWriter, r *http.Request, acc *store.Account) {
+	loc := p.cfg.Location()
+	today := time.Now().In(loc).Format("2006-01-02")
+	// 手动签到无论成败都落一条记录：签到中心按「今日最近一条」判断号的状态，
+	// 失败不写的话面板会一直显示「今日未执行」，用户重复点了也看不出变化。
+	recordFail := func(msg string) {
+		_ = p.st.AddCheckin(r.Context(), store.CheckinRecord{
+			AccountID: acc.ID, Day: today, Action: "checkin",
+			Source: store.CheckinSourceManual, OK: false, Message: msg,
+		})
+	}
 	token, err := p.refresh.EnsureFresh(r.Context(), acc)
 	if err != nil {
+		recordFail(err.Error())
 		writeJSON(w, 400, map[string]any{"ok": false, "message": err.Error()})
 		return
 	}
@@ -662,17 +683,16 @@ func (p *Panel) actionCheckin(w http.ResponseWriter, r *http.Request, acc *store
 		}
 	}
 	if err != nil {
+		recordFail(err.Error())
 		writeJSON(w, 400, map[string]any{"ok": false, "message": err.Error()})
 		return
 	}
-	loc := p.cfg.Location()
-	today := time.Now().In(loc).Format("2006-01-02")
 	if res.OK {
 		_ = p.st.UpdateAccount(r.Context(), acc.ID, store.AccountPatch{LastCheckinDay: &today})
 	}
 	_ = p.st.AddCheckin(r.Context(), store.CheckinRecord{
-		AccountID: acc.ID, Day: today, Action: "checkin", OK: res.OK,
-		Already: res.Already, Message: res.Message,
+		AccountID: acc.ID, Day: today, Action: "checkin", Source: store.CheckinSourceManual,
+		OK: res.OK, Already: res.Already, Message: res.Message,
 	})
 	// 签到完顺手同步余额：领到的积分要立刻反映到面板上。
 	// 失败不影响签到结果，只把当前已知余额带回去。
@@ -946,6 +966,11 @@ func (p *Panel) applyStoredCooldownSettings(ctx context.Context) {
 			p.cool.SetModelCooldown(b)
 		}
 	}
+	if raw := p.st.GetSetting(ctx, "accountAbnormalCool", ""); raw != "" {
+		if b, err := strconv.ParseBool(raw); err == nil {
+			p.cool.SetAccountAbnormalCool(b)
+		}
+	}
 	pol := p.po.CreditPolicy()
 	if raw := p.st.GetSetting(ctx, "creditStopEnable", ""); raw != "" {
 		if b, err := strconv.ParseBool(raw); err == nil {
@@ -1015,11 +1040,12 @@ func (p *Panel) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		"retryUntilExhausted": untilExhausted,
 		"checkinEnable":       p.cfg.CheckinEnable, "checkinHour": p.cfg.CheckinHour,
 		"checkinMinute": p.cfg.CheckinMinute, "checkinJitterMinutes": p.cfg.CheckinJitterMin,
-		"defaultModel":      relay.DefaultModel,
-		"modelCooldown":     p.cool.ModelEnabled(),
-		"creditStopEnable":  pol.Enabled,
-		"creditStopBelow":   pol.StopBelow,
-		"creditResumeAbove": pol.ResumeAbove,
+		"defaultModel":        relay.DefaultModel,
+		"modelCooldown":       p.cool.ModelEnabled(),
+		"accountAbnormalCool": p.cool.AccountAbnormalEnabled(),
+		"creditStopEnable":    pol.Enabled,
+		"creditStopBelow":     pol.StopBelow,
+		"creditResumeAbove":   pol.ResumeAbove,
 	}
 	for k, v := range p.logSettings() {
 		settings[k] = v
@@ -1093,10 +1119,11 @@ type settingsBody struct {
 	CheckinMinute       *int    `json:"checkinMinute"`
 	CheckinJitter       *int    `json:"checkinJitterMinutes"`
 
-	ModelCooldown     *bool  `json:"modelCooldown"`
-	CreditStopEnable  *bool  `json:"creditStopEnable"`
-	CreditStopBelow   *int64 `json:"creditStopBelow"`
-	CreditResumeAbove *int64 `json:"creditResumeAbove"`
+	ModelCooldown       *bool  `json:"modelCooldown"`
+	AccountAbnormalCool *bool  `json:"accountAbnormalCool"`
+	CreditStopEnable    *bool  `json:"creditStopEnable"`
+	CreditStopBelow     *int64 `json:"creditStopBelow"`
+	CreditResumeAbove   *int64 `json:"creditResumeAbove"`
 
 	LogFileEnable       *bool   `json:"logFileEnable"`
 	LogDir              *string `json:"logDir"`
@@ -1200,6 +1227,10 @@ func (p *Panel) applyCooldownSettings(ctx context.Context, body settingsBody) er
 	if body.ModelCooldown != nil {
 		p.cool.SetModelCooldown(*body.ModelCooldown)
 		_ = p.st.SetSetting(ctx, "modelCooldown", strconv.FormatBool(*body.ModelCooldown))
+	}
+	if body.AccountAbnormalCool != nil {
+		p.cool.SetAccountAbnormalCool(*body.AccountAbnormalCool)
+		_ = p.st.SetSetting(ctx, "accountAbnormalCool", strconv.FormatBool(*body.AccountAbnormalCool))
 	}
 	if body.CreditStopEnable == nil && body.CreditStopBelow == nil && body.CreditResumeAbove == nil {
 		return nil

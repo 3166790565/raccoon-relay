@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -12,14 +13,25 @@ import (
 	"github.com/3166790565/raccoon-relay/internal/raccoon"
 )
 
+// errClientGone 表示这次失败与上游无关：客户端断开、写回失败或服务正在关闭。
+// 它不能按上游故障去冷却账号，也不能继续换号重试——请求方已经不在了。
+var errClientGone = errors.New("客户端已断开，本次请求终止")
+
 // classify 把上游错误翻成号池冷却分类与是否值得换号重试。
 func classify(err error) (pool.FailKind, bool, int, string) {
+	if isClientGone(err) {
+		return pool.FailOther, false, 499, "客户端已断开"
+	}
 	var ue *raccoon.UpstreamError
 	if !errors.As(err, &ue) {
 		return pool.FailServer, true, http.StatusBadGateway, "上游请求失败"
 	}
 	msg := cleanMessage(ue.Error())
 	switch {
+	case ue.Code == codeAccountAbnormal:
+		// 200108「系统检测到当前账号存在异常调用」：上游罚的是整个账号，
+		// 不是某一次调用，换模型也绕不过去。按账号级阶梯冷却处理。
+		return pool.FailAccountAbnormal, true, http.StatusTooManyRequests, msg
 	case ue.Status == http.StatusUnauthorized || ue.Auth:
 		return pool.FailRelogin, true, http.StatusUnauthorized, msg
 	case ue.Status == http.StatusForbidden:
@@ -74,6 +86,15 @@ func shouldRefreshRetry(err error, tokenExp int64) bool {
 	return isTokenExpiredErr(err, tokenExp)
 }
 
+// 上游业务错误码。这些码不依赖 HTTP 状态，必须按 code 判断。
+const (
+	// codeAccountAbnormal = 200108：上游检测到账号存在异常调用，模型调用功能暂时受限。
+	// 这是账号级处罚，用状态码分类会漏掉（它有时挂在 4xx、有时挂在 200 的错误帧上）。
+	codeAccountAbnormal = 200108
+	// codeRefreshConflict = 200822：refresh_token 已被并发刷新替换。
+	codeRefreshConflict = 200822
+)
+
 // isModelScoped 判断错误是否只针对「账号 × 模型」：换号无用，罚模型即可。
 func isModelScoped(err error) bool {
 	var ue *raccoon.UpstreamError
@@ -82,6 +103,31 @@ func isModelScoped(err error) bool {
 	}
 	// 6004 = 模型级限流，11102 = 该账号不支持此模型
 	return ue.Code == 6004 || ue.Code == 11102
+}
+
+// isClientGone 判断错误是否来自「请求方已经不在」而非上游。
+//
+// 客户端的 ctx 被取消（App 取消请求、页面关掉）时，http.Client 会返回
+// context.Canceled；往已断开的连接写 SSE 会返回 write: broken pipe。
+// 这两类失败必须从「上游故障」里摘出去，否则一次用户取消就白罚一个号 10 分钟，
+// 还会继续拿别的号重试——既浪费额度，又会在号池里制造假故障。
+func isClientGone(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	if errors.Is(err, errClientGone) {
+		return true
+	}
+	s := strings.ToLower(err.Error())
+	for _, w := range []string{"broken pipe", "client disconnected", "connection reset by peer", "use of closed network connection"} {
+		if strings.Contains(s, w) {
+			return true
+		}
+	}
+	return false
 }
 
 func statusFor(kind pool.FailKind) int {
@@ -103,7 +149,7 @@ func statusFor(kind pool.FailKind) int {
 // 这不是凭证失效：并发的另一路刷新刚把凭据轮换掉，重新读库用最新值再来一次就好。
 func isRefreshConflict(err error) bool {
 	var ue *raccoon.UpstreamError
-	return errors.As(err, &ue) && ue.Code == 200822
+	return errors.As(err, &ue) && ue.Code == codeRefreshConflict
 }
 
 // authHintWords 是上游把 403 文案写成登录态问题时才会出现的词。

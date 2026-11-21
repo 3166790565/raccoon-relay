@@ -88,6 +88,7 @@ document.querySelectorAll('#addTabs .tab').forEach((btn) => {
 const PAGE_LOADERS = {
   overview: () => Promise.resolve(),
   accounts: () => loadAccounts(),
+  checkin: () => loadCheckinCenter(),
   add: () => Promise.resolve(),
   keys: () => loadKeys(),
   logs: () => ensureLogFacets().then(() => loadLogs()),
@@ -290,9 +291,13 @@ function renderAccounts() {
     // 单元格本身只放摘要，点开才看到响应头与原始响应体。
     let coolCell;
     if (st === 'cooling' || (st === 'exhausted' && a.coolUntil)) {
+      // 账号级失败链会累加命中次数（200108 账号异常），这里带上档位，
+      // 否则用户只能看到「冷却」却不知道这是第几次、还要罚多久。
+      const ac = a.accountCool && a.accountCool.until > Date.now() ? a.accountCool : null;
+      const tier = ac && ac.hits > 0 ? `第 ${ac.hits} 次 · ` : '';
       coolCell = `<div class="coolbox warn clickable" title="点击查看错误详情">
         <span class="cb-main">${esc(a.coolReason || '限流中')}</span>
-        <span class="cb-sub">${esc(fmtLeft(a.coolUntil || 0))} · 详情</span>
+        <span class="cb-sub">${esc(tier)}${esc(fmtLeft(a.coolUntil || 0))} · 详情</span>
       </div>`;
     } else if (lowCredit) {
       coolCell = `<div class="coolbox bad">
@@ -607,6 +612,9 @@ function renderAccountErrors(r) {
     <div class="pop-body ev-detail-kv">
       ${kv('账号状态', `<span class="pill ${esc(st)}"><i class="dot"></i>${esc(stLabel)}</span>`)}
       ${kv('冷却原因', coolLine)}
+      ${a.accountCool && a.accountCool.until > Date.now()
+        ? kv('账号级冷却', `第 ${esc(a.accountCool.hits)} 次 · ${esc(fmtLeft(a.accountCool.until))}`)
+        : ''}
       ${kv('模型限流', cools.length
         ? cools.map((m) => `${esc(m.model)} · ${esc(fmtLeft(m.until))}`).join('<br>')
         : '<span class="dim">无</span>')}
@@ -1013,6 +1021,7 @@ async function loadSettings() {
     $('setRenewIntervalHours').value = Math.round(((s.renewIntervalMin ?? 360) / 60) * 10) / 10;
     $('setRenewGapMS').value = s.renewGapMS ?? 1000;
     $('setModelCooldown').value = String(s.modelCooldown !== false);
+    $('setAccountAbnormalCool').value = String(s.accountAbnormalCool !== false);
     $('setCreditStopEnable').value = String(!!s.creditStopEnable);
     $('setCreditStopBelow').value = s.creditStopBelow ?? 0;
     // 号池页的余额条要标红「低于暂停阈值」的号，这里顺手把阈值带过去。
@@ -1041,6 +1050,7 @@ $('saveCooldownBtn').addEventListener('click', async () => {
       method: 'PUT',
       body: JSON.stringify({
         modelCooldown: $('setModelCooldown').value === 'true',
+        accountAbnormalCool: $('setAccountAbnormalCool').value === 'true',
         creditStopEnable: $('setCreditStopEnable').value === 'true',
         creditStopBelow: Math.round(stopBelow),
         creditResumeAbove: Math.round(resumeAbove),
@@ -2153,6 +2163,302 @@ function showPanel() {
   $('logoutBtn').hidden = false;
   switchPage(location.hash.slice(1));
 }
+
+// ---------- 签到中心 ----------
+// 页面分三块：顶部概况与定时计划、账号签到状态、签到记录。
+// 账号与记录两次请求分开拉，刷新记录时不必重画账号行。
+const CK = {
+  data: null,
+  accFilter: 'all', accQ: '',
+  range: 'today', result: '', source: '', account: '', q: '',
+  page: 1, pageSize: 50, total: 0, pages: 1, seq: 0,
+  auto: false, autoSec: 10, autoTimer: null, inflight: false,
+};
+
+function ckRangeBounds() {
+  const now = new Date();
+  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const day = 86400000;
+  switch (CK.range) {
+    case 'today': return { since: start, until: 0, label: '今天' };
+    case 'yesterday': return { since: start - day, until: start, label: '昨天' };
+    case '7d': return { since: start - 6 * day, until: 0, label: '近 7 天' };
+    case '30d': return { since: start - 29 * day, until: 0, label: '近 30 天' };
+    default: return { since: 0, until: 0, label: '全部时间' };
+  }
+}
+
+const CK_SOURCE_LABEL = { auto: '定时', manual: '手动', onboard: '新号', '': '-' };
+
+async function loadCheckinCenter() {
+  try {
+    const r = await api('/api/checkin/center');
+    CK.data = r;
+    renderCheckinOverview(r);
+    renderCheckinAccounts();
+    await loadCheckinRecords();
+  } catch (e) {
+    $('ckAccCount').textContent = e.message;
+  }
+}
+
+function renderCheckinOverview(r) {
+  const s = r.summary || {};
+  const total = s.enabled || 0;
+  const done = s.done || 0;
+  const pct = total ? Math.round((done / total) * 100) : 0;
+  $('ckDone').innerHTML = `${done}<small>/${total}</small>`;
+  $('ckBar').style.width = pct + '%';
+  $('ckDoneSub').textContent = total ? `完成 ${pct}%` : '还没有启用的账号';
+  $('ckPending').textContent = s.pending || 0;
+  $('ckPendingSub').textContent = s.disabled ? `另有 ${s.disabled} 个已停用` : '等待定时任务';
+  $('ckFailed').textContent = s.failed || 0;
+  $('ckTotal').textContent = r.totalRecords >= 0 ? fmtNum(r.totalRecords) : '未知';
+  $('ckTotalSub').textContent = r.totalCredit >= 0 ? `累计 ${fmtCredits(r.totalCredit)} 积分` : '全部签到流水';
+
+  const sc = r.schedule || {};
+  const on = !!sc.enabled;
+  $('ckSchedDot').classList.toggle('on', on);
+  $('ckSchedState').textContent = on ? '已开启' : '已关闭';
+  const hh = String(sc.hour ?? 0).padStart(2, '0');
+  const mm = String(sc.minute ?? 0).padStart(2, '0');
+  $('ckSchedDesc').textContent = on
+    ? `每天 ${hh}:${mm} 起执行，每个号叠加 0~${sc.jitterMin ?? 0} 分钟确定性抖动；签到口径与号池页一致。`
+    : '自动签到已关闭，可在这里手动补签，或去设置页开启定时任务。';
+  $('ckNextRun').textContent = on && sc.nextRun ? fmtTime(sc.nextRun) : '-';
+  $('ckNextSub').textContent = on
+    ? (sc.running ? '正在执行' : (sc.lastTick ? `上次 ${fmtClock(sc.lastTick)}` : '尚未执行'))
+    : '未启用';
+
+  // 账号筛选下拉随账号列表刷新
+  const sel = $('ckAccount');
+  if (sel) {
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">全部账号</option>' + (r.accounts || []).map((a) =>
+      `<option value="${esc(a.id)}">${esc(a.name || shortUID(a.uid))}</option>`).join('');
+    sel.value = cur;
+  }
+}
+
+function ckAccountState(a) {
+  if (!a.enabled) return { cls: 'dim', text: '已停用' };
+  if (a.signedToday) return { cls: 'ok', text: '今日已签' };
+  if (a.hasToday && !a.todayOk) return { cls: 'bad', text: '今日失败' };
+  return { cls: 'warn', text: '待签到' };
+}
+
+function ckFilteredAccounts() {
+  const list = (CK.data && CK.data.accounts) || [];
+  const q = CK.accQ.trim().toLowerCase();
+  return list.filter((a) => {
+    if (CK.accFilter === 'done' && !a.signedToday) return false;
+    if (CK.accFilter === 'pending' && (a.signedToday || (a.hasToday && !a.todayOk))) return false;
+    if (CK.accFilter === 'failed' && !(a.hasToday && !a.todayOk)) return false;
+    if (!q) return true;
+    return [a.name, a.uid, a.note].some((v) => String(v || '').toLowerCase().includes(q));
+  });
+}
+
+function renderCheckinAccounts() {
+  const all = (CK.data && CK.data.accounts) || [];
+  $('ckAccAll').textContent = all.length;
+  $('ckAccDone').textContent = all.filter((a) => a.signedToday).length;
+  $('ckAccPending').textContent = all.filter((a) => a.enabled && !a.signedToday && !(a.hasToday && !a.todayOk)).length;
+  $('ckAccFailed').textContent = all.filter((a) => a.hasToday && !a.todayOk).length;
+
+  const list = ckFilteredAccounts();
+  $('ckAccCount').textContent = `${list.length} 个`;
+  $('ckAccEmpty').hidden = list.length > 0;
+  const rows = list.map((a) => {
+    const st = ckAccountState(a);
+    const today = a.hasToday
+      ? (a.todayOk ? (a.todayAlready ? '今日已领' : '领取成功') : '失败')
+      : '-';
+    const msg = a.hasToday ? a.todayMessage : '';
+    return `<tr data-id="${esc(a.id)}">
+      <td class="lc-account">
+        <div class="acc-name">${esc(a.name || shortUID(a.uid))}</div>
+        <div class="acc-sub">${esc(shortUID(a.uid))}${a.note ? ' · ' + esc(a.note) : ''}</div>
+      </td>
+      <td><span class="ck-state ${st.cls}">${esc(st.text)}</span></td>
+      <td title="${esc(msg || '')}">${esc(today)}</td>
+      <td class="lc-time">${a.todayAt ? esc(fmtTime(a.todayAt)) : '-'}</td>
+      <td>${esc(CK_SOURCE_LABEL[a.todaySource] || a.todaySource || '-')}</td>
+      <td class="lc-detail">
+        ${a.enabled ? `<button class="ghost tiny" data-act="checkin">补签</button>` : ''}
+      </td>
+    </tr>`;
+  }).join('');
+  $('ckAccTable').querySelector('tbody').innerHTML = rows;
+}
+
+function ckQuery() {
+  const b = ckRangeBounds();
+  const p = new URLSearchParams({
+    page: String(CK.page), pageSize: String(CK.pageSize),
+    since: String(b.since), until: String(b.until),
+  });
+  if (CK.result) p.set('result', CK.result);
+  if (CK.source) p.set('source', CK.source);
+  if (CK.account) p.set('account', CK.account);
+  if (CK.q) p.set('q', CK.q);
+  return p.toString();
+}
+
+async function loadCheckinRecords() {
+  const seq = ++CK.seq;
+  try {
+    const r = await api('/api/checkin/history?' + ckQuery());
+    if (seq !== CK.seq) return; // 慢请求后到就丢弃，避免旧结果覆盖新筛选
+    CK.total = r.summary ? r.summary.total : 0;
+    CK.pages = r.pages || 1;
+    renderCheckinRecords(r);
+  } catch (e) {
+    $('ckRecMsg').textContent = e.message;
+  }
+}
+
+function ckRecordResult(r) {
+  if (!r.ok) return { cls: 'bad', text: '失败' };
+  if (r.already) return { cls: 'warn', text: '今日已领' };
+  return { cls: 'ok', text: r.credit > 0 ? `+${r.credit}` : '成功' };
+}
+
+function renderCheckinRecords(r) {
+  const rows = (r.records || []).map((x) => {
+    const res = ckRecordResult(x);
+    return `<tr>
+      <td class="lc-time">${esc(fmtClock(x.at))}</td>
+      <td class="lc-account"><div class="acc-name">${esc(x.accountName || shortUID(x.accountUid))}</div></td>
+      <td>${esc(x.day || '-')}</td>
+      <td><span class="ck-state ${res.cls}">${esc(res.text)}</span></td>
+      <td>${esc(CK_SOURCE_LABEL[x.source] || x.source || '-')}</td>
+      <td class="lc-error">${esc(x.message || '')}</td>
+    </tr>`;
+  }).join('');
+  $('ckRecTable').querySelector('tbody').innerHTML = rows;
+  $('ckRecEmpty').hidden = (r.records || []).length > 0;
+  const b = ckRangeBounds();
+  $('ckRecRangeInfo').textContent = `${b.label} · 共 ${CK.total} 条`;
+  $('ckRecPageInfo').textContent = `第 ${CK.page} / ${Math.max(1, CK.pages)} 页`;
+  $('ckRecCount').textContent = `共 ${CK.total} 条`;
+  $('ckPrev').disabled = CK.page <= 1;
+  $('ckNext').disabled = CK.page >= CK.pages;
+  $('ckRecMsg').textContent = '';
+}
+
+// 自动刷新只在本页且标签可见时跑，切走就停，避免后台白烧请求。
+function ckAutoTick() {
+  if (!CK.auto || CK.inflight || STATE.page !== 'checkin' || document.hidden) return;
+  CK.inflight = true;
+  Promise.resolve(loadCheckinCenter()).finally(() => { CK.inflight = false; });
+}
+
+function syncCkAuto() {
+  clearInterval(CK.autoTimer);
+  CK.autoTimer = null;
+  if (CK.auto) CK.autoTimer = setInterval(ckAutoTick, CK.autoSec * 1000);
+  $('ckAutoDot').classList.toggle('on', CK.auto);
+  localStorage.setItem('checkinAutoRefresh', JSON.stringify({ on: CK.auto, sec: CK.autoSec }));
+  if (CK.auto) ckAutoTick();
+}
+
+// 分段按钮（账号筛选 / 时间范围）共用：点一下切 class 并写回 CK。
+function bindSeg(id, key, after) {
+  const box = $(id);
+  if (!box) return;
+  box.addEventListener('click', (e) => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    box.querySelectorAll('button').forEach((x) => x.classList.toggle('on', x === b));
+    CK[key] = b.dataset.v;
+    after();
+  });
+}
+bindSeg('ckAccFilter', 'accFilter', renderCheckinAccounts);
+bindSeg('ckRange', 'range', () => { CK.page = 1; loadCheckinRecords(); });
+
+$('ckAccSearch').addEventListener('input', (e) => { CK.accQ = e.target.value; renderCheckinAccounts(); });
+$('ckResult').addEventListener('change', (e) => { CK.result = e.target.value; CK.page = 1; loadCheckinRecords(); });
+$('ckSource').addEventListener('change', (e) => { CK.source = e.target.value; CK.page = 1; loadCheckinRecords(); });
+$('ckAccount').addEventListener('change', (e) => { CK.account = e.target.value; CK.page = 1; loadCheckinRecords(); });
+$('ckRecSearch').addEventListener('input', (e) => {
+  clearTimeout(CK.qTimer);
+  const v = e.target.value;
+  CK.qTimer = setTimeout(() => { CK.q = v; CK.page = 1; loadCheckinRecords(); }, 300);
+});
+$('ckRecReset').addEventListener('click', () => {
+  CK.result = ''; CK.source = ''; CK.account = ''; CK.q = ''; CK.page = 1;
+  $('ckResult').value = ''; $('ckSource').value = ''; $('ckAccount').value = ''; $('ckRecSearch').value = '';
+  loadCheckinRecords();
+});
+$('ckPageSize').addEventListener('change', (e) => {
+  CK.pageSize = Number(e.target.value) || 50;
+  CK.page = 1;
+  loadCheckinRecords();
+});
+$('ckPrev').addEventListener('click', () => {
+  if (CK.page <= 1) return;
+  CK.page--;
+  loadCheckinRecords();
+});
+$('ckNext').addEventListener('click', () => {
+  if (CK.page >= CK.pages) return;
+  CK.page++;
+  loadCheckinRecords();
+});
+$('ckAuto').addEventListener('change', () => { CK.auto = $('ckAuto').checked; syncCkAuto(); });
+$('ckAutoSec').addEventListener('change', () => {
+  CK.autoSec = Number($('ckAutoSec').value) || 10;
+  syncCkAuto();
+});
+document.addEventListener('visibilitychange', () => { if (!document.hidden && CK.auto) ckAutoTick(); });
+
+try {
+  const saved = JSON.parse(localStorage.getItem('checkinAutoRefresh') || '{}');
+  if (saved.on) {
+    CK.auto = true;
+    CK.autoSec = Number(saved.sec) || 10;
+    $('ckAuto').checked = true;
+    $('ckAutoSec').value = String(CK.autoSec);
+  }
+} catch { /* 存储坏了就用默认值 */ }
+syncCkAuto();
+
+$('ckRunAllBtn').addEventListener('click', async () => {
+  $('ckRunAllBtn').disabled = true;
+  try {
+    await api('/api/checkin/all', { method: 'POST', body: '{}' });
+    toast('已开始签到全部账号');
+    STATE.loaded.delete('checkin');
+    await loadCheckinCenter();
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    $('ckRunAllBtn').disabled = false;
+  }
+});
+$('ckSchedBtn').addEventListener('click', () => switchPage('settings'));
+$('ckRefreshBtn').addEventListener('click', () => loadCheckinCenter());
+$('ckRecRefreshBtn').addEventListener('click', () => loadCheckinRecords());
+
+// 行内「补签」用事件委托：重画账号行后不需要重新绑定
+$('ckAccTable').addEventListener('click', async (e) => {
+  const btn = e.target.closest('button[data-act="checkin"]');
+  if (!btn) return;
+  const tr = btn.closest('tr');
+  const id = tr && tr.dataset.id;
+  if (!id) return;
+  btn.disabled = true;
+  try {
+    await api(`/api/accounts/${encodeURIComponent(id)}/checkin`, { method: 'POST', body: '{}' });
+    await loadCheckinCenter();
+  } catch (err) {
+    toast(err.message, true);
+    btn.disabled = false;
+  }
+});
+
 
 // 已登录（cookie 有效）则直接进面板
 (async () => {

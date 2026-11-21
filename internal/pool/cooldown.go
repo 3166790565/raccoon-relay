@@ -15,25 +15,28 @@ import (
 //   402 积分耗尽 → exhausted 至次日 04:00
 //   429 限流     → 默认只罚「账号 × 模型」，阶梯 3 → 5 → 10 → 20… 分钟；
 //                  关闭模型级冷却时才退化为整号 60s
+//   200108 账号异常 → 账号级阶梯冷却，同样 3 → 5 → 10… 分钟；换模型绕不过去
 //   5xx / 网络   → cooling 10min
 //   401 刷新失败 → relogin 永久
 //   风控拦截     → cooling 2h
 //   其它 4xx     → cooling 60s
 
-// modelCoolResetWindow：冷却早已结束、且超过这么久没有再犯，就当作新的一条失败链，
+// coolResetWindow：冷却早已结束、且超过这么久没有再犯，就当作新的一条失败链，
 // 从 3 分钟重新开始。否则一个号每天偶尔 429 一次，冷却时间会无限累加。
-const modelCoolResetWindow = 24 * time.Hour
+const coolResetWindow = 24 * time.Hour
 
-// modelCoolMax：单次模型冷却上限。
-const modelCoolMax = 24 * time.Hour
+// coolMax：单次冷却上限。
+const coolMax = 24 * time.Hour
 
 type CooldownBook struct {
 	st *store.Store
 
-	mu           sync.Mutex
-	modelEnabled bool
-	models       map[string]modelCool
-	hydrated     bool
+	mu            sync.Mutex
+	modelEnabled  bool
+	accountAbnorm bool
+	models        map[string]modelCool
+	accounts      map[string]accountCool
+	hydrated      bool
 
 	// onEvent 由上层（admin/main）注入，用来把冷却动作写进运行日志。
 	// 用回调而不是直接依赖 store 的写入封装，是为了让号池保持无副作用、易测试；
@@ -79,6 +82,13 @@ type modelCool struct {
 	reason string
 }
 
+// accountCool 是「账号异常」类上游处罚的失败链，按 hits 阶梯拉长。
+type accountCool struct {
+	until  int64
+	hits   int64
+	reason string
+}
+
 // ModelCoolInfo 是面板上「限流」列的一条明细。
 type ModelCoolInfo struct {
 	Model  string `json:"model"`
@@ -88,7 +98,18 @@ type ModelCoolInfo struct {
 }
 
 func NewCooldownBook(st *store.Store, modelCooldownEnabled bool) *CooldownBook {
-	return &CooldownBook{st: st, modelEnabled: modelCooldownEnabled, models: map[string]modelCool{}}
+	return &CooldownBook{
+		st: st, modelEnabled: modelCooldownEnabled, accountAbnorm: true,
+		models: map[string]modelCool{}, accounts: map[string]accountCool{},
+	}
+}
+
+// NewCooldownBookWithOptions 是带完整默认值的构造入口：装配层按环境变量
+// 传入 200108 账号级冷却的初始开关，其余调用方仍可用 NewCooldownBook。
+func NewCooldownBookWithOptions(st *store.Store, modelCooldownEnabled, accountAbnormalCool bool) *CooldownBook {
+	c := NewCooldownBook(st, modelCooldownEnabled)
+	c.accountAbnorm = accountAbnormalCool
+	return c
 }
 
 // SetModelCooldown 供面板热更新「429 是否按账号×模型冷却」。
@@ -102,6 +123,20 @@ func (c *CooldownBook) ModelEnabled() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.modelEnabled
+}
+
+// SetAccountAbnormalCool 供面板热更新「200108 账号异常是否按账号冷却」。
+// 关闭后 200108 按普通上游失败处理（10 分钟冷却并换号），适合只在调试时用。
+func (c *CooldownBook) SetAccountAbnormalCool(on bool) {
+	c.mu.Lock()
+	c.accountAbnorm = on
+	c.mu.Unlock()
+}
+
+func (c *CooldownBook) AccountAbnormalEnabled() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.accountAbnorm
 }
 
 func coolKey(accID, model string) string { return strings.ToLower(accID + "∥" + model) }
@@ -120,11 +155,18 @@ func (c *CooldownBook) Hydrate(ctx context.Context) {
 	if err != nil {
 		return // 读失败就下次再试，不要把 hydrated 置位
 	}
+	accRows, err := c.st.ListAccountCooldowns(ctx)
+	if err != nil {
+		return
+	}
 	c.mu.Lock()
 	for _, r := range rows {
 		c.models[coolKey(r.AccountID, r.Model)] = modelCool{
 			accID: r.AccountID, model: r.Model, until: r.Until, hits: r.Hits, reason: r.Reason,
 		}
+	}
+	for _, r := range accRows {
+		c.accounts[r.AccountID] = accountCool{until: r.Until, hits: r.Hits, reason: r.Reason}
 	}
 	c.hydrated = true
 	c.mu.Unlock()
@@ -153,6 +195,13 @@ func (c *CooldownBook) ClearModelNow(ctx context.Context, accID, model string) {
 	c.ClearModel(ctx, accID, model)
 }
 
+// ClearAccountNow 手动解除账号级冷却：内存失败链、落库记录与账号状态一起清掉。
+// 用户点「解除限流」就是认为这个号现在能跑，留着 hits 只会让下次失败直接跳到高档。
+func (c *CooldownBook) ClearAccountNow(ctx context.Context, accID string) {
+	c.ClearAccountLadder(ctx, accID)
+	c.MarkOnline(ctx, accID)
+}
+
 func (c *CooldownBook) IsModelCooled(accID, model string) bool {
 	if model == "" {
 		return false
@@ -173,9 +222,10 @@ func (c *CooldownBook) IsModelCooled(accID, model string) bool {
 	return m.until > time.Now().UnixMilli()
 }
 
-// modelCoolDelay 返回一条连续失败链上第 n 次（从 0 开始）命中的冷却时长：
+// coolDelay 返回一条连续失败链上第 n 次（从 0 开始）命中的冷却时长：
 // 3 分钟 → 5 分钟 → 10 分钟，之后逐次翻倍，封顶 24 小时。
-func modelCoolDelay(hits int64) time.Duration {
+// 模型级与账号级冷却共用这条阶梯，面板上的说明也按它写。
+func coolDelay(hits int64) time.Duration {
 	switch hits {
 	case 0:
 		return 3 * time.Minute
@@ -185,14 +235,17 @@ func modelCoolDelay(hits int64) time.Duration {
 		return 10 * time.Minute
 	}
 	if hits > 12 {
-		return modelCoolMax
+		return coolMax
 	}
 	d := 10 * time.Minute * time.Duration(int64(1)<<(hits-2))
-	if d > modelCoolMax {
-		d = modelCoolMax
+	if d > coolMax {
+		d = coolMax
 	}
 	return d
 }
+
+// modelCoolDelay 保留旧名，模型级冷却与测试都用它。
+func modelCoolDelay(hits int64) time.Duration { return coolDelay(hits) }
 
 // CoolModel 记一次模型级失败（429 / 模型级限流）。同一账号同一模型连续失败
 // 逐次拉长冷却；冷却到期后再失败会继续上一档，不会退回 3 分钟。
@@ -208,7 +261,7 @@ func (c *CooldownBook) CoolModel(ctx context.Context, accID, model, reason strin
 	hits := int64(0)
 	if ok {
 		// 冷却结束超过 ResetWindow 还没有新的失败：视为失败链已断，从头再来。
-		if prev.until > 0 && now-prev.until <= modelCoolResetWindow.Milliseconds() {
+		if prev.until > 0 && now-prev.until <= coolResetWindow.Milliseconds() {
 			hits = prev.hits
 		}
 	}
@@ -219,7 +272,7 @@ func (c *CooldownBook) CoolModel(ctx context.Context, accID, model, reason strin
 	// 注意每个 key 都要自己判过期（不能像以前那样依赖 IsModelCooled 删除——
 	// 删了就丢了 hits，阶梯永远停在 3 分钟）。
 	for key, v := range c.models {
-		if v.until+modelCoolResetWindow.Milliseconds() < now {
+		if v.until+coolResetWindow.Milliseconds() < now {
 			delete(c.models, key)
 		}
 	}
@@ -244,17 +297,102 @@ func (c *CooldownBook) ClearModel(ctx context.Context, accID, model string) {
 	}
 }
 
+// IsAccountLadderCooled 判断账号是否还在「账号异常」阶梯冷却中。
+// 这条冷却写在 accounts.status/cool_until 上，这里只维护失败链的命中次数，
+// 两者由 CoolAccountLadder 一起写。
+func (c *CooldownBook) IsAccountLadderCooled(accID string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	a, ok := c.accounts[accID]
+	return ok && a.until > time.Now().UnixMilli()
+}
+
+// AccountCooldownOf 返回账号级失败链的当前状态，供面板展示命中次数。
+func (c *CooldownBook) AccountCooldownOf(accID string) (until, hits int64, ok bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	a, found := c.accounts[accID]
+	return a.until, a.hits, found
+}
+
+// AccountCoolInfo 是面板上「账号级冷却」的明细：当前命中第几档、还剩多久。
+type AccountCoolInfo struct {
+	Until  int64  `json:"until"`
+	Hits   int64  `json:"hits"`
+	Reason string `json:"reason"`
+}
+
+// AccountCoolOf 返回仍生效的账号级冷却明细；已到期或没有记录时返回 nil。
+func (c *CooldownBook) AccountCoolOf(accID string) *AccountCoolInfo {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	a, ok := c.accounts[accID]
+	if !ok || a.until <= time.Now().UnixMilli() {
+		return nil
+	}
+	return &AccountCoolInfo{Until: a.until, Hits: a.hits, Reason: a.reason}
+}
+
+// CoolAccountLadder 记一次「整个账号被上游处罚」（200108 账号异常等）。
+//
+// 和 429 的模型级冷却用的是同一条阶梯（3 → 5 → 10 → 20… 分钟，封顶 24 小时），
+// 区别只在处罚范围：这次是账号级，状态写成 cooling，选号时整号跳过。
+// 上游文案通常明确写了「请稍后重试」，所以换号继续消化是对的；
+// 但不能把账号永久停掉——阶梯到期由 ReviveExpired 自动放回在线。
+func (c *CooldownBook) CoolAccountLadder(ctx context.Context, accID, reason string) {
+	now := time.Now().UnixMilli()
+	c.mu.Lock()
+	prev, ok := c.accounts[accID]
+	hits := int64(0)
+	if ok && prev.until > 0 && now-prev.until <= coolResetWindow.Milliseconds() {
+		hits = prev.hits
+	}
+	delay := coolDelay(hits)
+	a := accountCool{until: now + delay.Milliseconds(), hits: hits + 1, reason: reason}
+	c.accounts[accID] = a
+	for key, v := range c.accounts {
+		if v.until+coolResetWindow.Milliseconds() < now {
+			delete(c.accounts, key)
+		}
+	}
+	c.mu.Unlock()
+
+	status := store.StatusCooling
+	_ = c.st.UpdateAccount(ctx, accID, store.AccountPatch{
+		Status: &status, CoolUntil: &a.until, CoolReason: &reason,
+	})
+	_ = c.st.UpsertAccountCooldown(ctx, store.AccountCooldown{
+		AccountID: accID, Until: a.until, Reason: reason, Hits: a.hits,
+	})
+	c.emitWhy(accID, store.LevelWarn, "账号级冷却：上游判定账号异常", reason, a.until)
+}
+
+// ClearAccountLadder 在账号重新调用成功后清空失败链。
+//
+// 只清内存与库里的命中次数，不碰账号状态：账号可能因为 402/风控还处在别的
+// 冷却里，这里顺手改状态会把那层冷却绕过去。状态由 MarkOnline/ReviveExpired 管。
+func (c *CooldownBook) ClearAccountLadder(ctx context.Context, accID string) {
+	c.mu.Lock()
+	_, ok := c.accounts[accID]
+	delete(c.accounts, accID)
+	c.mu.Unlock()
+	if ok {
+		_ = c.st.DeleteAccountCooldown(ctx, accID)
+	}
+}
+
 // FailKind 是失败分类，由转发层判定后交给号池执行冷却。
 type FailKind string
 
 const (
-	FailQuota       FailKind = "quota"        // 402
-	FailRate        FailKind = "rate"         // 429（模型级冷却关闭时的兜底）
-	FailServer      FailKind = "server"       // 5xx / 网络
-	FailRelogin     FailKind = "relogin"      // 401 且刷新失败
-	FailBlocked     FailKind = "blocked"      // 风控
-	FailModelScoped FailKind = "model_scoped" // 模型级问题，罚账号×模型
-	FailOther       FailKind = "other"
+	FailQuota           FailKind = "quota"            // 402
+	FailRate            FailKind = "rate"             // 429（模型级冷却关闭时的兜底）
+	FailServer          FailKind = "server"           // 5xx / 网络
+	FailRelogin         FailKind = "relogin"          // 401 且刷新失败
+	FailBlocked         FailKind = "blocked"          // 风控
+	FailModelScoped     FailKind = "model_scoped"     // 模型级问题，罚账号×模型
+	FailAccountAbnormal FailKind = "account_abnormal" // 200108 账号异常，账号级阶梯冷却
+	FailOther           FailKind = "other"
 )
 
 // Cool 按分类写账号冷却。
@@ -272,6 +410,10 @@ func (c *CooldownBook) Cool(ctx context.Context, accID string, kind FailKind, de
 	case FailServer:
 		until = now + 600_000
 		status, msg, level = store.StatusCooling, defaultStr(detail, "上游异常"), store.LevelWarn
+	case FailAccountAbnormal:
+		// 账号异常走阶梯：这里只是兜底，正常路径由 CoolAccountLadder 处理（它带命中次数）。
+		until = now + coolDelay(0).Milliseconds()
+		status, msg, level = store.StatusCooling, defaultStr(detail, "上游判定账号异常"), store.LevelWarn
 	case FailRelogin:
 		status, msg, level = store.StatusRelogin, defaultStr(detail, "凭证失效，需重新登录"), store.LevelError
 	case FailBlocked:
@@ -331,6 +473,8 @@ func (c *CooldownBook) MarkOnline(ctx context.Context, accID string) {
 	_ = c.st.UpdateAccount(ctx, accID, store.AccountPatch{
 		Status: &online, CoolUntil: &zero, CoolReason: &empty,
 	})
+	// 成功调用说明账号已经恢复：整号的失败链也归零，下次再异常从 3 分钟重新计。
+	c.ClearAccountLadder(ctx, accID)
 }
 
 // ReviveExpired 把冷却到期的账号复活。定时器每轮调用一次。

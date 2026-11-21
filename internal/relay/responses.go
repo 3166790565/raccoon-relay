@@ -209,6 +209,9 @@ func (r *responsesSSE) emit(event string, payload map[string]any) error {
 	return nil
 }
 
+// Commitment 实现 committingSink：Begin 已经写出 response.created，之后不能换号。
+func (r *responsesSSE) Commitment() bool { return r.started }
+
 func (r *responsesSSE) Begin() error {
 	if r.started {
 		return nil

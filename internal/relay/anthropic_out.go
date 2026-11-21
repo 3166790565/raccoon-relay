@@ -66,6 +66,9 @@ func (a *anthropicSSE) emit(event string, payload map[string]any) error {
 	return nil
 }
 
+// Commitment 实现 committingSink：Begin 已经写出 message_start，之后不能换号。
+func (a *anthropicSSE) Commitment() bool { return a.started }
+
 func (a *anthropicSSE) Begin() error {
 	if a.started {
 		return nil

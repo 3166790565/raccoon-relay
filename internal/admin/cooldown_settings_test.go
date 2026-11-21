@@ -143,3 +143,28 @@ func TestApplyStoredSettingsHydratesModelCooldown(t *testing.T) {
 		t.Fatal("重启后模型冷却应已恢复")
 	}
 }
+
+// 200108 账号级冷却开关要能持久化并在重启后恢复。
+func TestPutAccountAbnormalCoolToggle(t *testing.T) {
+	p, _, ctx := newTestPanel(t)
+	if w := putSettings(t, p, `{"accountAbnormalCool":false}`); w.Code != 200 {
+		t.Fatalf("保存失败: %d %s", w.Code, w.Body.String())
+	}
+	if p.cool.AccountAbnormalEnabled() {
+		t.Fatal("关闭开关未生效")
+	}
+	if raw := p.st.GetSetting(ctx, "accountAbnormalCool", ""); raw != "false" {
+		t.Fatalf("库里应记下关闭状态，实际 %q", raw)
+	}
+	if s := getSettings(t, p); s["accountAbnormalCool"] != false {
+		t.Fatalf("GET 未回显 accountAbnormalCool: %+v", s)
+	}
+
+	// 重启：新面板按库里的设置恢复
+	p2 := &Panel{cfg: p.cfg, st: p.st, po: pool.New(p.st, "load_balance", pool.NewCooldownBook(p.st, true)),
+		cool: pool.NewCooldownBook(p.st, true)}
+	p2.applyStoredCooldownSettings(ctx)
+	if p2.cool.AccountAbnormalEnabled() {
+		t.Fatal("重启后应按库里的设置恢复为关闭")
+	}
+}

@@ -2,7 +2,10 @@ module github.com/3166790565/raccoon-relay
 
 go 1.26.5
 
-require modernc.org/sqlite v1.62.0
+require (
+	golang.org/x/text v0.44.0
+	modernc.org/sqlite v1.62.0
+)
 
 require (
 	github.com/dustin/go-humanize v1.1.0 // indirect

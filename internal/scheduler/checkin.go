@@ -127,9 +127,16 @@ func (s *Scheduler) SetEnabled(on bool) {
 func (s *Scheduler) Status() map[string]any {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// 从未跑过时 lastTick 是零值，UnixMilli() 会给出 -62135596800000；
+	// 面板拿到这个数会显示成日期，所以统一收敛成 0 表示「尚未执行」。
+	var lastTick int64
+	if !s.lastTick.IsZero() {
+		lastTick = s.lastTick.UnixMilli()
+	}
 	return map[string]any{
 		"enabled":     s.cfg.CheckinEnable,
-		"lastTick":    s.lastTick.UnixMilli(),
+		"running":     s.running,
+		"lastTick":    lastTick,
 		"lastResult":  s.lastResult,
 		"lastCount":   s.lastCount,
 		"tickSeconds": int(tickInterval.Seconds()),
@@ -187,7 +194,7 @@ func (s *Scheduler) sweep(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		ok := s.checkinOne(ctx, a, today, loc)
+		ok := s.checkinOne(ctx, a, today, loc, store.CheckinSourceAuto)
 		if ok {
 			done++
 		} else {
@@ -212,7 +219,8 @@ func (s *Scheduler) sweep(ctx context.Context) {
 }
 
 // checkinOne 执行单账号签到链。返回是否当日完成。
-func (s *Scheduler) checkinOne(ctx context.Context, a *store.Account, today string, loc *time.Location) bool {
+// source 只用于记录触发来源（定时/手动/新号），不参与任何判断。
+func (s *Scheduler) checkinOne(ctx context.Context, a *store.Account, today string, loc *time.Location, source string) bool {
 	// 连续失败太多则熔断
 	if n, err := s.st.CheckinFailCount(ctx, a.ID, today, "checkin"); err == nil && n >= autoFailThreshold {
 		return false
@@ -220,7 +228,7 @@ func (s *Scheduler) checkinOne(ctx context.Context, a *store.Account, today stri
 
 	token, err := s.refresh.EnsureFresh(ctx, a)
 	if err != nil {
-		s.fail(ctx, a, today, err.Error())
+		s.fail(ctx, a, today, err.Error(), source)
 		return false
 	}
 
@@ -238,11 +246,11 @@ func (s *Scheduler) checkinOne(ctx context.Context, a *store.Account, today stri
 			_ = s.st.UpdateAccount(ctx, a.ID, store.AccountPatch{
 				Status: &relogin, CoolReason: strPtr("凭证失效，需重新登录"),
 			})
-			s.fail(ctx, a, today, "凭证失效："+rerr.Error())
+			s.fail(ctx, a, today, "凭证失效："+rerr.Error(), source)
 			return false
 		} else {
 			// 刷新请求本身失败（网络/上游抖动）：保留原错误，下一轮自然重试
-			s.fail(ctx, a, today, err.Error())
+			s.fail(ctx, a, today, err.Error(), source)
 			return false
 		}
 	}
@@ -253,14 +261,14 @@ func (s *Scheduler) checkinOne(ctx context.Context, a *store.Account, today stri
 			_ = s.st.UpdateAccount(ctx, a.ID, store.AccountPatch{
 				Status: &relogin, CoolReason: strPtr("凭证失效，需重新登录"),
 			})
-			s.fail(ctx, a, today, "凭证失效："+err.Error())
+			s.fail(ctx, a, today, "凭证失效："+err.Error(), source)
 			return false
 		}
-		s.fail(ctx, a, today, err.Error())
+		s.fail(ctx, a, today, err.Error(), source)
 		return false
 	}
 	if !res.OK {
-		s.fail(ctx, a, today, res.Message)
+		s.fail(ctx, a, today, res.Message, source)
 		return false
 	}
 
@@ -286,7 +294,7 @@ func (s *Scheduler) checkinOne(ctx context.Context, a *store.Account, today stri
 	})
 	credit := int64(0)
 	_ = s.st.AddCheckin(ctx, store.CheckinRecord{
-		AccountID: a.ID, Day: today, Action: "checkin", OK: true,
+		AccountID: a.ID, Day: today, Action: "checkin", Source: source, OK: true,
 		Already: res.Already, Credit: credit, Message: res.Message,
 	})
 
@@ -305,9 +313,9 @@ func (s *Scheduler) refreshCredits(ctx context.Context, a *store.Account) {
 	_, _ = s.balancer.Refresh(ctx, a)
 }
 
-func (s *Scheduler) fail(ctx context.Context, a *store.Account, today, msg string) {
+func (s *Scheduler) fail(ctx context.Context, a *store.Account, today, msg, source string) {
 	_ = s.st.AddCheckin(ctx, store.CheckinRecord{
-		AccountID: a.ID, Day: today, Action: "checkin", OK: false, Message: msg,
+		AccountID: a.ID, Day: today, Action: "checkin", Source: source, OK: false, Message: msg,
 	})
 	log.Printf("[签到] %s 失败：%s", a.Name, msg)
 	s.emit(store.RuntimeEvent{Level: store.LevelWarn, Component: "checkin",
@@ -375,7 +383,7 @@ func (s *Scheduler) Onboard(ctx context.Context, accountID string) (map[string]a
 	today := time.Now().In(loc).Format("2006-01-02")
 
 	// 签到（内部会顺带刷余额）
-	s.checkinOne(ctx, acc, today, loc)
+	s.checkinOne(ctx, acc, today, loc, store.CheckinSourceOnboard)
 
 	// 再单独刷一次余额兜底：签到可能因为「今日已领」跳过部分流程，
 	// 而新号最需要的是把余额拉下来。
@@ -403,7 +411,7 @@ func (s *Scheduler) RunAll(ctx context.Context) map[string]any {
 			results = append(results, map[string]any{"id": a.ID, "name": a.Name, "ok": false, "message": "账号已禁用"})
 			continue
 		}
-		ok := s.checkinOne(ctx, a, today, loc)
+		ok := s.checkinOne(ctx, a, today, loc, store.CheckinSourceManual)
 		if ok {
 			done++
 		}

@@ -70,7 +70,7 @@ func main() {
 	client := raccoon.NewClient(cfg.UpstreamBase, time.Duration(cfg.UpstreamTimeoutSec)*time.Second)
 	// 对话流不能套总时限：长回答会被硬掐在超时点。改用上游空闲超时。
 	client.IdleTimeout = cfg.StreamIdleTimeout
-	cool := pool.NewCooldownBook(st, cfg.ModelCooldown)
+	cool := pool.NewCooldownBookWithOptions(st, cfg.ModelCooldown, cfg.AccountAbnormalCool)
 	cool.SetEventHook(func(ev pool.Event) {
 		events.Emit(store.RuntimeEvent{
 			Level: ev.Level, Scope: ev.Scope, Component: ev.Component,
