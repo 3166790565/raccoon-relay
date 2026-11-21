@@ -324,7 +324,7 @@ function renderAccounts() {
       <td class="c-idx"><span class="idx">#${i + 1}</span></td>
       <td class="c-name">
         <div class="acc-name" title="${esc(a.uid)}">${esc(a.name || shortUID(a.uid))}</div>
-        <div class="acc-sub">${esc(shortUID(a.uid))}${a.note ? ' · ' + esc(a.note) : ''}</div>
+        <div class="acc-sub">${esc(shortUID(a.uid))}${a.note ? ' · ' + esc(a.note) : ''}${Number(a.maxConcurrent) > 0 ? ` · 并发≤${Number(a.maxConcurrent)}` : ''}</div>
         ${a.deadReason ? `<div class="acc-sub bad">${esc(a.deadReason)}</div>` : ''}
       </td>
       <td class="c-enable">
@@ -697,8 +697,10 @@ function openAccountSettings(id) {
       <div class="field"><label>备注名</label><input id="asName" value="${esc(acc.name || '')}"></div>
       <div class="field"><label>备注</label><input id="asNote" value="${esc(acc.note || '')}" placeholder="可留空"></div>
       <div class="field"><label>优先级</label><input id="asPriority" type="number" step="1" value="${Number(acc.priority) || 0}"></div>
+      <div class="field"><label>并发上限（0 = 不单独限制）</label><input id="asMaxConcurrent" type="number" step="1" min="0" value="${Number(acc.maxConcurrent) || 0}"></div>
       <p class="hint">uid：${esc(acc.uid)}<br>最近一次使用：${acc.lastUsed ? fmtTime(acc.lastUsed) : '从未'}<br>
-        今日签到：${STATE.today && acc.lastCheckinDay === STATE.today ? '已签到' : esc(acc.lastCheckinDay || '未签到')}</p>
+        今日签到：${STATE.today && acc.lastCheckinDay === STATE.today ? '已签到' : esc(acc.lastCheckinDay || '未签到')}<br>
+        并发上限：该号同时最多接几个请求，达到后新请求会落到别的号；0 表示不单独限制。</p>
     </div>
     <div class="pop-foot">
       <button class="ghost tiny" id="asCancel">取消</button>
@@ -714,6 +716,7 @@ function openAccountSettings(id) {
           name: el.querySelector('#asName').value.trim(),
           note: el.querySelector('#asNote').value.trim(),
           priority: Math.round(Number(el.querySelector('#asPriority').value) || 0),
+          maxConcurrent: Math.max(0, Math.round(Number(el.querySelector('#asMaxConcurrent').value) || 0)),
         }),
       });
       closePop();
@@ -778,12 +781,38 @@ $('batchToggleBtn').addEventListener('click', (e) => {
       <button data-b="checkin">批量签到</button>
       <button data-b="uncool">批量解除冷却</button>
       <div class="sep"></div>
+      <button data-b="setMaxConcurrent">设置并发上限（选中）</button>
+      <button data-b="setMaxConcurrentAll">设置并发上限（全部）</button>
+      <div class="sep"></div>
       <button data-b="delete" class="danger">批量删除</button>
-    </div>`, { width: 170 });
+    </div>`, { width: 190 });
   el.querySelectorAll('[data-b]').forEach((b) => {
-    b.addEventListener('click', () => { closePop(); batchAction(b.dataset.b); });
+    b.addEventListener('click', () => {
+      closePop();
+      const act = b.dataset.b;
+      if (act === 'setMaxConcurrent') { promptMaxConcurrent([...POOL.sel]); return; }
+      if (act === 'setMaxConcurrentAll') { promptMaxConcurrent([]); return; }
+      batchAction(act);
+    });
   });
 });
+
+// 设置单号并发上限：ids 为空表示全部账号。
+async function promptMaxConcurrent(ids) {
+  const scope = ids.length ? `${ids.length} 个账号` : '全部账号';
+  const raw = prompt(`为${scope}设置并发上限（0 = 不单独限制）：`, '1');
+  if (raw === null) return;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0) { toast('请填写 0 或正整数', true); return; }
+  try {
+    const r = await api('/api/accounts/batch', {
+      method: 'POST',
+      body: JSON.stringify({ action: 'setMaxConcurrent', ids, value: Math.round(value) }),
+    });
+    toast(`并发上限已设 ${Math.round(value)}：成功 ${r.done || 0}${r.failed ? `，失败 ${r.failed}` : ''}`);
+    await Promise.all([loadAccounts(), loadStatus()]);
+  } catch (e) { toast(e.message, true); }
+}
 
 async function batchAction(action) {
   const ids = [...POOL.sel];
@@ -1027,10 +1056,39 @@ async function loadSettings() {
     // 号池页的余额条要标红「低于暂停阈值」的号，这里顺手把阈值带过去。
     POOL.creditStopBelow = s.creditStopEnable ? (s.creditStopBelow ?? 0) : 0;
     $('setCreditResumeAbove').value = s.creditResumeAbove ?? 0;
+    $('setMaxConcurrent').value = s.maxConcurrent ?? 0;
+    $('setQueueWaitSec').value = s.queueWaitSec ?? 600;
   } catch (e) {
     $('settingsMsg').textContent = e.message;
   }
 }
+
+// 并发设置单独保存：只提交并发相关字段，避免和别的卡片互相覆盖。
+$('saveConcurrencyBtn').addEventListener('click', async () => {
+  const limit = numOrNaN($('setMaxConcurrent'));
+  const wait = numOrNaN($('setQueueWaitSec'));
+  if (!Number.isFinite(limit) || limit < 0) {
+    $('concurrencyMsg').textContent = '并发上限请填写 0 或正整数（0 = 不限制）';
+    return;
+  }
+  if (!Number.isFinite(wait) || wait < 1 || wait > 3600) {
+    $('concurrencyMsg').textContent = '排队时间请填写 1~3600 秒';
+    return;
+  }
+  try {
+    await api('/api/settings', {
+      method: 'PUT',
+      body: JSON.stringify({
+        maxConcurrent: Math.round(limit),
+        queueWaitSec: Math.round(wait),
+      }),
+    });
+    $('concurrencyMsg').textContent = limit === 0 ? '已保存，当前不限制并发' : '已保存，立即生效';
+    await loadSettings();
+  } catch (e) {
+    $('concurrencyMsg').textContent = e.message;
+  }
+});
 
 // 冷却设置单独保存：只提交冷却与积分阈值字段，避免和上面的运行设置互相覆盖。
 $('saveCooldownBtn').addEventListener('click', async () => {
@@ -1513,8 +1571,29 @@ function openLogDetail(anchor) {
       ${l.error ? `<div class="ld-row col"><span class="ld-k">错误</span><pre class="ld-err">${esc(l.error)}</pre></div>` : ''}
     </div>
     <div class="pop-foot"><span class="hint">#${esc(l.id)}</span>
-      <button class="ghost tiny" id="ldClose">关闭</button></div>`, { width: 380 });
+      ${l.error ? '<button class="ghost tiny" id="ldCopy">复制错误</button>' : ''}
+      <button class="ghost tiny" id="ldClose">关闭</button></div>`, { width: 560 });
   document.getElementById('ldClose').addEventListener('click', closePop);
+  const copyBtn = document.getElementById('ldCopy');
+  if (copyBtn) {
+    copyBtn.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(String(l.error || ''));
+        toast('错误信息已复制');
+      } catch {
+        // 非安全上下文（http 访问）没有 clipboard API，退回选中文本让用户手动复制
+        const pre = document.querySelector('.pop .ld-err');
+        if (pre) {
+          const range = document.createRange();
+          range.selectNodeContents(pre);
+          const sel = window.getSelection();
+          sel.removeAllRanges();
+          sel.addRange(range);
+        }
+        toast('已选中错误文本，请手动复制', true);
+      }
+    });
+  }
 }
 
 // ---------- 运行日志（结构化事件流 + 文件与清理） ----------

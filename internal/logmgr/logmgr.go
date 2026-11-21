@@ -90,6 +90,22 @@ type Manager struct {
 
 	lastClean  time.Time
 	lastResult CleanResult
+
+	// locker 用于多实例协调：每个副本都跑一次清理是纯浪费，
+	// 并发 DELETE 同一批行还会互相等锁。
+	locker Locker
+}
+
+// Locker 是分布式锁的最小接口，由 internal/cache 实现。
+type Locker interface {
+	Lock(ctx context.Context, name string, ttl time.Duration) (release func(), ok bool)
+}
+
+// SetLocker 注入分布式锁。传 nil 恢复单实例行为。
+func (m *Manager) SetLocker(l Locker) {
+	m.mu.Lock()
+	m.locker = l
+	m.mu.Unlock()
 }
 
 // ConfigOf 从服务配置推导日志管理参数，启动路径和面板保存后共用这一份映射。
@@ -526,6 +542,19 @@ func (m *Manager) loop(ctx context.Context) {
 			due := cfg.CleanEnable && time.Since(m.lastClean) >= cfg.CleanInterval
 			m.mu.Unlock()
 			if due {
+				m.mu.Lock()
+				l := m.locker
+				m.mu.Unlock()
+				if l != nil {
+					// 清理是幂等的；30 分钟 TTL 覆盖最坏的一轮分批删除。
+					release, ok := l.Lock(ctx, "log-clean", 30*time.Minute)
+					if !ok {
+						continue
+					}
+					m.CleanNow(ctx)
+					release()
+					continue
+				}
 				m.CleanNow(ctx)
 			}
 		}

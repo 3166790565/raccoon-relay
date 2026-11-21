@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -173,5 +174,44 @@ func TestAccountAbnormalMessageReadable(t *testing.T) {
 	_, _, _, msg := classify(&raccoon.UpstreamError{Status: 429, Code: 200108, Message: "账号异常"})
 	if msg != "账号异常" {
 		t.Fatalf("应保留上游原文，实际 %q", msg)
+	}
+}
+
+// 流水里要存完整的上游错误（含 request_id 等），对外响应仍是短文案。
+func TestFullErrorMessageKeepsRawUpstream(t *testing.T) {
+	// 构造一段超过 300 字符的上游响应，模拟真实的长错误体。
+	raw := `{"error":{"code":100041,"message":"Inappropriate input/output rejected for security reasons","param":null,"type":"invalid_request_error","detail":"` +
+		strings.Repeat("trace-detail-", 30) +
+		`"},"raccoon_request_id":"18ea201d51541622-0e03516b-f734-40e8-b616"}`
+	ue := &raccoon.UpstreamError{Status: 400, Code: 100041, Message: raw}
+	_, short := publicError(ue)
+	full := fullErrorMessage(ue, short)
+
+	if len([]rune(full)) <= 300 {
+		t.Fatalf("完整错误不应被 300 字符截断，实际长度 %d", len([]rune(full)))
+	}
+	if !strings.Contains(full, "raccoon_request_id") {
+		t.Fatalf("完整错误应保留 request_id，实际 %q", full)
+	}
+	if strings.Contains(short, "raccoon_request_id") {
+		t.Fatalf("对外短文案不应带 request_id，实际 %q", short)
+	}
+}
+
+// 超长错误做长度上限保护，且不能把多字节字符切坏。
+func TestFullErrorMessageTruncatesByRune(t *testing.T) {
+	long := strings.Repeat("错", 5000)
+	ue := &raccoon.UpstreamError{Status: 500, Message: long}
+	got := fullErrorMessage(ue, "")
+	if n := len([]rune(got)); n > 4001 {
+		t.Fatalf("应截断到 4000 字符，实际 %d", n)
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Fatal("截断后应有省略号")
+	}
+	for _, r := range got {
+		if r == '\uFFFD' {
+			t.Fatal("不应出现替换字符（说明按字节切坏了多字节字符）")
+		}
 	}
 }

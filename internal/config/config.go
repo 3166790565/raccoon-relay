@@ -18,6 +18,25 @@ type Config struct {
 	AdminToken     string
 	SecretKey      string
 	AllowPlaintext bool
+	// DatabaseURL 为空时使用 $DataDir/relay.db（SQLite）；
+	// 以 postgres:// 或 postgresql:// 开头时连接 Postgres。
+	DatabaseURL string
+	// 连接池上限，0 表示按方言取默认（SQLite 1/1，Postgres 20/10）。
+	DBMaxOpen int
+	DBMaxIdle int
+	// MigrateSQLite：auto（默认）/ off / require，控制启动时是否把旧 relay.db 导入 Postgres。
+	MigrateSQLite string
+	// RedisURL 为空时使用进程内实现；有值时为多实例提供分布式锁与共享缓存。
+	RedisURL    string
+	RedisPrefix string
+	// RedisRequired：true 时 Redis 连不上就拒绝启动。
+	// 多副本部署建议开启——锁静默失效比启动失败更难排查。
+	RedisRequired bool
+	// MaxConcurrent 限制同时转发到上游的请求数；超出的请求排队等待，而不是直接拒绝。
+	// 0 表示不限制（默认，保持原有行为）。
+	MaxConcurrent int
+	// QueueWaitSec 是请求最长排队时间，超时返回 503。
+	QueueWaitSec int
 	PoolStrategy   string
 	MaxRetries     int
 	// RetryUntilExhausted 为 true 时，遇到可换号的错误会按序试完整个号池
@@ -130,6 +149,15 @@ func Load() (*Config, error) {
 		AdminToken:          env("ADMIN_TOKEN", ""),
 		SecretKey:           env("SECRET_KEY", ""),
 		AllowPlaintext:      envBool("ALLOW_PLAINTEXT", false),
+		DatabaseURL:         strings.TrimSpace(os.Getenv("DATABASE_URL")),
+		DBMaxOpen:           envInt("DB_MAX_OPEN_CONNS", 0),
+		DBMaxIdle:           envInt("DB_MAX_IDLE_CONNS", 0),
+		MigrateSQLite:       env("MIGRATE_SQLITE", "auto"),
+		RedisURL:            strings.TrimSpace(os.Getenv("REDIS_URL")),
+		RedisPrefix:         env("REDIS_PREFIX", "raccoon:"),
+		RedisRequired:       envBool("REDIS_REQUIRED", false),
+		MaxConcurrent:       envInt("MAX_CONCURRENT", 0),
+		QueueWaitSec:        envInt("QUEUE_WAIT_SEC", 600),
 		PoolStrategy:        env("POOL_STRATEGY", "load_balance"),
 		MaxRetries:          envInt("MAX_RETRIES", 3),
 		RetryUntilExhausted: envBool("RETRY_UNTIL_EXHAUSTED", false),
@@ -178,6 +206,14 @@ func Load() (*Config, error) {
 	}
 	if c.SecretKey == "" && !c.AllowPlaintext {
 		return nil, fmt.Errorf("未设置 SECRET_KEY：账号 token 将明文落库。确认无妨请显式设置 ALLOW_PLAINTEXT=1")
+	}
+	// 只接受 postgres 协议：写错成 mysql:// 或 sqlite:// 时要在启动时就拒绝，
+	// 而不是等驱动报一个看不懂的错误。
+	if c.DatabaseURL != "" {
+		lower := strings.ToLower(c.DatabaseURL)
+		if !strings.HasPrefix(lower, "postgres://") && !strings.HasPrefix(lower, "postgresql://") {
+			return nil, fmt.Errorf("DATABASE_URL 只支持 postgres:// 或 postgresql://，当前值无法识别")
+		}
 	}
 	if c.MaxRetries < 0 {
 		c.MaxRetries = 0

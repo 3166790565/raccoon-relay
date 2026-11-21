@@ -38,6 +38,39 @@ jobs:
       - name: go test
         run: go test ./... -count=1
 
+  # 同一套 store 测试在 Postgres 下再跑一遍。只覆盖 internal/store：
+  # scheduler 依赖 60s tick 语义、relay 的 e2e 依赖 SQLite 单连接顺序，
+  # 强行放 PG 会引入与方言无关的不稳定。
+  test-postgres:
+    name: 测试（Postgres）
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: relay
+          POSTGRES_PASSWORD: relay
+          POSTGRES_DB: relay_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      TEST_DATABASE_URL: postgres://relay:relay@localhost:5432/relay_test?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - name: go test (store, postgres)
+        run: go test ./internal/store/... -count=1
+
   build:
     name: 构建并推送镜像
     needs: test

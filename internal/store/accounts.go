@@ -46,12 +46,14 @@ type Account struct {
 	CreatedAt      int64
 	UpdatedAt      int64
 	LastUsed       int64
+	// MaxConcurrent 是该账号同时可承接的请求上限；0 表示跟随全局或视为不限。
+	MaxConcurrent int64
 }
 
 const accountCols = `id, uid, name, note, token, refresh_token, token_exp, credits, credits_at,
 	status, cool_until, cool_reason, expires_at, device_id, device_name, os_version,
 	office_identity, platform, client_channel, language, meta, priority, enabled,
-	last_checkin_day, created_at, updated_at, last_used`
+	last_checkin_day, created_at, updated_at, last_used, max_concurrent`
 
 // 写入用的字段补丁：nil 表示不改。
 type AccountPatch struct {
@@ -78,6 +80,7 @@ type AccountPatch struct {
 	Enabled        *bool
 	LastCheckinDay *string
 	LastUsed       *int64
+	MaxConcurrent  *int64
 }
 
 func (s *Store) scanAccount(sc interface{ Scan(...any) error }) (*Account, error) {
@@ -88,7 +91,7 @@ func (s *Store) scanAccount(sc interface{ Scan(...any) error }) (*Account, error
 		&a.Credits, &a.CreditsAt, &a.Status, &a.CoolUntil, &a.CoolReason, &a.ExpiresAt,
 		&a.DeviceID, &a.DeviceName, &a.OSVersion, &a.OfficeIdentity, &a.Platform,
 		&a.ClientChannel, &a.Language, &meta, &a.Priority, &enabled,
-		&a.LastCheckinDay, &a.CreatedAt, &a.UpdatedAt, &a.LastUsed)
+		&a.LastCheckinDay, &a.CreatedAt, &a.UpdatedAt, &a.LastUsed, &a.MaxConcurrent)
 	if err != nil {
 		return nil, err
 	}
@@ -110,8 +113,19 @@ func (s *Store) scanAccount(sc interface{ Scan(...any) error }) (*Account, error
 	return &a, nil
 }
 
+// ListAccounts 返回全部账号（已解密）。
+//
+// 走 1 秒进程内快照：选号在每个请求（以及每次换号重试）时都会调它，
+// 而全表读取 + 逐行 AES 解密在热路径上代价很高。
+// 所有账号写操作都会失效快照，多副本之间最多滞后 1 秒。
 func (s *Store) ListAccounts(ctx context.Context) ([]*Account, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+accountCols+` FROM accounts ORDER BY created_at ASC`)
+	return s.listAccountsCached(ctx)
+}
+
+func (s *Store) listAccountsDB(ctx context.Context) ([]*Account, error) {
+	// 并列时按 id 排序：两种方言的并列顺序都不确定，多实例批量 UPDATE
+	// 若顺序不一致会放大死锁概率。
+	rows, err := s.query(ctx, `SELECT `+accountCols+` FROM accounts ORDER BY created_at ASC, id ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -128,7 +142,7 @@ func (s *Store) ListAccounts(ctx context.Context) ([]*Account, error) {
 }
 
 func (s *Store) GetAccount(ctx context.Context, id string) (*Account, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT `+accountCols+` FROM accounts WHERE id = ?`, id)
+	row := s.queryRow(ctx, `SELECT `+accountCols+` FROM accounts WHERE id = ?`, id)
 	a, err := s.scanAccount(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -137,7 +151,7 @@ func (s *Store) GetAccount(ctx context.Context, id string) (*Account, error) {
 }
 
 func (s *Store) GetByUID(ctx context.Context, uid string) (*Account, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT `+accountCols+` FROM accounts WHERE uid = ?`, uid)
+	row := s.queryRow(ctx, `SELECT `+accountCols+` FROM accounts WHERE uid = ?`, uid)
 	a, err := s.scanAccount(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -166,13 +180,16 @@ func (s *Store) CreateAccount(ctx context.Context, a *Account) error {
 	if a.Enabled {
 		enabled = 1
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO accounts (`+accountCols+`)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	_, err := s.exec(ctx, `INSERT INTO accounts (`+accountCols+`)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		a.ID, a.UID, a.Name, a.Note, s.cipher.Encrypt(a.Token), s.cipher.Encrypt(a.RefreshToken),
 		a.TokenExp, a.Credits, a.CreditsAt, a.Status, a.CoolUntil, a.CoolReason, a.ExpiresAt,
 		a.DeviceID, a.DeviceName, a.OSVersion, a.OfficeIdentity, a.Platform, a.ClientChannel,
 		a.Language, string(meta), a.Priority, enabled, a.LastCheckinDay,
-		a.CreatedAt, a.UpdatedAt, a.LastUsed)
+		a.CreatedAt, a.UpdatedAt, a.LastUsed, a.MaxConcurrent)
+	if err == nil {
+		s.invalidateAccounts()
+	}
 	return err
 }
 
@@ -257,36 +274,46 @@ func (s *Store) UpdateAccount(ctx context.Context, id string, p AccountPatch) er
 	if p.LastUsed != nil {
 		add("last_used", *p.LastUsed)
 	}
+	if p.MaxConcurrent != nil {
+		add("max_concurrent", *p.MaxConcurrent)
+	}
 	args = append(args, id)
-	_, err := s.db.ExecContext(ctx, `UPDATE accounts SET `+joinComma(sets)+` WHERE id = ?`, args...)
+	_, err := s.exec(ctx, `UPDATE accounts SET `+joinComma(sets)+` WHERE id = ?`, args...)
+	if err == nil {
+		s.invalidateAccounts()
+	}
 	return err
 }
 
 func (s *Store) DeleteAccount(ctx context.Context, id string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := deleteAccountRows(ctx, tx, id); err != nil {
+	if err := s.deleteAccountRows(ctx, tx, id); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.invalidateAccounts()
+	return nil
 }
 
 // deleteAccountRows 删掉账号及挂在它下面的冷却与签到记录。
 // 三张表必须一起删：只删 accounts 会留下孤儿行，之后同 uid 重新导入时
 // 旧冷却会把新号立刻压回冷却状态。
-func deleteAccountRows(ctx context.Context, ex interface {
-	ExecContext(context.Context, string, ...any) (sql.Result, error)
-}, id string) error {
+//
+// 走 execTx 而不是裸 tx.ExecContext：Postgres 下占位符需要 rebind。
+func (s *Store) deleteAccountRows(ctx context.Context, tx *sql.Tx, id string) error {
 	for _, q := range []string{
 		`DELETE FROM model_cooldowns WHERE account_id = ?`,
 		`DELETE FROM account_cooldowns WHERE account_id = ?`,
 		`DELETE FROM checkin_history WHERE account_id = ?`,
 		`DELETE FROM accounts WHERE id = ?`,
 	} {
-		if _, err := ex.ExecContext(ctx, q, id); err != nil {
+		if _, err := s.execTx(ctx, tx, q, id); err != nil {
 			return err
 		}
 	}
@@ -348,7 +375,7 @@ func (s *Store) PurgeDeadAccounts(ctx context.Context, ids []string) (int, error
 	if len(ids) == 0 {
 		return 0, nil
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -359,12 +386,18 @@ func (s *Store) PurgeDeadAccounts(ctx context.Context, ids []string) (int, error
 		if id == "" {
 			continue
 		}
-		if err := deleteAccountRows(ctx, tx, id); err != nil {
+		if err := s.deleteAccountRows(ctx, tx, id); err != nil {
 			return 0, err
 		}
 		deleted++
 	}
-	return deleted, tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	if deleted > 0 {
+		s.invalidateAccounts()
+	}
+	return deleted, nil
 }
 
 func joinComma(items []string) string {

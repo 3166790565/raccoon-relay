@@ -1,0 +1,76 @@
+# 全栈部署：relay + Postgres + Redis
+#
+# 用法：
+#   cp .env.example .env && 填好 SECRET_KEY、ADMIN_TOKEN、POSTGRES_PASSWORD、REDIS_PASSWORD
+#   docker compose -f docker-compose.yml -f docker-compose.stack.yml up -d
+#
+# 只想用 SQLite 单容器：不要带这个文件，直接 docker compose up -d。
+# 想连外部 Postgres/Redis：不启用本文件，在 .env 里设 DATABASE_URL / REDIS_URL 即可。
+#
+# 首次从 SQLite 切到这套栈：把旧的 ./data/relay.db* 放进 ./data 再启动，
+# relay 会自动导入并在启动日志里打印账号数；成功后旧库改名为 relay.db.migrated-*。
+
+services:
+  relay:
+    environment:
+      DATABASE_URL: postgres://relay:${POSTGRES_PASSWORD:?请在 .env 设置 POSTGRES_PASSWORD}@postgres:5432/relay?sslmode=disable
+      REDIS_URL: redis://:${REDIS_PASSWORD:?请在 .env 设置 REDIS_PASSWORD}@redis:6379/0
+      REDIS_PREFIX: ${REDIS_PREFIX:-raccoon:}
+      # 多副本部署建议打开；单实例也开着无害
+      REDIS_REQUIRED: ${REDIS_REQUIRED:-0}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: raccoon-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: relay
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在 .env 设置 POSTGRES_PASSWORD}
+      POSTGRES_DB: relay
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U relay -d relay"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    # 默认不暴露到宿主机；需要外部工具连库时再取消注释
+    # ports:
+    #   - "127.0.0.1:5432:5432"
+
+  redis:
+    image: redis:7-alpine
+    container_name: raccoon-redis
+    restart: unless-stopped
+    # noeviction：锁 key 被 LRU 驱逐会让分布式锁静默失效。
+    command:
+      - redis-server
+      - --requirepass
+      - ${REDIS_PASSWORD:?请在 .env 设置 REDIS_PASSWORD}
+      - --maxmemory-policy
+      - noeviction
+      - --appendonly
+      - "yes"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    # ports:
+    #   - "127.0.0.1:6379:6379"
+
+volumes:
+  pg_data:
+  redis_data:

@@ -439,8 +439,10 @@ func upstreamErrText(status int, body []byte) string {
 		}
 	}
 	s := strings.TrimSpace(string(body))
-	if len(s) > 200 {
-		s = s[:200]
+	// 按字符截断，不按字节：上游错误体常常是中文，按字节切会把汉字切成半个，
+	// 面板上直接显示成乱码。上限放宽到 2000，足够放下完整错误 JSON。
+	if r := []rune(s); len(r) > 2000 {
+		s = string(r[:2000]) + "…"
 	}
 	if s == "" {
 		return fmt.Sprintf("HTTP %d", status)

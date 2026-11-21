@@ -24,8 +24,9 @@ type Refresher struct {
 	Client *raccoon.Client
 	Window time.Duration
 
-	mu    sync.Mutex
-	locks map[string]*sync.Mutex
+	mu     sync.Mutex
+	locks  map[string]*sync.Mutex
+	locker Locker
 }
 
 func NewRefresher(st *store.Store, c *raccoon.Client, window time.Duration) *Refresher {
@@ -34,6 +35,9 @@ func NewRefresher(st *store.Store, c *raccoon.Client, window time.Duration) *Ref
 	}
 	return &Refresher{ST: st, Client: c, Window: window, locks: map[string]*sync.Mutex{}}
 }
+
+// errRefreshBusy 表示另一个实例正在刷新同一账号，本轮先跳过。
+var errRefreshBusy = errors.New("该账号正在被其它实例刷新")
 
 func (r *Refresher) lockFor(id string) *sync.Mutex {
 	r.mu.Lock()
@@ -46,6 +50,27 @@ func (r *Refresher) lockFor(id string) *sync.Mutex {
 	return l
 }
 
+// SetLocker 注入跨实例的账号级锁。转发 401 重试、签到、面板刷新都会走
+// RefreshNow/EnsureFresh，多副本下必须串行化，否则 refresh_token 连续轮换。
+func (r *Refresher) SetLocker(l Locker) {
+	r.mu.Lock()
+	r.locker = l
+	r.mu.Unlock()
+}
+
+// lockAccount 先拿进程内单飞锁，再尝试跨实例锁。
+// 返回的 release 必须在用完账号后调用；ok=false 表示别的实例正在刷新。
+func (r *Refresher) lockAccount(ctx context.Context, id string) (release func(), ok bool) {
+	r.mu.Lock()
+	l := r.locker
+	r.mu.Unlock()
+	if l == nil {
+		return func() {}, true
+	}
+	// TTL 必须大于上游超时（默认 120s），否则上游卡住时锁先过期等于没锁。
+	return l.Lock(ctx, "refresh:"+id, 180*time.Second)
+}
+
 // EnsureFresh 在 access 临期时刷新，返回可用的 token。刷新被拒则返回错误。
 func (r *Refresher) EnsureFresh(ctx context.Context, acc *store.Account) (string, error) {
 	if !needsRefresh(acc, r.Window) {
@@ -54,6 +79,17 @@ func (r *Refresher) EnsureFresh(ctx context.Context, acc *store.Account) (string
 	l := r.lockFor(acc.ID)
 	l.Lock()
 	defer l.Unlock()
+
+	release, ok := r.lockAccount(ctx, acc.ID)
+	if !ok {
+		// 隔壁副本正在刷：直接读库拿它写回的新凭据，读不到就沿用手上的。
+		if fresh, err := r.ST.GetAccount(ctx, acc.ID); err == nil && fresh != nil && !needsRefresh(fresh, r.Window) {
+			acc.Token, acc.RefreshToken, acc.TokenExp = fresh.Token, fresh.RefreshToken, fresh.TokenExp
+			return fresh.Token, nil
+		}
+		return acc.Token, nil
+	}
+	defer release()
 
 	// 双检：等锁期间可能已被别的请求刷过
 	fresh, err := r.ST.GetAccount(ctx, acc.ID)
@@ -76,6 +112,19 @@ func (r *Refresher) RefreshNow(ctx context.Context, acc *store.Account) (string,
 	l := r.lockFor(acc.ID)
 	l.Lock()
 	defer l.Unlock()
+
+	// 跨实例锁：隔壁副本可能正在刷同一个号。拿不到就先读库，
+	// 若它已经刷完并写回新凭据，直接用新的即可。
+	release, ok := r.lockAccount(ctx, acc.ID)
+	if !ok {
+		if fresh, err := r.ST.GetAccount(ctx, acc.ID); err == nil && fresh != nil &&
+			fresh.Token != "" && fresh.Token != acc.Token {
+			acc.Token, acc.RefreshToken, acc.TokenExp = fresh.Token, fresh.RefreshToken, fresh.TokenExp
+			return fresh.Token, nil
+		}
+		return "", errRefreshBusy
+	}
+	defer release()
 	return r.refreshLocked(ctx, acc)
 }
 
@@ -166,6 +215,29 @@ type Renewer struct {
 	lastAt  int64
 	running bool
 	onEvent func(store.RuntimeEvent)
+
+	// locker 用于多实例协调。刷新是唯一不幂等的后台任务：
+	// 两个实例同时刷新同一个 refresh_token，先刷的会把后刷的作废。
+	locker Locker
+}
+
+// Locker 是分布式锁的最小接口，由 internal/cache 实现。
+type Locker interface {
+	Lock(ctx context.Context, name string, ttl time.Duration) (release func(), ok bool)
+}
+
+// SetLocker 注入分布式锁。传 nil 恢复单实例行为。
+func (r *Renewer) SetLocker(l Locker) {
+	r.mu.Lock()
+	r.locker = l
+	r.mu.Unlock()
+}
+
+// lockerOf 返回当前注入的锁实现。
+func (r *Renewer) lockerOf() Locker {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.locker
 }
 
 // SetEventHook 注入运行事件钩子。

@@ -15,6 +15,7 @@ import (
 	_ "time/tzdata"
 
 	"github.com/3166790565/raccoon-relay/internal/admin"
+	"github.com/3166790565/raccoon-relay/internal/cache"
 	"github.com/3166790565/raccoon-relay/internal/config"
 	"github.com/3166790565/raccoon-relay/internal/creditsync"
 	"github.com/3166790565/raccoon-relay/internal/creds"
@@ -45,11 +46,37 @@ func main() {
 		log.Fatalf("配置错误: %v", err)
 	}
 
-	st, err := store.Open(cfg.DataDir, cfg.SecretKey, cfg.AllowPlaintext)
+	st, err := store.OpenWithOptions(store.Options{
+		Dir:            cfg.DataDir,
+		SecretKey:      cfg.SecretKey,
+		AllowPlaintext: cfg.AllowPlaintext,
+		DatabaseURL:    cfg.DatabaseURL,
+		MaxOpen:        cfg.DBMaxOpen,
+		MaxIdle:        cfg.DBMaxIdle,
+	})
 	if err != nil {
 		log.Fatalf("数据库初始化失败: %v", err)
 	}
 	defer st.Close()
+	// 启动日志只说后端类型与池大小，绝不打印带密码的 DSN。
+	if cfg.DatabaseURL != "" {
+		log.Printf("数据库后端: postgres")
+		// 首次切到 Postgres 时把旧 relay.db 搬过去。失败必须中止启动：
+		// 静默起一个空库会让面板显示「账号全没了」，比启动失败更难排查。
+		res, err := st.MigrateSQLite(context.Background(), cfg.DataDir,
+			store.ParseMigrateMode(cfg.MigrateSQLite))
+		if err != nil {
+			log.Fatalf("旧库迁移失败（已回滚，relay.db 保持原样）: %v", err)
+		}
+		switch {
+		case res.Ran:
+			log.Printf("已从 SQLite 迁移 %d 个账号；旧库备份在 %s", res.Counts["accounts"], res.Backup)
+		case res.Reason != "":
+			log.Printf("跳过 SQLite 迁移: %s", res.Reason)
+		}
+	} else {
+		log.Printf("数据库后端: sqlite (%s)", cfg.DataDir)
+	}
 	if cfg.SecretKey == "" {
 		log.Println("⚠ 未设置 SECRET_KEY，账号 token 以明文入库（ALLOW_PLAINTEXT=1）")
 	}
@@ -58,7 +85,32 @@ func main() {
 	// 它自己也受面板控制，所以生命周期跟着主 ctx 走。
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	// 分布式协调：REDIS_URL 为空时是进程内实现，单实例行为不变。
+	rds := cache.New(cfg.RedisURL, cfg.RedisPrefix)
+	if err := rds.Start(ctx, cfg.RedisRequired); err != nil {
+		log.Fatalf("REDIS_REQUIRED=1 但 Redis 不可用: %v", err)
+	}
+	if cfg.RedisURL == "" {
+		log.Printf("分布式协调: 本地实现（未配置 REDIS_URL）")
+	} else if rds.Enabled() {
+		log.Printf("分布式协调: redis")
+	} else {
+		log.Printf("分布式协调: 已配置 Redis 但暂不可用，降级为本地实现")
+	}
+	// Key 校验结果跨实例共享：多副本下每个副本都要认识同一把 Key，
+	// 否则新副本要各自查一遍库。
+	st.SetKV(rds)
+
+	if cfg.MaxConcurrent > 0 {
+		if rds.Enabled() {
+			log.Printf("并发上限: %d（超出排队，跨实例共享计数）", cfg.MaxConcurrent)
+		} else {
+			log.Printf("并发上限: %d（超出排队，仅本进程计数；配置 REDIS_URL 可跨实例）", cfg.MaxConcurrent)
+		}
+	}
+
 	lmgr := logmgr.New(logmgr.ConfigOf(cfg), st)
+	lmgr.SetLocker(rds)
 	lmgr.Start(ctx)
 	defer lmgr.Close()
 
@@ -88,6 +140,9 @@ func main() {
 	engine := relay.BuildEngine(cfg, st, po, cool, client, refresher)
 	engine.Event = func(ev store.RuntimeEvent) { events.Emit(ev) }
 	srv := relay.NewServer(cfg, st, engine, catalog)
+	// 并发闸门始终注入：面板里可能随时把上限从 0 改成非 0，
+	// 届时要能立刻生效，而不是等重启。上限为 0 时 acquireSlot 直接放行。
+	srv.SetSemaphore(rds.NewSemaphore("relay"))
 
 	lm := login.New(st, client, cfg.UpstreamBase, "办公小浣熊客户端", cfg.OAuthRedirectBase)
 
@@ -99,6 +154,7 @@ func main() {
 	// 调度器始终构造：自动循环由 CheckinEnable 决定是否跑，但手动「全部签到」任何时候都要能用。
 	sch := scheduler.New(cfg, st, client, refresher, balancer)
 	sch.SetEventHook(func(ev store.RuntimeEvent) { events.Emit(ev) })
+	sch.SetLocker(rds)
 
 	// 主动续期：面板可热更新，配置改动由 ApplyStoredSettings 盖回。
 	renewer := relay.NewRenewer(refresher, relay.RenewConfig{
@@ -107,6 +163,7 @@ func main() {
 		Gap:      time.Duration(cfg.RenewGapMS) * time.Millisecond,
 	})
 	renewer.SetEventHook(func(ev store.RuntimeEvent) { events.Emit(ev) })
+	refresher.SetLocker(rds)
 
 	// 一键更新：版本号来自构建时注入，Release 资产从 GitHub 拉取并做 sha256 校验。
 	up := updater.New(updater.Options{
@@ -133,7 +190,7 @@ func main() {
 		})
 	}
 
-	panel := admin.New(cfg, st, client, refresher, po, cool, engine, lm, sch, balancer, lmgr, renewer, up, version, requestRestart, webFS)
+	panel := admin.New(cfg, st, client, refresher, po, cool, engine, lm, sch, balancer, lmgr, renewer, srv, up, version, requestRestart, webFS)
 	// 面板里改过的选号策略/重试策略优先于环境变量，保证重启后仍然生效
 	panel.ApplyStoredSettings(context.Background())
 
@@ -164,10 +221,17 @@ func main() {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+				// 多副本下只让一个实例巡检；两项操作都是幂等的，
+				// 拿不到锁直接跳过本轮。
+				release, ok := rds.Lock(ctx, "pool-tick", 2*time.Minute)
+				if !ok {
+					continue
+				}
 				cool.ReviveExpired(ctx)
 				// 积分阈值规则按余额巡检：余额是异步变化的（签到、手动查余额），
 				// 在选号时硬过滤之外再定期落一次状态，面板上才看得到谁被暂停了。
 				po.ApplyCreditPolicy(ctx)
+				release()
 			}
 		}
 	}()
@@ -205,6 +269,8 @@ func main() {
 	_ = httpServer.Shutdown(shutdownCtx)
 	// 让日志文件刷盘后再 exec，否则最后几行「已安装」会丢。
 	lmgr.Close()
+	// 把异步流水队列里剩下的记录写完，避免丢最后一批账。
+	st.FlushUsage()
 
 	if restartTarget != "" {
 		// 传安装目标而不是让 Restart 自己找：容器里进程是 /app/relay 起的，

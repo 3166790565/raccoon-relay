@@ -309,6 +309,15 @@ func (s *Server) HandleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	cc := BuildChatContext(model, body, DefaultModel)
 	start := time.Now()
 
+	// 并发上限：超出时在这里排队，拿到槽位才继续；不直接拒绝。
+	release, err := s.acquireSlot(r.Context(), "openai", cc.Model)
+	if err != nil {
+		code, msg := publicError(err)
+		writeJSON(w, code, errorBody(code, msg))
+		return
+	}
+	defer release()
+
 	if streamReq {
 		sink := newSSEWriter(w, cc.Model)
 		res, err := s.engine.RunOpenAI(r.Context(), cc, sink)
