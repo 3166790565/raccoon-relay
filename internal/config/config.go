@@ -37,8 +37,8 @@ type Config struct {
 	MaxConcurrent int
 	// QueueWaitSec 是请求最长排队时间，超时返回 503。
 	QueueWaitSec int
-	PoolStrategy   string
-	MaxRetries     int
+	PoolStrategy string
+	MaxRetries   int
 	// RetryUntilExhausted 为 true 时，遇到可换号的错误会按序试完整个号池
 	// （直到没有可用账号），而不是提前被 MaxRetries 截断。
 	RetryUntilExhausted bool

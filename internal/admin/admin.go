@@ -246,7 +246,7 @@ func (p *Panel) handleListAccounts(w http.ResponseWriter, r *http.Request) {
 			"enabled": a.Enabled, "lastCheckinDay": a.LastCheckinDay,
 			"priority": a.Priority, "lastUsed": a.LastUsed,
 			"maxConcurrent": a.MaxConcurrent,
-			"deviceId": a.DeviceID, "officeIdentity": a.OfficeIdentity,
+			"deviceId":      a.DeviceID, "officeIdentity": a.OfficeIdentity,
 			"hasRefresh":  a.RefreshToken != "",
 			"platformUid": platformUIDOf(a.Meta),
 			"deadReason":  a.DeadReason(now),

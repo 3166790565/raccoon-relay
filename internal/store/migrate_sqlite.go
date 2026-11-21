@@ -40,18 +40,18 @@ type sqliteDump struct {
 }
 
 type accountRow struct {
-	ID, UID, Name, Note, Token, RefreshToken                                                                   string
-	TokenExp, Credits, CreditsAt                                                                               int64
-	Status                                                                                                     string
-	CoolUntil                                                                                                  int64
-	CoolReason                                                                                                 string
-	ExpiresAt                                                                                                  int64
-	DeviceID, DeviceName, OSVersion, OfficeIdentity, Platform, ClientChannel, Language, Meta, LastCheckinDay    string
-	Priority, Enabled, CreatedAt, UpdatedAt, LastUsed, MaxConcurrent                                            int64
+	ID, UID, Name, Note, Token, RefreshToken                                                                 string
+	TokenExp, Credits, CreditsAt                                                                             int64
+	Status                                                                                                   string
+	CoolUntil                                                                                                int64
+	CoolReason                                                                                               string
+	ExpiresAt                                                                                                int64
+	DeviceID, DeviceName, OSVersion, OfficeIdentity, Platform, ClientChannel, Language, Meta, LastCheckinDay string
+	Priority, Enabled, CreatedAt, UpdatedAt, LastUsed, MaxConcurrent                                         int64
 }
 
 type keyRow struct {
-	ID, Name, Prefix, Hash string
+	ID, Name, Prefix, Hash       string
 	Enabled, CreatedAt, LastUsed int64
 }
 
@@ -70,11 +70,11 @@ type accountCoolRow struct {
 }
 
 type checkinRow struct {
-	ID                                  int64
-	AccountID, Day, Action, Source      string
-	OK, Already, Credit                 int64
-	Message                             string
-	At                                  int64
+	ID                             int64
+	AccountID, Day, Action, Source string
+	OK, Already, Credit            int64
+	Message                        string
+	At                             int64
 }
 
 type usageRow struct {
