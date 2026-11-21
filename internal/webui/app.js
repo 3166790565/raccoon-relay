@@ -1027,10 +1027,39 @@ async function loadSettings() {
     // 号池页的余额条要标红「低于暂停阈值」的号，这里顺手把阈值带过去。
     POOL.creditStopBelow = s.creditStopEnable ? (s.creditStopBelow ?? 0) : 0;
     $('setCreditResumeAbove').value = s.creditResumeAbove ?? 0;
+    $('setMaxConcurrent').value = s.maxConcurrent ?? 0;
+    $('setQueueWaitSec').value = s.queueWaitSec ?? 600;
   } catch (e) {
     $('settingsMsg').textContent = e.message;
   }
 }
+
+// 并发设置单独保存：只提交并发相关字段，避免和别的卡片互相覆盖。
+$('saveConcurrencyBtn').addEventListener('click', async () => {
+  const limit = numOrNaN($('setMaxConcurrent'));
+  const wait = numOrNaN($('setQueueWaitSec'));
+  if (!Number.isFinite(limit) || limit < 0) {
+    $('concurrencyMsg').textContent = '并发上限请填写 0 或正整数（0 = 不限制）';
+    return;
+  }
+  if (!Number.isFinite(wait) || wait < 1 || wait > 3600) {
+    $('concurrencyMsg').textContent = '排队时间请填写 1~3600 秒';
+    return;
+  }
+  try {
+    await api('/api/settings', {
+      method: 'PUT',
+      body: JSON.stringify({
+        maxConcurrent: Math.round(limit),
+        queueWaitSec: Math.round(wait),
+      }),
+    });
+    $('concurrencyMsg').textContent = limit === 0 ? '已保存，当前不限制并发' : '已保存，立即生效';
+    await loadSettings();
+  } catch (e) {
+    $('concurrencyMsg').textContent = e.message;
+  }
+});
 
 // 冷却设置单独保存：只提交冷却与积分阈值字段，避免和上面的运行设置互相覆盖。
 $('saveCooldownBtn').addEventListener('click', async () => {

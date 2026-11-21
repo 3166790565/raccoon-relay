@@ -140,10 +140,9 @@ func main() {
 	engine := relay.BuildEngine(cfg, st, po, cool, client, refresher)
 	engine.Event = func(ev store.RuntimeEvent) { events.Emit(ev) }
 	srv := relay.NewServer(cfg, st, engine, catalog)
-	// 并发闸门：Redis 可用时跨实例共享计数，否则退化为进程内。
-	if cfg.MaxConcurrent > 0 {
-		srv.SetSemaphore(rds.NewSemaphore("relay"))
-	}
+	// 并发闸门始终注入：面板里可能随时把上限从 0 改成非 0，
+	// 届时要能立刻生效，而不是等重启。上限为 0 时 acquireSlot 直接放行。
+	srv.SetSemaphore(rds.NewSemaphore("relay"))
 
 	lm := login.New(st, client, cfg.UpstreamBase, "办公小浣熊客户端", cfg.OAuthRedirectBase)
 
@@ -191,7 +190,7 @@ func main() {
 		})
 	}
 
-	panel := admin.New(cfg, st, client, refresher, po, cool, engine, lm, sch, balancer, lmgr, renewer, up, version, requestRestart, webFS)
+	panel := admin.New(cfg, st, client, refresher, po, cool, engine, lm, sch, balancer, lmgr, renewer, srv, up, version, requestRestart, webFS)
 	// 面板里改过的选号策略/重试策略优先于环境变量，保证重启后仍然生效
 	panel.ApplyStoredSettings(context.Background())
 

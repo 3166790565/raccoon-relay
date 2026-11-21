@@ -45,7 +45,9 @@ type Panel struct {
 	balancer *creditsync.Balancer
 	logs     *logmgr.Manager
 	renewer  *relay.Renewer
-	webFS    func(name string) ([]byte, error)
+	// srv 是数据面处理器，用于热更新并发上限；可为 nil（测试）。
+	srv   *relay.Server
+	webFS func(name string) ([]byte, error)
 
 	// 一键更新
 	updater   *updater.Updater
@@ -68,13 +70,13 @@ type Panel struct {
 func New(cfg *config.Config, st *store.Store, client *raccoon.Client, refresh *relay.Refresher,
 	po *pool.Pool, cool *pool.CooldownBook, engine *relay.Engine, lm *login.Manager,
 	sch *scheduler.Scheduler, balancer *creditsync.Balancer, logs *logmgr.Manager,
-	renewer *relay.Renewer, up *updater.Updater, version string, onRestart func(string),
-	webFS func(string) ([]byte, error)) *Panel {
+	renewer *relay.Renewer, srv *relay.Server, up *updater.Updater, version string,
+	onRestart func(string), webFS func(string) ([]byte, error)) *Panel {
 	return &Panel{
 		cfg: cfg, st: st, client: client, refresh: refresh,
 		po: po, cool: cool, engine: engine, loginMgr: lm, sched: sch, balancer: balancer,
-		logs: logs, renewer: renewer, updater: up, version: version, onRestart: onRestart,
-		webFS: webFS,
+		logs: logs, renewer: renewer, srv: srv, updater: up, version: version,
+		onRestart: onRestart, webFS: webFS,
 	}
 }
 
@@ -931,6 +933,7 @@ func (p *Panel) ApplyStoredSettings(ctx context.Context) {
 	p.applyStoredCooldownSettings(ctx)
 	p.applyStoredLogSettings(ctx)
 	p.applyStoredRenewSettings(ctx)
+	p.applyStoredConcurrencySettings(ctx)
 }
 
 // applyStoredCheckinSettings 恢复面板里改过的签到配置。
@@ -1053,6 +1056,9 @@ func (p *Panel) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	for k, v := range p.renewSettings() {
 		settings[k] = v
 	}
+	for k, v := range p.concurrencySettings() {
+		settings[k] = v
+	}
 	writeJSON(w, 200, map[string]any{"ok": true, "settings": settings})
 }
 
@@ -1137,6 +1143,9 @@ type settingsBody struct {
 	RenewWindowSec   *int `json:"renewWindowSec"`
 	RenewIntervalMin *int `json:"renewIntervalMin"`
 	RenewGapMS       *int `json:"renewGapMS"`
+
+	MaxConcurrent *int `json:"maxConcurrent"`
+	QueueWaitSec  *int `json:"queueWaitSec"`
 }
 
 func (p *Panel) handlePutSettings(w http.ResponseWriter, r *http.Request) {
@@ -1212,6 +1221,10 @@ func (p *Panel) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := p.applyRenewSettings(r.Context(), body); err != nil {
+		writeJSON(w, 400, map[string]any{"ok": false, "message": err.Error()})
+		return
+	}
+	if err := p.applyConcurrencySettings(r.Context(), body); err != nil {
 		writeJSON(w, 400, map[string]any{"ok": false, "message": err.Error()})
 		return
 	}
@@ -1314,6 +1327,68 @@ func (p *Panel) applyRenewSettings(ctx context.Context, body settingsBody) error
 	_ = p.st.SetSetting(ctx, "renewIntervalMin", strconv.Itoa(intervalMin))
 	_ = p.st.SetSetting(ctx, "renewGapMS", strconv.Itoa(gapMS))
 	return nil
+}
+
+// applyConcurrencySettings 校验并热更新并发上限与排队时长。
+// 0 表示不限制。保存后立即生效，无需重启。
+func (p *Panel) applyConcurrencySettings(ctx context.Context, body settingsBody) error {
+	if body.MaxConcurrent == nil && body.QueueWaitSec == nil {
+		return nil
+	}
+	if p.srv == nil {
+		return nil
+	}
+	limit, waitSec := p.srv.ConcurrencyLimit()
+	if body.MaxConcurrent != nil {
+		if *body.MaxConcurrent < 0 {
+			return fmt.Errorf("并发上限不能为负")
+		}
+		limit = *body.MaxConcurrent
+	}
+	if body.QueueWaitSec != nil {
+		if *body.QueueWaitSec < 1 || *body.QueueWaitSec > 3600 {
+			return fmt.Errorf("排队时长必须在 1~3600 秒之间")
+		}
+		waitSec = *body.QueueWaitSec
+	}
+	p.srv.SetConcurrencyLimit(limit, waitSec)
+	_ = p.st.SetSetting(ctx, "maxConcurrent", strconv.Itoa(limit))
+	_ = p.st.SetSetting(ctx, "queueWaitSec", strconv.Itoa(waitSec))
+	return nil
+}
+
+// applyStoredConcurrencySettings 把持久化的并发配置盖回运行中的服务。
+func (p *Panel) applyStoredConcurrencySettings(ctx context.Context) {
+	if p.srv == nil {
+		return
+	}
+	limit, waitSec := p.srv.ConcurrencyLimit()
+	if raw := p.st.GetSetting(ctx, "maxConcurrent", ""); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n >= 0 {
+			limit = n
+		}
+	}
+	if raw := p.st.GetSetting(ctx, "queueWaitSec", ""); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			waitSec = n
+		}
+	}
+	p.srv.SetConcurrencyLimit(limit, waitSec)
+}
+
+// concurrencySettings 供面板读取当前生效值。
+func (p *Panel) concurrencySettings() map[string]any {
+	if p.srv == nil {
+		return map[string]any{
+			"maxConcurrent": p.cfg.MaxConcurrent,
+			"queueWaitSec":  p.cfg.QueueWaitSec,
+		}
+	}
+	limit, waitSec := p.srv.ConcurrencyLimit()
+	return map[string]any{
+		"maxConcurrent": limit,
+		"queueWaitSec":  waitSec,
+	}
 }
 
 // applyLogSettings 校验并落盘日志管理配置，然后热更新到 logmgr。

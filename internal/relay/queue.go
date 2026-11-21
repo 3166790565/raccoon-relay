@@ -28,6 +28,18 @@ func (s *Server) SetSemaphore(sem cache.Semaphore) {
 	s.sem = sem
 }
 
+// SetConcurrencyLimit 热更新并发上限与排队时长，面板保存后立即生效。
+// limit <= 0 表示不限制。
+func (s *Server) SetConcurrencyLimit(limit, waitSec int) {
+	s.cfg.MaxConcurrent = limit
+	s.cfg.QueueWaitSec = waitSec
+}
+
+// ConcurrencyLimit 返回当前上限与排队时长，供面板展示。
+func (s *Server) ConcurrencyLimit() (limit, waitSec int) {
+	return s.cfg.MaxConcurrent, s.cfg.QueueWaitSec
+}
+
 // acquireSlot 尝试占用一个并发槽位；关闭或未配置时直接放行。
 //
 // 返回的 release 必须 defer 调用。客户端在排队期间断开时返回 ctx.Err()，
