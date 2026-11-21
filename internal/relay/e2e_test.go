@@ -415,12 +415,12 @@ func TestForbiddenDiagnosticsReachEventDetail(t *testing.T) {
 }
 
 // 普通 403（权限/风控）既不该强刷白白轮换 refresh_token，也不该打成 relogin：
-// 应换号，失败号只做短冷却。
+// 403 只是上游波动，不冷却账号，直接换号重试。
 func TestForbiddenIsNotRelogin(t *testing.T) {
 	h := newHarness(t, []chatResult{
 		{status: 403, errCode: 403, errMsg: "permission denied"},
 	})
-	h.addAccount(t, "pu-1", 100)
+	a := h.addAccount(t, "pu-1", 100)
 
 	w := h.do(t, "POST", "/v1/chat/completions",
 		`{"model":"sn-test-model","messages":[{"role":"user","content":"hi"}]}`)
@@ -436,11 +436,119 @@ func TestForbiddenIsNotRelogin(t *testing.T) {
 	}
 
 	acc, _ := h.st.GetByUID(context.Background(), "pu-1")
-	if acc.Status == store.StatusRelogin {
-		t.Fatal("普通 403 不该把号打成 relogin")
+	if acc.Status != store.StatusOnline {
+		t.Fatalf("403 不冷却账号，应保持在线，实际 %s", acc.Status)
 	}
-	if acc.Status != store.StatusCooling {
-		t.Fatalf("403 应短冷却，实际 %s", acc.Status)
+	if acc.CoolUntil != 0 || acc.CoolReason != "" {
+		t.Fatalf("403 不该写冷却信息，实际 until=%d reason=%q", acc.CoolUntil, acc.CoolReason)
+	}
+	if h.cool.IsModelCooled(a.ID, "sn-test-model") {
+		t.Fatal("403 不该冷却「账号 × 模型」")
+	}
+}
+
+// 403 不冷却，但应换号重试：第二个号接住请求。
+func TestForbiddenRetriesAnotherAccount(t *testing.T) {
+	h := newHarness(t, []chatResult{
+		{status: 403, errCode: 403, errMsg: "device fingerprint blocked"},
+		{status: 200, frames: sseFrames("换号成功"), usage: usageFrame},
+	})
+	h.addAccount(t, "pu-1", 100)
+	h.addAccount(t, "pu-2", 100)
+
+	w := h.do(t, "POST", "/v1/chat/completions",
+		`{"model":"sn-test-model","messages":[{"role":"user","content":"hi"}]}`)
+	if w.Code != 200 {
+		t.Fatalf("403 后应换号成功，实际 %d：%s", w.Code, w.Body.String())
+	}
+	h.up.mu.Lock()
+	hits := h.up.chatHits
+	h.up.mu.Unlock()
+	if hits != 2 {
+		t.Fatalf("403 应换号重试一次，实际打了 %d 次", hits)
+	}
+	accounts, _ := h.st.ListAccounts(context.Background())
+	for _, a := range accounts {
+		if a.Status != store.StatusOnline {
+			t.Fatalf("403 不该让任何账号进入冷却，%s 实际 %s", a.Name, a.Status)
+		}
+	}
+}
+
+// 5xx / 网络波动同样不冷却账号，只换号重试。
+func TestServerErrorDoesNotCool(t *testing.T) {
+	h := newHarness(t, []chatResult{
+		{status: 500, errCode: 500, errMsg: "上游炸了"},
+		{status: 200, frames: sseFrames("换号成功"), usage: usageFrame},
+	})
+	h.addAccount(t, "pu-1", 100)
+	h.addAccount(t, "pu-2", 100)
+
+	w := h.do(t, "POST", "/v1/chat/completions",
+		`{"model":"sn-test-model","messages":[{"role":"user","content":"hi"}]}`)
+	if w.Code != 200 {
+		t.Fatalf("5xx 后应换号成功，实际 %d：%s", w.Code, w.Body.String())
+	}
+	accounts, _ := h.st.ListAccounts(context.Background())
+	for _, a := range accounts {
+		if a.Status != store.StatusOnline {
+			t.Fatalf("5xx 不该让账号进入冷却，%s 实际 %s", a.Name, a.Status)
+		}
+	}
+}
+
+// 100041 是上游对内容（敏感词）的拒答，与账号无关：不冷却、不换号，直接回 400。
+func TestContentRejectedNotRetried(t *testing.T) {
+	h := newHarness(t, []chatResult{
+		{status: 400, errCode: 100041, errMsg: "内容包含敏感词"},
+		{status: 200, frames: sseFrames("不该走到这里"), usage: usageFrame},
+	})
+	a := h.addAccount(t, "pu-1", 100)
+	h.addAccount(t, "pu-2", 100)
+
+	w := h.do(t, "POST", "/v1/chat/completions",
+		`{"model":"sn-test-model","messages":[{"role":"user","content":"敏感内容"}]}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("100041 应回 400，实际 %d：%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "敏感词") {
+		t.Fatalf("应透出上游可读文案: %s", w.Body.String())
+	}
+	h.up.mu.Lock()
+	hits := h.up.chatHits
+	h.up.mu.Unlock()
+	if hits != 1 {
+		t.Fatalf("100041 不该换号重试，实际打了 %d 次", hits)
+	}
+	acc, _ := h.st.GetAccount(context.Background(), a.ID)
+	if acc.Status != store.StatusOnline || acc.CoolUntil != 0 {
+		t.Fatalf("100041 不该冷却账号，实际 %s/%d", acc.Status, acc.CoolUntil)
+	}
+	if h.cool.IsModelCooled(a.ID, "sn-test-model") {
+		t.Fatal("100041 不该冷却「账号 × 模型」")
+	}
+}
+
+// 面板关掉 200108 账号级冷却后，这类响应只换号，不再停号。
+func TestAccountAbnormalToggleOffDoesNotCool(t *testing.T) {
+	h := newHarness(t, []chatResult{
+		{status: 429, errCode: 200108, errMsg: "系统检测到当前账号存在异常调用"},
+		{status: 200, frames: sseFrames("换号成功"), usage: usageFrame},
+	})
+	h.cool.SetAccountAbnormalCool(false)
+	h.addAccount(t, "pu-1", 100)
+	h.addAccount(t, "pu-2", 100)
+
+	w := h.do(t, "POST", "/v1/chat/completions",
+		`{"model":"sn-test-model","messages":[{"role":"user","content":"hi"}]}`)
+	if w.Code != 200 {
+		t.Fatalf("换号后应成功，实际 %d：%s", w.Code, w.Body.String())
+	}
+	accounts, _ := h.st.ListAccounts(context.Background())
+	for _, a := range accounts {
+		if a.Status != store.StatusOnline {
+			t.Fatalf("开关关闭后不该冷却账号，%s 实际 %s", a.Name, a.Status)
+		}
 	}
 }
 

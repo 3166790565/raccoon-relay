@@ -24,10 +24,15 @@ func classify(err error) (pool.FailKind, bool, int, string) {
 	}
 	var ue *raccoon.UpstreamError
 	if !errors.As(err, &ue) {
-		return pool.FailServer, true, http.StatusBadGateway, "上游请求失败"
+		return pool.FailTransient, true, http.StatusBadGateway, "上游请求失败"
 	}
 	msg := cleanMessage(ue.Error())
 	switch {
+	case ue.Code == codeContentRejected:
+		// 100041 是上游对内容本身的拒答（命中敏感词），跟账号无关：
+		// 换号重试只会拿另一个号再问一遍同样的话，必然还是拒答。
+		// 不冷却、不换号，直接把错误交给调用方。
+		return pool.FailRejected, false, http.StatusBadRequest, msg
 	case ue.Code == codeAccountAbnormal:
 		// 200108「系统检测到当前账号存在异常调用」：上游罚的是整个账号，
 		// 不是某一次调用，换模型也绕不过去。按账号级阶梯冷却处理。
@@ -36,23 +41,23 @@ func classify(err error) (pool.FailKind, bool, int, string) {
 		return pool.FailRelogin, true, http.StatusUnauthorized, msg
 	case ue.Status == http.StatusForbidden:
 		// 403 不等于凭证过期：上游对设备指纹异常、风控、权限不足都会回 403。
-		// 只有文案明确指向登录态时才判 relogin，其余按风控冷却并换号，
-		// 否则一个 403 就会把这个号永久打成「需重登」。
+		// 只有文案明确指向登录态时才判 relogin，其余视为上游波动：
+		// 不冷却账号，直接换号重试，否则一个 403 就让这个号白停两小时。
 		if looksLikeAuthFailure(ue.Message) {
 			return pool.FailRelogin, true, http.StatusUnauthorized, msg
 		}
-		return pool.FailBlocked, true, http.StatusForbidden, blockedMessage(msg)
+		return pool.FailTransient, true, http.StatusForbidden, blockedMessage(msg)
 	case ue.Status == http.StatusPaymentRequired:
 		return pool.FailQuota, true, http.StatusPaymentRequired, msg
 	case ue.Status == http.StatusTooManyRequests:
 		return pool.FailRate, true, http.StatusTooManyRequests, msg
-	case ue.Status >= 500:
-		return pool.FailServer, true, http.StatusBadGateway, msg
-	case ue.Status == 0:
-		return pool.FailServer, true, http.StatusBadGateway, msg
-	case ue.Code == 200822:
+	case ue.Code == codeRefreshConflict:
 		// 并发刷新冲突：不是凭证失效，换号重试即可，别把账号打成 relogin。
-		return pool.FailServer, true, http.StatusBadGateway, msg
+		return pool.FailTransient, true, http.StatusBadGateway, msg
+	case ue.Status >= 500:
+		return pool.FailTransient, true, http.StatusBadGateway, msg
+	case ue.Status == 0:
+		return pool.FailTransient, true, http.StatusBadGateway, msg
 	}
 	return pool.FailOther, false, http.StatusBadRequest, msg
 }
@@ -93,6 +98,9 @@ const (
 	codeAccountAbnormal = 200108
 	// codeRefreshConflict = 200822：refresh_token 已被并发刷新替换。
 	codeRefreshConflict = 200822
+	// codeContentRejected = 100041：上游因内容命中敏感词拒答。这是请求本身的问题，
+	// 换号、重试都不会改变结果，也不该让任何账号吃冷却。
+	codeContentRejected = 100041
 )
 
 // isModelScoped 判断错误是否只针对「账号 × 模型」：换号无用，罚模型即可。
@@ -134,11 +142,13 @@ func statusFor(kind pool.FailKind) int {
 	switch kind {
 	case pool.FailQuota:
 		return http.StatusPaymentRequired
-	case pool.FailRate:
+	case pool.FailRate, pool.FailAccountAbnormal:
 		return http.StatusTooManyRequests
 	case pool.FailRelogin:
 		return http.StatusUnauthorized
-	case pool.FailBlocked:
+	case pool.FailRejected:
+		return http.StatusBadRequest
+	case pool.FailTransient:
 		return http.StatusForbidden
 	default:
 		return http.StatusBadGateway

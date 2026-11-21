@@ -698,7 +698,7 @@
           <div class="field"><label>200108 账号异常按账号冷却</label>
             <select id="setAccountAbnormalCool">
               <option value="true">开启 · 整个账号阶梯冷却</option>
-              <option value="false">关闭 · 按普通上游失败冷却 10 分钟</option>
+              <option value="false">关闭 · 不冷却账号，只换号重试</option>
             </select>
           </div>
           <div class="field"><label>积分过低暂停</label>
@@ -710,11 +710,14 @@
           <div class="field"><label>低于该积分暂停</label><input type="number" id="setCreditStopBelow" min="0" step="1"></div>
           <div class="field"><label>达到该积分解除</label><input type="number" id="setCreditResumeAbove" min="0" step="1"></div>
         </div>
-        <p class="hint">429 默认只冷却出问题的那一个「账号 × 模型」：同一账号换别的模型仍然可用。
+        <p class="hint">只有 <strong>429 限流</strong> 与 <strong>200108 账号异常</strong> 会冷却账号。
+          429 默认只冷却出问题的那一个「账号 × 模型」：同一账号换别的模型仍然可用。
           冷却阶梯为 3 分钟 → 5 分钟 → 10 分钟，之后每次翻倍（封顶 24 小时）；冷却结束后该模型一旦调用成功即清零，
           下次再从 3 分钟算起。<br>
           上游返回 200108「账号存在异常调用」时罚的是整个账号，换模型绕不过去：默认按账号级冷却，
           用的也是同一条阶梯（3 → 5 → 10… 分钟），到期自动恢复，调用成功即清零。<br>
+          403、5xx、网络错误视为上游波动：<strong>不冷却账号</strong>，直接换号重试。
+          100041（内容命中敏感词）是请求本身的问题，<strong>不换号、不冷却</strong>，直接返回 400。<br>
           积分阈值独立于账号冷却：已知余额 ≤「暂停阈值」时该号暂停选号，等到 ≥「解除阈值」时自动恢复——
           通常配合签到使用，签到补上积分后立即解除，无需等冷却时间。<strong>解除阈值不能小于暂停阈值</strong>。</p>
         <button class="primary" id="saveCooldownBtn">保存冷却设置</button>

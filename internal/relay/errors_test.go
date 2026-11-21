@@ -11,7 +11,8 @@ import (
 	"github.com/3166790565/raccoon-relay/internal/raccoon"
 )
 
-// 403 不等于凭证过期：只有文案明确指向登录态时才判 relogin。
+// 403 不等于凭证过期：只有文案明确指向登录态时才判 relogin；
+// 其余 403 视为上游波动，换号但不冷却。
 func TestClassify403(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -19,10 +20,10 @@ func TestClassify403(t *testing.T) {
 		wantKind pool.FailKind
 		wantCode int
 	}{
-		{"空文案按风控", "", pool.FailBlocked, http.StatusForbidden},
-		{"权限不足按风控", "permission denied", pool.FailBlocked, http.StatusForbidden},
-		{"请求过期不等于登录过期", "请求已过期", pool.FailBlocked, http.StatusForbidden},
-		{"签名过期", "signature expired", pool.FailBlocked, http.StatusForbidden},
+		{"空文案按波动", "", pool.FailTransient, http.StatusForbidden},
+		{"权限不足按波动", "permission denied", pool.FailTransient, http.StatusForbidden},
+		{"请求过期不等于登录过期", "请求已过期", pool.FailTransient, http.StatusForbidden},
+		{"签名过期", "signature expired", pool.FailTransient, http.StatusForbidden},
 		{"登录态失效才算重登", "登录态已失效，请重新登录", pool.FailRelogin, http.StatusUnauthorized},
 		{"authorization_verify_error 算重登", "authorization_verify_error", pool.FailRelogin, http.StatusUnauthorized},
 	}
@@ -86,6 +87,27 @@ func TestBlockedMessageNotMisleading(t *testing.T) {
 	msg := blockedMessage("")
 	if msg == "" || msg == "上游请求失败" {
 		t.Fatalf("空文案应替换成 403 说明，实际 %q", msg)
+	}
+}
+
+// 100041 是内容拒答，与账号无关：不换号、不冷却，对外回 400。
+func TestClassifyContentRejected(t *testing.T) {
+	for _, status := range []int{400, 403, 429} {
+		kind, switchable, code, msg := classify(&raccoon.UpstreamError{
+			Status: status, Code: 100041, Message: "内容包含敏感词",
+		})
+		if kind != pool.FailRejected {
+			t.Fatalf("HTTP %d + code 100041 应归为内容拒答，实际 %s", status, kind)
+		}
+		if switchable {
+			t.Fatal("100041 不该换号重试：换号也还是同一段内容")
+		}
+		if code != http.StatusBadRequest {
+			t.Fatalf("对外应回 400，实际 %d", code)
+		}
+		if msg == "" {
+			t.Fatal("应给出可读文案")
+		}
 	}
 }
 

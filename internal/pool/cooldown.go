@@ -11,15 +11,16 @@ import (
 	"github.com/3166790565/raccoon-relay/internal/store"
 )
 
-// 冷却分级：
+// 冷却分级（只有这条列表里的失败会停号）：
 //   402 积分耗尽 → exhausted 至次日 04:00
 //   429 限流     → 默认只罚「账号 × 模型」，阶梯 3 → 5 → 10 → 20… 分钟；
 //                  关闭模型级冷却时才退化为整号 60s
 //   200108 账号异常 → 账号级阶梯冷却，同样 3 → 5 → 10… 分钟；换模型绕不过去
-//   5xx / 网络   → cooling 10min
 //   401 刷新失败 → relogin 永久
-//   风控拦截     → cooling 2h
-//   其它 4xx     → cooling 60s
+//
+// 不冷却、只换号重试的失败（NonCooling）：
+//   403 / 5xx / 网络 → 上游波动，换号即可，账号保持在线
+//   100041 敏感词   → 请求内容被上游拒答，与账号无关，不换号直接返回
 
 // coolResetWindow：冷却早已结束、且超过这么久没有再犯，就当作新的一条失败链，
 // 从 3 分钟重新开始。否则一个号每天偶尔 429 一次，冷却时间会无限累加。
@@ -387,15 +388,19 @@ type FailKind string
 const (
 	FailQuota           FailKind = "quota"            // 402
 	FailRate            FailKind = "rate"             // 429（模型级冷却关闭时的兜底）
-	FailServer          FailKind = "server"           // 5xx / 网络
+	FailTransient       FailKind = "transient"        // 403 / 5xx / 网络：上游波动，不冷却，直接换号
 	FailRelogin         FailKind = "relogin"          // 401 且刷新失败
-	FailBlocked         FailKind = "blocked"          // 风控
+	FailRejected        FailKind = "rejected"         // 100041 敏感词拒答：与账号无关，不冷却、不换号
 	FailModelScoped     FailKind = "model_scoped"     // 模型级问题，罚账号×模型
 	FailAccountAbnormal FailKind = "account_abnormal" // 200108 账号异常，账号级阶梯冷却
 	FailOther           FailKind = "other"
 )
 
 // Cool 按分类写账号冷却。
+//
+// 只有 402（积分耗尽）、401（凭证失效）与 429 兜底会真正停号；
+// 403 / 5xx / 网络这类上游波动不在这里停号（见 NonCooling），
+// 否则一次偶发 5xx 就白罚一个号 10 分钟。
 func (c *CooldownBook) Cool(ctx context.Context, accID string, kind FailKind, detail string) {
 	now := time.Now().UnixMilli()
 	var until int64
@@ -407,24 +412,32 @@ func (c *CooldownBook) Cool(ctx context.Context, accID string, kind FailKind, de
 	case FailRate:
 		until = now + 60_000
 		status, msg, level = store.StatusCooling, defaultStr(detail, "上游限流"), store.LevelWarn
-	case FailServer:
-		until = now + 600_000
-		status, msg, level = store.StatusCooling, defaultStr(detail, "上游异常"), store.LevelWarn
 	case FailAccountAbnormal:
 		// 账号异常走阶梯：这里只是兜底，正常路径由 CoolAccountLadder 处理（它带命中次数）。
 		until = now + coolDelay(0).Milliseconds()
 		status, msg, level = store.StatusCooling, defaultStr(detail, "上游判定账号异常"), store.LevelWarn
 	case FailRelogin:
 		status, msg, level = store.StatusRelogin, defaultStr(detail, "凭证失效，需重新登录"), store.LevelError
-	case FailBlocked:
-		until = now + 2*3_600_000
-		status, msg, level = store.StatusCooling, defaultStr(detail, "账号被上游风控拦截"), store.LevelWarn
+	case FailTransient, FailRejected, FailModelScoped:
+		// 上游波动（403/5xx/网络）与内容拒答不停号：前者换号即可，
+		// 后者换号也没用。这里什么都不写，保持账号在线。
+		return
 	default:
 		until = now + 60_000
 		status, msg, level = store.StatusCooling, detail, store.LevelWarn
 	}
 	c.setAccount(ctx, accID, status, until, msg)
 	c.emitWhy(accID, level, "停用账号 "+statusLabel(status), msg, until)
+}
+
+// NonCooling 判断这类失败是否不冷却账号、只换号重试。
+// 转发层用它决定「不写冷却事件」时，不会把未停号的账号误报成已冷却。
+func NonCooling(kind FailKind) bool {
+	switch kind {
+	case FailTransient, FailRejected:
+		return true
+	}
+	return false
 }
 
 // CoolUntil 按绝对时刻冷却，用于对齐 Retry-After。

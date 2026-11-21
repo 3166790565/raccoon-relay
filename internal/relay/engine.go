@@ -124,7 +124,7 @@ func (e *Engine) RunOpenAI(ctx context.Context, req *ChatContext, sink OpenAISin
 
 		kind, switchable, code, publicMsg := classify(leaseErr)
 		level := store.LevelWarn
-		if kind == pool.FailRelogin || !switchable {
+		if kind == pool.FailRelogin || kind == pool.FailRejected || !switchable {
 			level = store.LevelError
 		}
 		detail := fmt.Sprintf("模型：%s\n上游返回码：%d\n尝试序号：%d\n原因：%s",
@@ -139,18 +139,25 @@ func (e *Engine) RunOpenAI(ctx context.Context, req *ChatContext, sink OpenAISin
 		}
 		// 200108 这类「上游判定账号异常」处罚的是整个账号：换模型也绕不过去，
 		// 所以按账号级阶梯冷却（3 → 5 → 10… 分钟），阶梯到期自动恢复。
-		if kind == pool.FailAccountAbnormal && e.Cool.AccountAbnormalEnabled() {
-			e.Cool.CoolAccountLadder(ctx, acc.ID, publicMsg)
-			e.report(level, "账号级冷却 · "+publicMsg, detail+"\n处置：冷却整个账号，已换号重试", acc.ID)
+		if kind == pool.FailAccountAbnormal {
+			if e.Cool.AccountAbnormalEnabled() {
+				e.Cool.CoolAccountLadder(ctx, acc.ID, publicMsg)
+				e.report(level, "账号级冷却 · "+publicMsg, detail+"\n处置：冷却整个账号，已换号重试", acc.ID)
+				if at.Started {
+					return Result{AccountID: acc.ID, Model: req.Model}, leaseErr
+				}
+				continue
+			}
+			// 开关关闭：不再冷却账号，按上游波动只换号。
+			e.report(level, "上游失败："+publicMsg,
+				detail+"\n处置：账号异常冷却已关闭，未冷却账号，已换号重试", acc.ID)
 			if at.Started {
 				return Result{AccountID: acc.ID, Model: req.Model}, leaseErr
 			}
 			continue
 		}
 		// 429 只罚「这个号 × 这个模型」，不把整个号停掉：同一个号换个模型往往还是好的。
-		if kind == pool.FailAccountAbnormal {
-			// 开关关闭：按普通上游失败走下面的 10 分钟冷却路径。
-		} else if isModelScoped(leaseErr) || kind == pool.FailRate {
+		if isModelScoped(leaseErr) || kind == pool.FailRate {
 			if e.Cool.ModelEnabled() {
 				e.Cool.CoolModel(ctx, acc.ID, req.Model, leaseErr.Error())
 				e.report(level, "模型级冷却："+req.Model+" · "+publicMsg, detail+"\n处置：仅冷却该模型", acc.ID)
@@ -176,6 +183,15 @@ func (e *Engine) RunOpenAI(ctx context.Context, req *ChatContext, sink OpenAISin
 			action = "已向客户端写出内容，无法换号，直接报错"
 		} else if !switchable {
 			action = "该错误不值得换号，直接报错"
+		}
+		// 403/5xx/网络波动与 100041 内容拒答都不停号，事件里要如实写「未冷却」，
+		// 否则面板上会以为这个号被罚过。
+		if pool.NonCooling(kind) && !at.Started {
+			if switchable {
+				action += "（账号未冷却，保持在线）"
+			} else {
+				action = "上游拒答请求内容，与账号无关，未冷却"
+			}
 		}
 		e.report(level, "上游失败："+publicMsg, detail+"\n处置："+action, acc.ID)
 		if at.Started {
