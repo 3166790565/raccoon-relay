@@ -287,6 +287,97 @@ func TestExportReimportable(t *testing.T) {
 	}
 }
 
+// 日日新账号也要导出成完整的凭据包：API Key 之外还要带控制台账号密码与
+// 登录票，否则导出后再导入只能靠 Key 用，票过期就没法自动重登。
+func TestExportIncludesSenseNovaCredentials(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	sn := &store.Account{
+		UID: "tenant-9", Name: "日日新号", Provider: store.ProviderSenseNova,
+		Token: "sk-key", RefreshToken: "sk-key", Credits: 42,
+		SNUsername: "u@example.com", SNPassword: "pw",
+		SNToken: "console-jwt", SNTokenExp: 1700000000000, SNRefreshToken: "console-refresh",
+		Enabled: true,
+	}
+	if err := st.CreateAccount(ctx, sn); err != nil {
+		t.Fatal(err)
+	}
+
+	f, err := Export(ctx, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Accounts) != 1 {
+		t.Fatalf("导出条数不对: %d", len(f.Accounts))
+	}
+	got := f.Accounts[0]
+	if got.Channel != ChannelSenseNova {
+		t.Fatalf("channel=%q，应为 sensenova", got.Channel)
+	}
+	if got.Token != "sk-key" || got.Username != "u@example.com" || got.Password != "pw" ||
+		got.ConsoleToken != "console-jwt" || got.ConsoleExp != 1700000000000 ||
+		got.ConsoleRefresh != "console-refresh" {
+		t.Fatalf("日日新凭据字段不完整: %+v", got)
+	}
+
+	// 回灌：清空后重新导入应能建回同一个号。
+	if err := st.DeleteAccount(ctx, sn.ID); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(f)
+	list, err := ParseImport(raw)
+	if err != nil || len(list) != 1 {
+		t.Fatalf("日日新导出无法回灌: %v %d", err, len(list))
+	}
+	res := (&Importer{ST: st}).Import(ctx, list)
+	if !res[0].OK {
+		t.Fatalf("日日新回灌失败: %+v", res[0])
+	}
+	back, err := st.GetByProviderUID(ctx, store.ProviderSenseNova, "tenant-9")
+	if err != nil || back == nil {
+		t.Fatalf("回灌后没找到账号: %v", err)
+	}
+	if back.SNUsername != "u@example.com" || back.SNPassword != "pw" || back.Token != "sk-key" {
+		t.Fatalf("回灌凭据丢失: %+v", back)
+	}
+	if back.Credits != 42 {
+		t.Fatalf("回灌后余额=%d，应为 42", back.Credits)
+	}
+}
+
+// 只导勾选的号：ids 之外的账号不出现在包里，其余账号导出行为不变。
+func TestExportIDsFiltersSelection(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	im := &Importer{ST: st}
+	im.Import(ctx, []Account{
+		{UID: "pu-1", Token: "t1", Meta: map[string]any{}},
+		{UID: "pu-2", Token: "t2", Meta: map[string]any{}},
+	})
+	accounts, err := st.ListAccounts(ctx)
+	if err != nil || len(accounts) != 2 {
+		t.Fatalf("准备数据失败: %v %d", err, len(accounts))
+	}
+	var target string
+	for _, a := range accounts {
+		if a.UID == "pu-2" {
+			target = a.ID
+		}
+	}
+	f, err := ExportIDs(ctx, st, []string{target})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Accounts) != 1 || f.Accounts[0].UID != "pu-2" {
+		t.Fatalf("勾选导出结果不对: %+v", f.Accounts)
+	}
+	// 空 ids 等同全池
+	all, err := ExportIDs(ctx, st, nil)
+	if err != nil || len(all.Accounts) != 2 {
+		t.Fatalf("空 ids 应导出全池: %v %d", err, len(all.Accounts))
+	}
+}
+
 // agent2api 的 refresh_token 与 access_token 是同一枚凭据，导入时应直接用
 // pluginSecret.accessToken 回填 refreshToken，这样 30 天后还能自动续期。
 func TestImportAgent2APIFillsRefreshToken(t *testing.T) {

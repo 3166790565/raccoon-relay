@@ -180,6 +180,11 @@ DATA_DIR=./data SECRET_KEY=dev ADMIN_TOKEN=dev ./relay
 按 `uid` 去重：已存在的账号合并凭据与 `meta`（保留 `onboardingGrants` / `checkin` / `deviceId`），不会重复建号。
 导出走同一格式，可以直接回灌桌面版。
 
+号池「导出 JSON」默认导出全池；勾选账号后再点，则只导出选中的号（文件名带 `selected-<条数>`）。
+包里同时包含两种供应商：小浣熊账号与桌面版格式完全一致；日日新账号 `channel` 为 `sensenova`，
+除 API Key（`token`）外还带 `username` / `password` / `consoleToken` / `consoleRefreshToken`，
+导出结果可以直接导入回来继续自动续期与重登。
+
 也兼容 agent2api 的桌面导出（`{"version":2,"exportedAt":...,"accounts":[{"provider":...}]}`）。
 这种包是多供应商混装，导入时只保留小浣熊账号（`provider` 为 `raccoon`；缺失时按 token 的
 `iss = xiaohuanxiong.com/iam` 判别），其余 qoder / trae / codearts 等会被自动过滤，

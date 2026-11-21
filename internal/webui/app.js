@@ -977,8 +977,40 @@ $('refreshListBtn').addEventListener('click', async () => {
   await Promise.all([loadAccounts(), loadStatus()]);
 });
 
-$('exportBtn').addEventListener('click', () => {
-  window.location.href = '/api/accounts/export';
+// 有勾选就只导勾选的号，没勾选导全池（小浣熊 + 日日新都在包里）。
+// POST 是因为要带 id 清单，拿到 blob 后本地触发下载，文件名用后端定的。
+$('exportBtn').addEventListener('click', async () => {
+  const ids = [...POOL.sel];
+  if (ids.length) $('tableMsg').textContent = `正在导出选中的 ${ids.length} 个账号…`;
+  else $('tableMsg').textContent = '正在导出全部账号…';
+  try {
+    const res = await fetch('/api/accounts/export', {
+      method: ids.length ? 'POST' : 'GET',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: ids.length ? JSON.stringify({ ids }) : undefined,
+    });
+    if (!res.ok) {
+      let msg = `导出失败（HTTP ${res.status}）`;
+      try { msg = (await res.json()).message || msg; } catch (_) { /* 保持默认 */ }
+      throw new Error(msg);
+    }
+    const blob = await res.blob();
+    const cd = res.headers.get('Content-Disposition') || '';
+    const m = /filename="([^"]+)"/.exec(cd);
+    const name = (m && m[1])
+      || `agenthub-credentials-raccoon-${new Date().toISOString().slice(0, 10)}.json`;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    a.click();
+    URL.revokeObjectURL(url);
+    $('tableMsg').textContent = `已导出 ${ids.length || '全部'} 个账号`;
+  } catch (e) {
+    $('tableMsg').textContent = e.message;
+    toast(e.message, true);
+  }
 });
 
 // ---------- 一键清理失效账号 ----------

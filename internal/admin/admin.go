@@ -175,7 +175,7 @@ func (p *Panel) Route(w http.ResponseWriter, r *http.Request) {
 		p.handleListAccounts(w, r)
 	case path == "/api/accounts/import" && r.Method == http.MethodPost:
 		p.handleImport(w, r)
-	case path == "/api/accounts/export" && r.Method == http.MethodGet:
+	case path == "/api/accounts/export" && (r.Method == http.MethodGet || r.Method == http.MethodPost):
 		p.handleExport(w, r)
 	case path == "/api/accounts/dead" && r.Method == http.MethodGet:
 		p.handleListDead(w, r)
@@ -385,14 +385,37 @@ func (p *Panel) handleImport(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, out)
 }
 
+// handleExport 导出凭据包。GET 导全池；POST 带 {"ids":[...]} 只导勾选的号
+// （空清单按全池处理，面板侧不会再发这种请求）。
 func (p *Panel) handleExport(w http.ResponseWriter, r *http.Request) {
-	f, err := creds.Export(r.Context(), p.st)
+	var ids []string
+	if r.Method == http.MethodPost {
+		var body struct {
+			IDs []string `json:"ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+			writeJSON(w, 400, map[string]any{"ok": false, "message": err.Error()})
+			return
+		}
+		ids = body.IDs
+	}
+	f, err := creds.ExportIDs(r.Context(), p.st, ids)
 	if err != nil {
 		writeJSON(w, 500, map[string]any{"ok": false, "message": err.Error()})
 		return
 	}
+	if len(f.Accounts) == 0 {
+		// 空包容易让人误以为「导出成功」，直接拒绝。
+		writeJSON(w, 400, map[string]any{"ok": false, "message": "没有可导出的账号"})
+		return
+	}
 	raw, _ := json.MarshalIndent(f, "", "  ")
-	name := fmt.Sprintf("agenthub-credentials-raccoon-%s.json", time.Now().Format("2006-01-02"))
+	// 全池沿用原文件名；按勾选导出时带条数，便于和全量包区分。
+	suffix := "raccoon"
+	if len(ids) > 0 {
+		suffix = fmt.Sprintf("raccoon-selected-%d", len(f.Accounts))
+	}
+	name := fmt.Sprintf("agenthub-credentials-%s-%s.json", suffix, time.Now().Format("2006-01-02"))
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
 	w.WriteHeader(200)

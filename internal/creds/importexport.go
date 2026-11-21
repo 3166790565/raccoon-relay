@@ -35,12 +35,21 @@ type Account struct {
 	CreatedAt    int64          `json:"createdAt"`
 	UpdatedAt    int64          `json:"updatedAt"`
 	Meta         map[string]any `json:"meta"`
+
+	// 日日新账号才有的控制台凭据。channel 为 sensenova 时 token 是 API Key，
+	// 另有控制台账号密码与登录票，缺了它们只能靠 Key 用，过期后无法自动重登。
+	Username       string `json:"username,omitempty"`
+	Password       string `json:"password,omitempty"`
+	ConsoleToken   string `json:"consoleToken,omitempty"`
+	ConsoleExp     int64  `json:"consoleExp,omitempty"`
+	ConsoleRefresh string `json:"consoleRefreshToken,omitempty"`
 }
 
 const (
 	FormatCredentials = "agenthub-credentials"
 	FormatMetadata    = "agenthub-accounts"
 	ChannelRaccoon    = "raccoon"
+	ChannelSenseNova  = "sensenova"
 )
 
 // ImportResult 逐条回传结果，失败不影响其它条。
@@ -309,6 +318,9 @@ func (im *Importer) Import(ctx context.Context, list []Account) []ImportResult {
 }
 
 func (im *Importer) importOne(ctx context.Context, a Account) ImportResult {
+	if a.Channel == ChannelSenseNova {
+		return im.importSenseNova(ctx, a)
+	}
 	if a.Channel != "" && a.Channel != ChannelRaccoon {
 		return ImportResult{Message: "渠道不是 raccoon，已跳过"}
 	}
@@ -431,12 +443,113 @@ func (im *Importer) importOne(ctx context.Context, a Account) ImportResult {
 	return ImportResult{OK: true, UID: uid, ID: acc.ID}
 }
 
+// importSenseNova 导入导出包里的日日新账号。
+//
+// 只写库、不联网：登录票过期由转发层用 refresh_token / 账号密码自动重登，
+// 导入时没必要再打一次上游。按「供应商 + uid」去重；缺 uid 时用控制台账号兜底。
+func (im *Importer) importSenseNova(ctx context.Context, a Account) ImportResult {
+	username := strings.TrimSpace(a.Username)
+	uid := strings.TrimSpace(a.UID)
+	if uid == "" {
+		uid = username
+	}
+	if uid == "" {
+		return ImportResult{Message: "日日新账号缺少 uid 与控制台账号，已跳过"}
+	}
+	apiKey := strings.TrimSpace(a.Token)
+	if apiKey == "" {
+		return ImportResult{Message: "日日新账号缺少 API Key，已跳过"}
+	}
+	meta := a.Meta
+	if meta == nil {
+		meta = map[string]any{}
+	}
+	if _, ok := meta["source"]; !ok {
+		meta["source"] = "import"
+	}
+	name := strings.TrimSpace(a.Name)
+	if name == "" {
+		name = a.Username
+	}
+
+	existing, err := im.ST.GetByProviderUID(ctx, store.ProviderSenseNova, uid)
+	if err != nil {
+		return ImportResult{UID: uid, Message: "查询失败: " + err.Error()}
+	}
+	if existing != nil {
+		p := store.AccountPatch{
+			Token:          &apiKey,
+			RefreshToken:   &apiKey,
+			Meta:           mergeMeta(existing.Meta, meta),
+			SNUsername:     &a.Username,
+			SNPassword:     &a.Password,
+			SNToken:        &a.ConsoleToken,
+			SNTokenExp:     &a.ConsoleExp,
+			SNRefreshToken: &a.ConsoleRefresh,
+		}
+		if name != "" {
+			p.Name = &name
+		}
+		if a.Note != "" {
+			p.Note = &a.Note
+		}
+		// 导出包里 Credits 恒为 -1（未知），不能拿它覆盖库里的真实额度。
+		if a.Credits >= 0 {
+			p.Credits = &a.Credits
+		}
+		if err := im.ST.UpdateAccount(ctx, existing.ID, p); err != nil {
+			return ImportResult{UID: uid, Message: "更新失败: " + err.Error()}
+		}
+		return ImportResult{OK: true, UID: uid, ID: existing.ID, Updated: true}
+	}
+
+	acc := &store.Account{
+		UID:            uid,
+		Name:           name,
+		Note:           a.Note,
+		Provider:       store.ProviderSenseNova,
+		Token:          apiKey,
+		RefreshToken:   apiKey,
+		Credits:        -1,
+		Status:         store.StatusOnline,
+		SNUsername:     a.Username,
+		SNPassword:     a.Password,
+		SNToken:        a.ConsoleToken,
+		SNTokenExp:     a.ConsoleExp,
+		SNRefreshToken: a.ConsoleRefresh,
+		Language:       "zh",
+		Meta:           meta,
+		Enabled:        a.Enabled == nil || *a.Enabled,
+	}
+	if a.Credits >= 0 {
+		acc.Credits = a.Credits
+	}
+	if err := im.ST.CreateAccount(ctx, acc); err != nil {
+		return ImportResult{UID: uid, Message: "入库失败: " + err.Error()}
+	}
+	return ImportResult{OK: true, UID: uid, ID: acc.ID}
+}
+
 // Export 读全池生成与桌面版同格式的 JSON。导出明文 token（与桌面版行为一致）。
+//
+// 两种供应商都导出：小浣熊行与桌面版逐字段对齐，日日新行额外带控制台账号密码
+// 与登录票，导出结果能原样导入回来继续自动续期/重登。信封的 channel 保持
+// raccoon 不变（老版本只认它），按需导出的供应商由 ids 里的实际条目决定。
 func Export(ctx context.Context, st *store.Store) (*File, error) {
+	return ExportIDs(ctx, st, nil)
+}
+
+// ExportIDs 只导出 ids 里的号；ids 为空表示全池。
+func ExportIDs(ctx context.Context, st *store.Store, ids []string) (*File, error) {
 	accounts, err := st.ListAccounts(ctx)
 	if err != nil {
 		return nil, err
 	}
+	want := map[string]bool{}
+	for _, id := range ids {
+		want[id] = true
+	}
+	all := len(want) == 0
 	f := &File{
 		Format:     FormatCredentials,
 		ExportedAt: time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
@@ -444,24 +557,42 @@ func Export(ctx context.Context, st *store.Store) (*File, error) {
 		Accounts:   make([]Account, 0, len(accounts)),
 	}
 	for _, a := range accounts {
-		f.Accounts = append(f.Accounts, Account{
-			Channel:      ChannelRaccoon,
-			UID:          a.UID,
-			Name:         a.Name,
-			Note:         a.Note,
-			Token:        a.Token,
-			RefreshToken: a.RefreshToken,
-			TokenExp:     a.TokenExp,
-			ExpiresAt:    a.ExpiresAt,
-			Credits:      a.Credits,
-			Status:       a.Status,
-			Source:       sourceOf(a),
-			CreatedAt:    a.CreatedAt,
-			UpdatedAt:    a.UpdatedAt,
-			Meta:         a.Meta,
-		})
+		if !all && !want[a.ID] {
+			continue
+		}
+		f.Accounts = append(f.Accounts, exportOne(a))
 	}
 	return f, nil
+}
+
+func exportOne(a *store.Account) Account {
+	out := Account{
+		Channel:      ChannelRaccoon,
+		UID:          a.UID,
+		Name:         a.Name,
+		Note:         a.Note,
+		Token:        a.Token,
+		RefreshToken: a.RefreshToken,
+		TokenExp:     a.TokenExp,
+		ExpiresAt:    a.ExpiresAt,
+		Credits:      a.Credits,
+		Status:       a.Status,
+		Source:       sourceOf(a),
+		CreatedAt:    a.CreatedAt,
+		UpdatedAt:    a.UpdatedAt,
+		Meta:         a.Meta,
+	}
+	if a.IsSenseNova() {
+		// 日日新的 Token 是 API Key（没有 exp），有效期看控制台登录票。
+		out.Channel = ChannelSenseNova
+		out.Username = a.SNUsername
+		out.Password = a.SNPassword
+		out.ConsoleToken = a.SNToken
+		out.ConsoleExp = a.SNTokenExp
+		out.ConsoleRefresh = a.SNRefreshToken
+		out.TokenExp = 0
+	}
+	return out
 }
 
 func sourceOf(a *store.Account) string {
