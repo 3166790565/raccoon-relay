@@ -43,7 +43,7 @@ type CheckinFilter struct {
 	PageSize  int
 }
 
-func (f CheckinFilter) conditions() (string, []any) {
+func (f CheckinFilter) conditions(d dialect) (string, []any) {
 	var conds []string
 	var args []any
 	if f.SinceMS > 0 {
@@ -77,9 +77,10 @@ func (f CheckinFilter) conditions() (string, []any) {
 		args = append(args, f.Source)
 	}
 	if q := strings.TrimSpace(f.Query); q != "" {
-		like := "%" + q + "%"
+		like := escapeLike(q)
+		op := d.likeOp()
 		conds = append(conds,
-			"(c.message LIKE ? OR c.account_id LIKE ? OR a.name LIKE ? OR a.uid LIKE ?)")
+			"(c.message "+op+" ? OR c.account_id "+op+" ? OR a.name "+op+" ? OR a.uid "+op+" ?)")
 		args = append(args, like, like, like, like)
 	}
 	if len(conds) == 0 {
@@ -108,16 +109,17 @@ func (s *Store) QueryCheckins(ctx context.Context, f CheckinFilter) ([]CheckinRo
 	if f.PageSize > 500 {
 		f.PageSize = 500
 	}
-	where, args := f.conditions()
+	where, args := f.conditions(s.dialect)
 	const from = ` FROM checkin_history c LEFT JOIN accounts a ON a.id = c.account_id`
 
 	var sum CheckinSummary
+	// SUM(bigint) 在 Postgres 下返回 numeric，必须显式 ::bigint 才能扫到 int64。
 	if err := s.queryRow(ctx,
-		`SELECT COUNT(*),
-			COALESCE(SUM(CASE WHEN c.ok = 1 THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN c.ok = 0 THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN c.ok = 1 AND c.already = 0 THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN c.ok = 1 THEN c.credit ELSE 0 END), 0)`+from+where,
+		`SELECT COUNT(*), `+
+			s.dialect.sumInt("CASE WHEN c.ok = 1 THEN 1 ELSE 0 END")+`, `+
+			s.dialect.sumInt("CASE WHEN c.ok = 0 THEN 1 ELSE 0 END")+`, `+
+			s.dialect.sumInt("CASE WHEN c.ok = 1 AND c.already = 0 THEN 1 ELSE 0 END")+`, `+
+			s.dialect.sumInt("CASE WHEN c.ok = 1 THEN c.credit ELSE 0 END")+from+where,
 		args...).Scan(&sum.Total, &sum.OK, &sum.Failed, &sum.Claimed, &sum.Credit); err != nil {
 		return nil, CheckinSummary{}, err
 	}
@@ -177,7 +179,7 @@ func (s *Store) CheckinCenterAccounts(ctx context.Context, day string) ([]Checki
 			SELECT x.id FROM checkin_history x
 			WHERE x.account_id = a.id AND x.day = ?
 			ORDER BY x.id DESC LIMIT 1)
-		ORDER BY a.enabled DESC, a.created_at ASC`, day)
+		ORDER BY a.enabled DESC, a.created_at ASC, a.id ASC`, day)
 	if err != nil {
 		return nil, err
 	}
@@ -212,6 +214,6 @@ func (s *Store) CheckinTotal(ctx context.Context) (int64, error) {
 func (s *Store) CheckinCreditTotal(ctx context.Context) (int64, error) {
 	var n int64
 	err := s.queryRow(ctx,
-		`SELECT COALESCE(SUM(credit), 0) FROM checkin_history WHERE ok = 1`).Scan(&n)
+		`SELECT `+s.dialect.sumInt("credit")+` FROM checkin_history WHERE ok = 1`).Scan(&n)
 	return n, err
 }

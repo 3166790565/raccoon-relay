@@ -45,11 +45,24 @@ func main() {
 		log.Fatalf("配置错误: %v", err)
 	}
 
-	st, err := store.Open(cfg.DataDir, cfg.SecretKey, cfg.AllowPlaintext)
+	st, err := store.OpenWithOptions(store.Options{
+		Dir:            cfg.DataDir,
+		SecretKey:      cfg.SecretKey,
+		AllowPlaintext: cfg.AllowPlaintext,
+		DatabaseURL:    cfg.DatabaseURL,
+		MaxOpen:        cfg.DBMaxOpen,
+		MaxIdle:        cfg.DBMaxIdle,
+	})
 	if err != nil {
 		log.Fatalf("数据库初始化失败: %v", err)
 	}
 	defer st.Close()
+	// 启动日志只说后端类型与池大小，绝不打印带密码的 DSN。
+	if cfg.DatabaseURL != "" {
+		log.Printf("数据库后端: postgres")
+	} else {
+		log.Printf("数据库后端: sqlite (%s)", cfg.DataDir)
+	}
 	if cfg.SecretKey == "" {
 		log.Println("⚠ 未设置 SECRET_KEY，账号 token 以明文入库（ALLOW_PLAINTEXT=1）")
 	}

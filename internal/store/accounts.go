@@ -111,7 +111,9 @@ func (s *Store) scanAccount(sc interface{ Scan(...any) error }) (*Account, error
 }
 
 func (s *Store) ListAccounts(ctx context.Context) ([]*Account, error) {
-	rows, err := s.query(ctx, `SELECT `+accountCols+` FROM accounts ORDER BY created_at ASC`)
+	// 并列时按 id 排序：两种方言的并列顺序都不确定，多实例批量 UPDATE
+	// 若顺序不一致会放大死锁概率。
+	rows, err := s.query(ctx, `SELECT `+accountCols+` FROM accounts ORDER BY created_at ASC, id ASC`)
 	if err != nil {
 		return nil, err
 	}

@@ -10,12 +10,7 @@ import (
 
 func newEventStore(t *testing.T) *Store {
 	t.Helper()
-	st, err := Open(t.TempDir(), "", true)
-	if err != nil {
-		t.Fatalf("开库失败: %v", err)
-	}
-	t.Cleanup(func() { st.Close() })
-	return st
+	return openStoreAnyDialect(t, "", true)
 }
 
 // 同一句话在合并窗口内重复出现时只累加次数，不新增行；

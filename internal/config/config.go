@@ -18,6 +18,12 @@ type Config struct {
 	AdminToken     string
 	SecretKey      string
 	AllowPlaintext bool
+	// DatabaseURL 为空时使用 $DataDir/relay.db（SQLite）；
+	// 以 postgres:// 或 postgresql:// 开头时连接 Postgres。
+	DatabaseURL string
+	// 连接池上限，0 表示按方言取默认（SQLite 1/1，Postgres 20/10）。
+	DBMaxOpen int
+	DBMaxIdle int
 	PoolStrategy   string
 	MaxRetries     int
 	// RetryUntilExhausted 为 true 时，遇到可换号的错误会按序试完整个号池
@@ -130,6 +136,9 @@ func Load() (*Config, error) {
 		AdminToken:          env("ADMIN_TOKEN", ""),
 		SecretKey:           env("SECRET_KEY", ""),
 		AllowPlaintext:      envBool("ALLOW_PLAINTEXT", false),
+		DatabaseURL:         strings.TrimSpace(os.Getenv("DATABASE_URL")),
+		DBMaxOpen:           envInt("DB_MAX_OPEN_CONNS", 0),
+		DBMaxIdle:           envInt("DB_MAX_IDLE_CONNS", 0),
 		PoolStrategy:        env("POOL_STRATEGY", "load_balance"),
 		MaxRetries:          envInt("MAX_RETRIES", 3),
 		RetryUntilExhausted: envBool("RETRY_UNTIL_EXHAUSTED", false),
@@ -178,6 +187,14 @@ func Load() (*Config, error) {
 	}
 	if c.SecretKey == "" && !c.AllowPlaintext {
 		return nil, fmt.Errorf("未设置 SECRET_KEY：账号 token 将明文落库。确认无妨请显式设置 ALLOW_PLAINTEXT=1")
+	}
+	// 只接受 postgres 协议：写错成 mysql:// 或 sqlite:// 时要在启动时就拒绝，
+	// 而不是等驱动报一个看不懂的错误。
+	if c.DatabaseURL != "" {
+		lower := strings.ToLower(c.DatabaseURL)
+		if !strings.HasPrefix(lower, "postgres://") && !strings.HasPrefix(lower, "postgresql://") {
+			return nil, fmt.Errorf("DATABASE_URL 只支持 postgres:// 或 postgresql://，当前值无法识别")
+		}
 	}
 	if c.MaxRetries < 0 {
 		c.MaxRetries = 0

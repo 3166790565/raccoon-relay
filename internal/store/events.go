@@ -68,7 +68,7 @@ type EventFilter struct {
 	PageSize    int
 }
 
-func (f EventFilter) conditions() (string, []any) {
+func (f EventFilter) conditions(d dialect) (string, []any) {
 	var conds []string
 	var args []any
 	if f.SinceMS > 0 {
@@ -109,9 +109,10 @@ func (f EventFilter) conditions() (string, []any) {
 		args = append(args, f.AccountID)
 	}
 	if q := strings.TrimSpace(f.Query); q != "" {
-		like := "%" + q + "%"
+		like := escapeLike(q)
+		op := d.likeOp()
 		conds = append(conds,
-			"(e.message LIKE ? OR e.detail LIKE ? OR e.component LIKE ? OR e.scope LIKE ? OR e.account_id LIKE ? OR a.name LIKE ? OR a.uid LIKE ?)")
+			"(e.message "+op+" ? OR e.detail "+op+" ? OR e.component "+op+" ? OR e.scope "+op+" ? OR e.account_id "+op+" ? OR a.name "+op+" ? OR a.uid "+op+" ?)")
 		args = append(args, like, like, like, like, like, like, like)
 	}
 	if len(conds) == 0 {
@@ -138,20 +139,20 @@ func (s *Store) QueryEvents(ctx context.Context, f EventFilter) ([]RuntimeEvent,
 	if f.PageSize > 500 {
 		f.PageSize = 500
 	}
-	where, args := f.conditions()
+	where, args := f.conditions(s.dialect)
 	const from = ` FROM runtime_events e LEFT JOIN accounts a ON a.id = e.account_id`
 
 	var sum EventSummary
 	if err := s.queryRow(ctx,
-		`SELECT COUNT(*),
-			COALESCE(SUM(CASE WHEN e.level = 'error' THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN e.level = 'warn' THEN 1 ELSE 0 END), 0)`+from+where,
+		`SELECT COUNT(*), `+
+			s.dialect.sumInt("CASE WHEN e.level = 'error' THEN 1 ELSE 0 END")+`, `+
+			s.dialect.sumInt("CASE WHEN e.level = 'warn' THEN 1 ELSE 0 END")+from+where,
 		args...).Scan(&sum.Total, &sum.Failed, &sum.Warning); err != nil {
 		return nil, EventSummary{}, err
 	}
 
 	sel := `SELECT e.id, e.ts, e.level, e.scope, e.component, e.account_id,
-		COALESCE(a.name, ''), COALESCE(a.uid, ''), e.message, e.detail, e.count, e.last_ts` +
+		COALESCE(a.name, ''), COALESCE(a.uid, ''), e.message, e.detail, "count", e.last_ts` +
 		from + where + ` ORDER BY e.id DESC LIMIT ? OFFSET ?`
 	pageArgs := append(append([]any{}, args...), f.PageSize, int64(f.Page-1)*int64(f.PageSize))
 	rows, err := s.query(ctx, sel, pageArgs...)
@@ -183,7 +184,7 @@ func (s *Store) LatestEvents(ctx context.Context, accountID string, scopes []str
 		limit = 1
 	}
 	q := `SELECT e.id, e.ts, e.level, e.scope, e.component, e.account_id,
-		COALESCE(a.name, ''), COALESCE(a.uid, ''), e.message, e.detail, e.count, e.last_ts
+		COALESCE(a.name, ''), COALESCE(a.uid, ''), e.message, e.detail, "count", e.last_ts
 		FROM runtime_events e LEFT JOIN accounts a ON a.id = e.account_id
 		WHERE e.account_id = ?`
 	args := []any{accountID}
@@ -283,7 +284,7 @@ func (s *Store) AddEvent(ctx context.Context, e RuntimeEvent) error {
 	// 先试探合并：命中同一句话且还在窗口内，就只累加次数。
 	// 用 UPDATE ... 的 RowsAffected 判断是否命中，避免多一次 SELECT。
 	res, err := s.exec(ctx,
-		`UPDATE runtime_events SET count = count + ?, last_ts = ?, detail = ?
+		`UPDATE runtime_events SET "count" = "count" + ?, last_ts = ?, detail = ?
 		 WHERE id = (SELECT id FROM runtime_events
 			WHERE level = ? AND scope = ? AND component = ? AND account_id = ?
 			  AND message = ? AND ts >= ?

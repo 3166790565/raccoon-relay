@@ -9,12 +9,7 @@ import (
 
 func openTestStore(t *testing.T) *Store {
 	t.Helper()
-	s, err := Open(t.TempDir(), "test-key", false)
-	if err != nil {
-		t.Fatalf("打开测试库失败: %v", err)
-	}
-	t.Cleanup(func() { s.Close() })
-	return s
+	return openStoreAnyDialect(t, "test-key", false)
 }
 
 // 只删除早于截止时间的流水，边界内的一条都不能动。

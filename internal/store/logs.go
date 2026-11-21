@@ -96,7 +96,7 @@ type UsageFilter struct {
 	PageSize  int
 }
 
-func (f UsageFilter) conditions() (string, []any) {
+func (f UsageFilter) conditions(d dialect) (string, []any) {
 	var conds []string
 	var args []any
 	if f.SinceMS > 0 {
@@ -130,9 +130,10 @@ func (f UsageFilter) conditions() (string, []any) {
 		args = append(args, f.API)
 	}
 	if q := strings.TrimSpace(f.Query); q != "" {
-		like := "%" + q + "%"
+		like := escapeLike(q)
+		op := d.likeOp()
 		conds = append(conds,
-			"(u.model LIKE ? OR u.error LIKE ? OR u.api LIKE ? OR a.name LIKE ? OR a.uid LIKE ? OR u.account_id LIKE ?)")
+			"(u.model "+op+" ? OR u.error "+op+" ? OR u.api "+op+" ? OR a.name "+op+" ? OR a.uid "+op+" ? OR u.account_id "+op+" ?)")
 		args = append(args, like, like, like, like, like, like)
 	}
 	if len(conds) == 0 {
@@ -153,12 +154,12 @@ func (s *Store) QueryUsage(ctx context.Context, f UsageFilter) ([]UsageRow, int6
 	if f.PageSize > 500 {
 		f.PageSize = 500
 	}
-	where, args := f.conditions()
+	where, args := f.conditions(s.dialect)
 	const from = ` FROM usage_logs u LEFT JOIN accounts a ON a.id = u.account_id`
 
 	var total, failed int64
 	if err := s.queryRow(ctx,
-		`SELECT COUNT(*), COALESCE(SUM(CASE WHEN u.status >= 400 THEN 1 ELSE 0 END), 0)`+from+where,
+		`SELECT COUNT(*), `+s.dialect.sumInt("CASE WHEN u.status >= 400 THEN 1 ELSE 0 END")+from+where,
 		args...).Scan(&total, &failed); err != nil {
 		return nil, 0, 0, err
 	}

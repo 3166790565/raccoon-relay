@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
+	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "modernc.org/sqlite"
 )
 
@@ -45,7 +47,7 @@ func OpenWithOptions(o Options) (*Store, error) {
 	}
 
 	d := dialectSQLite
-	dsn := ""
+	driver, dsn := "sqlite", ""
 	if o.DatabaseURL == "" {
 		// 开库前先自检：SQLite 的 "unable to open database file (14)" 只表明写不了，
 		// 不说明是谁写不了、该怎么修。在容器里这几乎总是 bind mount 属主问题。
@@ -55,12 +57,22 @@ func OpenWithOptions(o Options) (*Store, error) {
 		dsn = filepath.Join(o.Dir, "relay.db") + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)"
 	} else {
 		d = dialectPostgres
-		dsn = o.DatabaseURL
+		// pgx 的 database/sql 驱动注册名是 "pgx"，不是 "postgres"。
+		driver, dsn = "pgx", o.DatabaseURL
 	}
 
-	db, err := sql.Open(string(d), dsn)
+	db, err := sql.Open(driver, dsn)
 	if err != nil {
 		return nil, fmt.Errorf("打开数据库失败: %w", err)
+	}
+
+	// sql.Open 是惰性的：DSN 写错或数据库还没起来，要等第一条查询才暴露。
+	// compose 里 postgres 可能比 relay 晚就绪，所以这里带重试地 Ping。
+	if d == dialectPostgres {
+		if err := pingWithRetry(db, 30*time.Second); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("连接 Postgres 失败: %w", err)
+		}
 	}
 
 	maxOpen, maxIdle := o.MaxOpen, o.MaxIdle
@@ -94,6 +106,38 @@ func (s *Store) Close() error { return s.db.Close() }
 
 // Dialect 返回当前方言，供需要逐条改写 SQL 的调用方判断。
 func (s *Store) Dialect() dialect { return s.dialect }
+
+// likeOp 返回大小写匹配操作符。
+//
+// SQLite 的 LIKE 对 ASCII 不区分大小写，Postgres 的 LIKE 区分。
+// 面板搜索是给人用的，两边的语义应该一致，所以 PG 下改用 ILIKE。
+func (d dialect) likeOp() string {
+	if d == dialectPostgres {
+		return "ILIKE"
+	}
+	return "LIKE"
+}
+
+// sumInt 返回把 BIGINT 聚合结果转回 int64 的表达式。
+//
+// Postgres 的 SUM(bigint) 返回 numeric，pgx 的 database/sql 分支会按字符串
+// 返回，Scan 到 int64 会失败；显式 ::bigint 才能稳定扫描。
+// 不使用占位符，因此不需要 rebind。
+func (d dialect) sumInt(expr string) string {
+	if d == dialectPostgres {
+		return "COALESCE(SUM(" + expr + "), 0)::bigint"
+	}
+	return "COALESCE(SUM(" + expr + "), 0)"
+}
+
+// escapeLike 转义 LIKE 的通配符。用户搜索 "50%" 时不应该匹配到任意内容。
+// 两个方言都支持 ESCAPE '\'。
+func escapeLike(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, "%", `\%`)
+	s = strings.ReplaceAll(s, "_", `\_`)
+	return "%" + s + "%"
+}
 
 // ---- 查询包装：所有业务 SQL 从这里走，保证 Postgres 下占位符被正确改写 ----
 
@@ -157,49 +201,90 @@ func checkWritable(dir string) error {
 或者用最新镜像，入口脚本会在启动时自动修正属主。`, dir, err)
 }
 
+// pingWithRetry 在超时内反复 Ping，给数据库容器留出启动时间。
+func pingWithRetry(db *sql.DB, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		lastErr = db.PingContext(ctx)
+		cancel()
+		if lastErr == nil {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return lastErr
+		}
+		time.Sleep(2 * time.Second)
+	}
+}
+
 func (s *Store) migrate() error {
 	schema := sqliteSchema
 	if s.dialect == dialectPostgres {
 		schema = pgSchema
+		// Postgres 并发启动时，CREATE TABLE IF NOT EXISTS 仍可能撞
+		// pg_type_typname_nsp_index。整段 DDL 用事务级 advisory lock 串行化，
+		// 事务结束自动释放。
+		ctx := context.Background()
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("开启迁移事务失败: %w", err)
+		}
+		defer func() { _ = tx.Rollback() }()
+		if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(720854120031)`); err != nil {
+			return fmt.Errorf("获取迁移锁失败: %w", err)
+		}
+		for _, stmt := range schema {
+			if _, err := tx.ExecContext(ctx, stmt); err != nil {
+				return fmt.Errorf("建表失败: %w", err)
+			}
+		}
+		if err := s.applySchemaVersionTx(ctx, tx); err != nil {
+			return err
+		}
+		return tx.Commit()
 	}
 	for _, stmt := range schema {
 		if _, err := s.db.Exec(stmt); err != nil {
 			return fmt.Errorf("建表失败: %w", err)
 		}
 	}
-	if err := s.applySchemaVersion(); err != nil {
-		return err
-	}
-	return nil
+	return s.applySchemaVersion()
 }
 
-// applySchemaVersion 记录 schema 版本。
+// applySchemaVersion 记录 schema 版本（SQLite 路径）。
 //
 // SQLite 继续使用 PRAGMA user_version，保证旧库升级路径不变；
-// Postgres 用 schema_migrations 表（SQLite 也建同一张表，方便未来统一切换）。
+// 同时写一行 schema_migrations，方便未来统一切换。
 func (s *Store) applySchemaVersion() error {
 	var ver int
-	if s.dialect == dialectSQLite {
-		if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&ver); err != nil {
-			return err
-		}
-	} else {
-		// Postgres 首次启动时表里没有记录，视为 0。
-		_ = s.db.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&ver)
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&ver); err != nil {
+		return err
 	}
 	if ver >= schemaVersion {
 		return nil
 	}
-	if s.dialect == dialectSQLite {
-		if _, err := s.db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
-			return err
-		}
+	if _, err := s.db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
+		return err
 	}
-	_, err := s.db.Exec(s.dialect.rebind(
+	return s.recordSchemaVersion(s.db, time.Now().UnixMilli())
+}
+
+// applySchemaVersionTx 是 Postgres 路径：在同一个迁移事务里记录版本。
+func (s *Store) applySchemaVersionTx(ctx context.Context, tx *sql.Tx) error {
+	return s.recordSchemaVersion(tx, time.Now().UnixMilli())
+}
+
+// recordSchemaVersion 在 schema_migrations 里写入当前版本（幂等）。
+func (s *Store) recordSchemaVersion(ex interface {
+	Exec(string, ...any) (sql.Result, error)
+}, at int64) error {
+	_, err := ex.Exec(s.dialect.rebind(
 		`INSERT INTO schema_migrations (version, name, applied_at)
 		 VALUES (?, 'schema', ?)
 		 ON CONFLICT (version) DO NOTHING`),
-		schemaVersion, time.Now().UnixMilli())
+		schemaVersion, at)
 	return err
 }
 
