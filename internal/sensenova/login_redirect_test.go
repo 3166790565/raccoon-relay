@@ -2,14 +2,7 @@ package sensenova
 
 import (
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/rand"
-	"crypto/rsa"
-	"crypto/sha1"
-	"encoding/base64"
 	"encoding/json"
-	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -66,34 +59,41 @@ func TestLoginFollowsRedirectsManually(t *testing.T) {
 	defer platform.Close()
 
 	iam := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/iam/authn/v1/auth/nova/login" {
+		switch r.URL.Path {
+		case "/iam/authn/v1/auth/checkChallenge":
+			if got := r.URL.Query().Get("challenge"); got != challenge {
+				t.Errorf("校验的 challenge=%q", got)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]bool{"is_valid": true})
+		case "/iam/authn/v1/auth/nova/login":
+			if ck := r.Header.Get("Cookie"); !strings.Contains(ck, "oauth2_authentication_csrf=csrf-1") {
+				t.Errorf("登录接口没带上授权页的 Cookie：%q", ck)
+			}
+			var body struct {
+				Username  string `json:"username"`
+				Password  string `json:"password"`
+				Challenge string `json:"challenge"`
+				IsEncrypt bool   `json:"is_encrypt"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if body.Challenge != challenge {
+				t.Errorf("提交的 challenge=%q", body.Challenge)
+			}
+			if body.Username != "1516020" || body.Password != "pw" || body.IsEncrypt {
+				t.Errorf("提交的凭据=%+v", body)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"redirect": platform.URL + "/callback?code=code-1&state=s",
+			})
+		default:
 			t.Errorf("IAM 路径=%q", r.URL.Path)
 		}
-		if ck := r.Header.Get("Cookie"); !strings.Contains(ck, "oauth2_authentication_csrf=csrf-1") {
-			t.Errorf("登录接口没带上授权页的 Cookie：%q", ck)
-		}
-		var body struct {
-			Username  string `json:"username"`
-			Password  string `json:"password"`
-			Challenge string `json:"challenge"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		if body.Challenge != challenge {
-			t.Errorf("提交的 challenge=%q", body.Challenge)
-		}
-		if body.Username != "1516020" || body.Password != "pw" {
-			t.Errorf("提交的凭据=%+v", body)
-		}
-		_ = json.NewEncoder(w).Encode(map[string]string{
-			"redirect": platform.URL + "/callback?code=code-1&state=s",
-		})
 	}))
 	defer iam.Close()
 
 	c := NewClient(5 * time.Second)
 	c.Platform = platform.URL
 	c.IAM = iam.URL
-	c.Signin = platform.URL + "/signin" // 测试里不连外网，取不到公钥就走明文
 	res, err := c.Login(context.Background(), "1516020", "pw")
 	if err != nil {
 		t.Fatalf("登录失败: %v", err)
@@ -103,47 +103,21 @@ func TestLoginFollowsRedirectsManually(t *testing.T) {
 	}
 }
 
-// encryptPassword 要生成前端同款 compact JWE：RSA-OAEP(SHA-1) 包 CEK，
-// A256GCM 载荷，AAD 是 protected header。
-func TestEncryptPasswordRoundTrip(t *testing.T) {
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatal(err)
+// 锁定与权限拒绝共用 reason=PermissionDenied，必须靠 message 区分，
+// 否则锁定期间会把「没校验过密码」误报成「账号或密码不正确」。
+func TestLoginReasonSeparatesLockFromPermission(t *testing.T) {
+	details := []struct {
+		Reason  string `json:"reason"`
+		Message string `json:"message"`
+	}{
+		{Reason: "PermissionDenied", Message: "The account has been locked, please try again after 15 minutes"},
 	}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"keys": []map[string]string{{
-			"kid": JWKSKid, "kty": "RSA",
-			"n": b64url(key.N.Bytes()),
-			"e": b64url(big.NewInt(int64(key.E)).Bytes()),
-		}}})
-	}))
-	defer srv.Close()
-
-	c := NewClient(5 * time.Second)
-	c.Signin = srv.URL
-	token := c.encryptPassword(context.Background(), "s3cret-pw")
-	if token == "" {
-		t.Fatal("应当生成 JWE")
+	if got := loginReason(details, "PermissionDenied", 403); !strings.Contains(got, "锁定") {
+		t.Fatalf("锁定应报锁定，实际 %q", got)
 	}
-	parts := strings.Split(token, ".")
-	if len(parts) != 5 {
-		t.Fatalf("compact JWE 应有 5 段，实际 %d", len(parts))
-	}
-	wrap, _ := base64.RawURLEncoding.DecodeString(parts[1])
-	cek, err := rsa.DecryptOAEP(sha1.New(), rand.Reader, key, wrap, nil)
-	if err != nil {
-		t.Fatalf("解 CEK 失败: %v", err)
-	}
-	iv, _ := base64.RawURLEncoding.DecodeString(parts[2])
-	ct, _ := base64.RawURLEncoding.DecodeString(parts[3])
-	block, _ := aes.NewCipher(cek)
-	gcm, _ := cipher.NewGCM(block)
-	plain, err := gcm.Open(nil, iv, ct, []byte(parts[0]))
-	if err != nil {
-		t.Fatalf("解载荷失败: %v", err)
-	}
-	if string(plain) != "s3cret-pw" {
-		t.Fatalf("载荷=%q", plain)
+	details[0].Message = "no access"
+	if got := loginReason(details, "PermissionDenied", 403); !strings.Contains(got, "没有权限") {
+		t.Fatalf("权限拒绝应报无权限，实际 %q", got)
 	}
 }
 

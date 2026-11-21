@@ -13,18 +13,13 @@ package sensenova
 
 import (
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/rand"
-	"crypto/rsa"
-	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
-	"math/big"
 	"net/http"
 	"net/url"
 	"strings"
@@ -41,14 +36,8 @@ const (
 	IAMBase      = "https://iam.sensecoreapi.cn"
 	IAMAuthN     = "https://iam.sensecoreapi.cn/iam/authn"
 	ClientID     = "nova"
-	// SigninBase 发放 JWKS，控制台前端用它的公钥加密密码后再提交登录。
-	SigninBase = "https://signin.sensecore.cn"
-	// JWKSKid 是前端指定的那把公钥（原本是签名钥，前端改作加密用）。
-	JWKSKid = "public:hydra.openid.id-token"
 	// TokenPlanBase 是 OpenAI 兼容推理地址，模型请求与 /models 都打这里。
 	TokenPlanBase = "https://token.sensenova.cn/v1"
-	// jwksTTL 控制公钥缓存时长；公钥轮换很少，10 分钟足够。
-	jwksTTL = 10 * time.Minute
 	// OAuthScope 是网页端授权时的原值。
 	OAuthScope = "openid offline offline_access"
 	// UserAgent：登录页面对非常规 UA 有风控，固定一个普通浏览器 UA。
@@ -71,12 +60,6 @@ type Client struct {
 	Lite     string
 	IAM      string
 	Token    string
-	Signin   string
-
-	// jwks 缓存登录密码加密用的公钥。
-	jwksMu sync.Mutex
-	jwks   *rsa.PublicKey
-	jwksAt time.Time
 
 	// modelsMu 缓存实时模型清单，避免每次 /v1/models 都打上游。
 	modelsMu  sync.Mutex
@@ -98,7 +81,6 @@ func NewClient(timeout time.Duration) *Client {
 		Lite:           PlatformLite,
 		IAM:            IAMBase,
 		Token:          TokenPlanBase,
-		Signin:         SigninBase,
 		modelsTTL:      10 * time.Minute,
 	}
 }
@@ -284,117 +266,6 @@ func (j *cookieJar) header() string {
 	return strings.Join(parts, "; ")
 }
 
-/* -------------------------------------------------------- 登录密码加密 */
-
-// loginJWKS 是控制台前端依赖的公钥集接口。
-type loginJWKS struct {
-	Keys []struct {
-		Kid string `json:"kid"`
-		Kty string `json:"kty"`
-		N   string `json:"n"`
-		E   string `json:"e"`
-	} `json:"keys"`
-}
-
-// loginPublicKey 取登录密码加密用的 RSA 公钥（带 10 分钟缓存）。
-// 控制台前端会拿 signin 站 JWKS 里 kid=public:hydra.openid.id-token 的公钥，
-// 按 RSA-OAEP 加密，缺这个后端会直接判「账号或密码错误」。
-func (c *Client) loginPublicKey(ctx context.Context) *rsa.PublicKey {
-	c.jwksMu.Lock()
-	if c.jwks != nil && time.Since(c.jwksAt) < jwksTTL {
-		key := c.jwks
-		c.jwksMu.Unlock()
-		return key
-	}
-	c.jwksMu.Unlock()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.Signin+"/.well-known/jwks.json", nil)
-	if err != nil {
-		return nil
-	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", UserAgent)
-	res, err := c.httpClient().Do(req)
-	if err != nil {
-		return nil
-	}
-	defer res.Body.Close()
-	if res.StatusCode >= 400 {
-		return nil
-	}
-	var set loginJWKS
-	if json.Unmarshal(limitReader(res.Body), &set) != nil {
-		return nil
-	}
-	for _, k := range set.Keys {
-		if k.Kid != JWKSKid || k.N == "" || k.E == "" {
-			continue
-		}
-		n, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(k.N, "="))
-		if err != nil {
-			continue
-		}
-		e, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(k.E, "="))
-		if err != nil || len(e) > 4 {
-			continue
-		}
-		exponent := 0
-		for _, b := range e {
-			exponent = exponent<<8 | int(b)
-		}
-		pub := &rsa.PublicKey{N: new(big.Int).SetBytes(n), E: exponent}
-		if pub.N.BitLen() < 2048 || pub.E <= 1 {
-			continue
-		}
-		c.jwksMu.Lock()
-		c.jwks, c.jwksAt = pub, time.Now()
-		c.jwksMu.Unlock()
-		return pub
-	}
-	return nil
-}
-
-// encryptPassword 复刻控制台前端的做法：把密码塞进 JWE 里用 RSA-OAEP 加密，
-// 载荷用 A256GCM。失败（取不到公钥或加密异常）返回空串，调用方退回明文。
-func (c *Client) encryptPassword(ctx context.Context, password string) string {
-	key := c.loginPublicKey(ctx)
-	if key == nil {
-		return ""
-	}
-	cek := make([]byte, 32)
-	iv := make([]byte, 12)
-	if _, err := rand.Read(cek); err != nil {
-		return ""
-	}
-	if _, err := rand.Read(iv); err != nil {
-		return ""
-	}
-	// 前端用的 jose 里 "RSA-OAEP" 对应 OAEP+SHA-1（不是 RSA-OAEP-256）。
-	wrapped, err := rsa.EncryptOAEP(sha1.New(), rand.Reader, key, cek, nil)
-	if err != nil {
-		return ""
-	}
-	block, err := aes.NewCipher(cek)
-	if err != nil {
-		return ""
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return ""
-	}
-	header, _ := json.Marshal(map[string]string{"alg": "RSA-OAEP", "enc": "A256GCM"})
-	protected := b64url(header)
-	// JWE 的 AAD 就是 ASCII 的 protected header。
-	sealed := gcm.Seal(nil, iv, []byte(password), []byte(protected))
-	return strings.Join([]string{
-		protected,
-		b64url(wrapped),
-		b64url(iv),
-		b64url(sealed),
-		"",
-	}, ".")
-}
-
 /* ------------------------------------------------------------------ 登录 */
 
 // LoginResult 是一次控制台登录的结果。
@@ -452,16 +323,34 @@ func (c *Client) Login(ctx context.Context, username, password string) (*LoginRe
 		return nil, newError("login", "未能从授权页取到登录 challenge", shorten(final, 120))
 	}
 
-	// 控制台前端总是把密码加密后再提交；拿不到公钥时才退回明文。
-	passwordField, encrypted := password, false
-	if enc := c.encryptPassword(ctx, password); enc != "" {
-		passwordField, encrypted = enc, true
+	// 登录前先确认 challenge 还有效；过期了再提交账号密码只会白耗一次失败次数。
+	checkURL := c.IAM + "/iam/authn/v1/auth/checkChallenge?challenge=" + url.QueryEscape(challengeValue)
+	checkReq, err := http.NewRequestWithContext(ctx, http.MethodGet, checkURL, nil)
+	if err != nil {
+		return nil, err
 	}
+	checkReq.Header.Set("Accept", "application/json")
+	checkReq.Header.Set("User-Agent", UserAgent)
+	checkRes, err := c.httpClient().Do(checkReq)
+	if err == nil {
+		checkRaw := limitReader(checkRes.Body)
+		checkRes.Body.Close()
+		jar.absorb(checkRes)
+		var checkData struct {
+			IsValid *bool `json:"is_valid"`
+		}
+		_ = json.Unmarshal(checkRaw, &checkData)
+		if checkData.IsValid != nil && !*checkData.IsValid {
+			return nil, newError("login", "登录链接已过期，请重试", "")
+		}
+	}
+
+	// 与 magpie-sensenova / Agent2API 一致：明文密码 + is_encrypt:false。
 	loginBody, _ := json.Marshal(map[string]any{
 		"username":   username,
-		"password":   passwordField,
+		"password":   password,
 		"challenge":  challengeValue,
-		"is_encrypt": encrypted,
+		"is_encrypt": false,
 	})
 	loginReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		c.IAM+"/iam/authn/v1/auth/nova/login", strings.NewReader(string(loginBody)))
@@ -538,15 +427,17 @@ func loginReason(details []struct {
 		"NotFound":                    "账号不存在",
 		"LoginLocked":                 "账号被锁定，请 15 分钟后再试",
 		"locked":                      "账号被锁定，请 15 分钟后再试",
+		"forbidLoginForMoment":        "账号被锁定，请 15 分钟后再试",
 		"PermissionDenied":            "该账号没有权限",
 		"OperationTooFrequently":      "操作过于频繁，请稍后再试",
 	}
-	if text, ok := known[reason]; ok {
-		return text
-	}
-	// 有些锁定错误只出现在文案里，reason 为空。
+	// forbidLoginForMoment 与 PermissionDenied 共用 reason=PermissionDenied，
+	// 只能靠 message 区分：锁定期间账号密码根本没被校验。
 	if strings.Contains(strings.ToLower(detail+" "+message), "has been locked") {
 		return "账号被锁定，请 15 分钟后再试"
+	}
+	if text, ok := known[reason]; ok {
+		return text
 	}
 	if detail != "" {
 		return detail
