@@ -402,7 +402,11 @@ func (s *Server) HandleResponses(w http.ResponseWriter, r *http.Request) {
 	streamReq := boolOf(body["stream"])
 
 	oaBody := responsesToOpenAI(body)
-	cc := s.buildChatContext(model, oaBody, SessionKeyOf(r, body))
+	cc, ccerr := s.buildChatContext(model, oaBody, SessionKeyOf(r, body))
+	if ccerr != nil {
+		writeJSON(w, http.StatusNotFound, errorBody(http.StatusNotFound, ccerr.Error()))
+		return
+	}
 	start := time.Now()
 
 	// 并发上限：超出时排队，拿到槽位才继续。

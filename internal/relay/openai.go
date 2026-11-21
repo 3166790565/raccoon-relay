@@ -281,6 +281,10 @@ func errorBody(code int, msg string) map[string]any {
 		typ = "rate_limit_exceeded"
 	case http.StatusBadRequest:
 		typ = "invalid_request_error"
+	case http.StatusNotFound:
+		// 模型被停用（或客户端请求了不存在的模型）属于请求侧错误，
+		// 不是上游故障 —— 不该让客户端按 5xx 去重试。
+		typ = "invalid_request_error"
 	}
 	return map[string]any{"error": map[string]any{"message": msg, "type": typ, "code": code}}
 }
@@ -307,7 +311,11 @@ func (s *Server) HandleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	model, _ := body["model"].(string)
 	streamReq := boolOf(body["stream"])
 
-	cc := s.buildChatContext(model, body, SessionKeyOf(r, body))
+	cc, ccerr := s.buildChatContext(model, body, SessionKeyOf(r, body))
+	if ccerr != nil {
+		writeJSON(w, http.StatusNotFound, errorBody(http.StatusNotFound, ccerr.Error()))
+		return
+	}
 	start := time.Now()
 
 	// 并发上限：超出时在这里排队，拿到槽位才继续；不直接拒绝。

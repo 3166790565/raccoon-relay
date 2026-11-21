@@ -93,6 +93,13 @@ func (s *liveSNModelSet) replace(ids []string) {
 	s.mu.Unlock()
 }
 
+// ModelDisabledError 是请求了一个被模型管理停用的模型。
+type ModelDisabledError struct{ Model string }
+
+func (e *ModelDisabledError) Error() string {
+	return "模型 " + e.Model + " 已被停用"
+}
+
 func (s *liveSNModelSet) contains(id string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

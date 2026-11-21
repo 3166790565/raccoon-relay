@@ -595,7 +595,8 @@ type ChatContext struct {
 type ModelRules interface {
 	// Resolve 把对外名翻译成 (上游模型, 思考等级)。ok=false 表示没有映射。
 	Resolve(model string) (target, reasoning string, ok bool)
-	// Hidden 判断某个上游模型是否被停用（不对外广告）。
+	// Hidden 判断某个模型是否被停用。停用后既不对外广告，也不接受请求
+	// （否则「停用」只是从列表里消失，客户端照旧能调通，语义不成立）。
 	Hidden(id string) bool
 	// AliasesOf 返回指向该上游模型的启用别名。
 	AliasesOf(id string) []string

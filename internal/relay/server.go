@@ -144,8 +144,22 @@ func NewServer(cfg *config.Config, st *store.Store, engine *Engine, catalog *Cat
 func (s *Server) SetModelRules(r ModelRules) { s.Rules = r }
 
 // buildChatContext 按当前模型规则构造转发上下文。
-func (s *Server) buildChatContext(model string, body map[string]any, sessionKey string) *ChatContext {
-	return BuildChatContextWithRules(s.Rules, model, body, DefaultModel, sessionKey)
+//
+// 被停用的模型直接报错，不进入转发：只从 /v1/models 里藏起来是不够的，
+// 客户端手里还留着名字，照样能发请求 —— 那等于「停用」没生效。
+func (s *Server) buildChatContext(model string, body map[string]any, sessionKey string) (*ChatContext, error) {
+	if s.Rules != nil && model != "" {
+		// 别名本身被停用，或者它指向的上游模型被停用，都要拒绝。
+		// 只检查别名会漏掉「别名还开着、目标已经下线」这种情况。
+		target := model
+		if resolved, _, ok := s.Rules.Resolve(model); ok && resolved != "" {
+			target = resolved
+		}
+		if s.Rules.Hidden(model) || (target != model && s.Rules.Hidden(target)) {
+			return nil, &ModelDisabledError{Model: target}
+		}
+	}
+	return BuildChatContextWithRules(s.Rules, model, body, DefaultModel, sessionKey), nil
 }
 
 // auth 从 Authorization 或 x-api-key 取 Key 并校验。
