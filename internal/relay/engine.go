@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -54,6 +55,62 @@ type Engine struct {
 	mu                  sync.RWMutex
 	maxRetry            int
 	retryUntilExhausted bool
+	// retryDelay 是两次换号之间的等待。0 = 不等待（旧行为）。
+	// 短暂停顿能打断「同一秒内横扫整个号池」的密集重试形态。
+	retryDelay time.Duration
+	// affinity 是会话粘性开关与 TTL（同一段对话绑定同一个号）。
+	affinity       bool
+	affinityTTLVal time.Duration
+}
+
+// nowMillis 单独抽出来，便于测试打桩。
+func nowMillis() int64 { return time.Now().UnixMilli() }
+
+// 会话粘性的运行期开关，与重试策略共用同一把锁。
+// 零值语义：affinity 为 false 时完全不读写绑定表。
+
+// AffinityPolicy 返回会话粘性开关与 TTL。
+func (e *Engine) AffinityPolicy() (enabled bool, ttl time.Duration) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.affinity, e.affinityTTLVal
+}
+
+// SetAffinityPolicy 运行期更新会话粘性。
+func (e *Engine) SetAffinityPolicy(enabled bool, ttl time.Duration) {
+	if ttl <= 0 {
+		ttl = 24 * time.Hour
+	}
+	e.mu.Lock()
+	e.affinity, e.affinityTTLVal = enabled, ttl
+	e.mu.Unlock()
+}
+
+func (e *Engine) affinityEnabled() bool {
+	on, _ := e.AffinityPolicy()
+	return on
+}
+
+func (e *Engine) affinityTTL() time.Duration {
+	_, ttl := e.AffinityPolicy()
+	return ttl
+}
+
+// RetryDelay 返回当前换号间隔。
+func (e *Engine) RetryDelay() time.Duration {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.retryDelay
+}
+
+// SetRetryDelay 运行期更新换号间隔。
+func (e *Engine) SetRetryDelay(d time.Duration) {
+	if d < 0 {
+		d = 0
+	}
+	e.mu.Lock()
+	e.retryDelay = d
+	e.mu.Unlock()
 }
 
 // report 写一条运行事件，失败静默。
@@ -104,6 +161,12 @@ type committingSink interface {
 
 // RunOpenAI 执行 OpenAI 协议的一次完整转发（含换号重试）。
 // 返回的 usage 与 account 用于写流水。
+//
+// 一次请求的完整形态：
+//  1. 会话粘性：同一段对话优先复用上次成功的号；
+//  2. 选号 → 抢在途租约（同号串行）→ 请求上游；
+//  3. 成功：解绑失败记录、清退避、刷新绑定；
+//  4. 失败：退避本号（短暂跳过，不是停号）、解绑会话、等待 retryDelay 后换号。
 func (e *Engine) RunOpenAI(ctx context.Context, req *ChatContext, sink OpenAISink) (Result, error) {
 	var excluded = map[string]bool{}
 	var lastErr error
@@ -112,11 +175,31 @@ func (e *Engine) RunOpenAI(ctx context.Context, req *ChatContext, sink OpenAISin
 	var lastAcc string
 
 	provider := providerForModel(req.Model)
+	// 会话粘性：先把绑定过的号设为优先。绑定失效（号下线/冷却）时
+	// 选号层自然跳过它，不会因为这个提示而卡住。
+	affinity := e.affinityEnabled()
+	if affinity && req.SessionKey != "" {
+		if bound, ok := e.ST.BoundAccount(ctx, req.SessionKey, nowMillis()); ok {
+			e.Pool.SetPrefer(bound)
+		}
+	}
+	defer e.Pool.SetPrefer("")
+
 	var probed bool
 	for attemptNo := 0; ; attemptNo++ {
 		untilExhausted, maxRetry := e.RetryPolicy()
 		if !untilExhausted && attemptNo > maxRetry {
 			break
+		}
+		// 换号前短暂停顿：同一秒内横扫整个号池是最明显的密集重试形态。
+		if attemptNo > 0 {
+			if d := e.RetryDelay(); d > 0 {
+				select {
+				case <-ctx.Done():
+					return Result{AccountID: lastAcc, Model: req.Model}, errClientGone
+				case <-time.After(d):
+				}
+			}
 		}
 		lease, err := e.Pool.PickProvider(ctx, req.Model, provider, excluded)
 		if err != nil {
@@ -141,11 +224,27 @@ func (e *Engine) RunOpenAI(ctx context.Context, req *ChatContext, sink OpenAISin
 		excluded[acc.ID] = true
 		lastAcc = acc.ID
 
+		// 在途租约：同一账号同时只跑一个请求。抢不到说明刚被别的请求占了，
+		// 跳过它去选下一个号，而不是排队等——换号比等待更符合网关的定位。
+		if _, ok := e.Pool.AcquireLease(ctx, acc); !ok {
+			e.Pool.ReleaseLease(lease)
+			e.report(store.LevelInfo, "账号正在被其它请求占用，换号",
+				"账号："+acc.Name+"\n模型："+req.Model, acc.ID)
+			continue
+		}
+
 		at := &Attempt{Account: acc, Lease: lease, IDN: identityOf(acc)}
 		leaseErr := e.runOne(ctx, at, req, sink)
+		e.Pool.ReleaseAccountLease(ctx, acc)
 		e.Pool.ReleaseLease(lease)
 
 		if leaseErr == nil {
+			// 成功：清退避与失败链，并把这段会话绑到这个号上。
+			e.Pool.ClearBackoff(ctx, acc.ID)
+			if affinity && req.SessionKey != "" {
+				_ = e.ST.BindSession(ctx, req.SessionKey, acc.ID, req.Model,
+					e.affinityTTL().Milliseconds(), nowMillis())
+			}
 			return Result{AccountID: acc.ID, Model: req.Model}, nil
 		}
 		lastErr = leaseErr
@@ -163,6 +262,23 @@ func (e *Engine) RunOpenAI(ctx context.Context, req *ChatContext, sink OpenAISin
 		level := store.LevelWarn
 		if kind == pool.FailRelogin || kind == pool.FailRejected || !switchable {
 			level = store.LevelError
+		}
+
+		// 换号退避：只针对「上游波动」类失败（403 / 5xx / 网络）。
+		// 冷却类已经有自己的时长，再叠一层退避没有意义；
+		// 内容拒答（FailRejected）是请求本身的问题，换号都不做。
+		if switchable && kind == pool.FailTransient {
+			if until := e.Pool.MarkBackoff(ctx, acc.ID, publicMsg); until > 0 {
+				detail := fmt.Sprintf("模型：%s\n上游返回码：%d\n原因：%s\n退避至：%s",
+					req.Model, code, strings.TrimSpace(publicMsg),
+					time.UnixMilli(until).Format("2006-01-02 15:04:05"))
+				e.report(store.LevelWarn, "上游波动，账号短暂退避",
+					detail+"\n处置：该号在退避窗口内不再被选中", acc.ID)
+			}
+		}
+		// 失败即解绑会话：这段对话不该继续粘在一个刚出问题的号上。
+		if affinity && req.SessionKey != "" {
+			_ = e.ST.UnbindSession(ctx, req.SessionKey)
 		}
 		detail := fmt.Sprintf("模型：%s\n上游返回码：%d\n尝试序号：%d\n原因：%s",
 			req.Model, code, attemptNo+1, strings.TrimSpace(leaseErr.Error()))
@@ -467,6 +583,10 @@ type ChatContext struct {
 	Body        map[string]any
 	Title       string
 	SessionSeed string
+	// SessionKey 是会话粘性的键（会话 id / 会话标识），空表示不做粘性。
+	// 与 SessionSeed 不同：后者是「内容哈希」（每轮都变），
+	// 前者是「这段对话是谁」，多轮之间不变。
+	SessionKey string
 }
 
 // Result 是转发结果的元信息。
@@ -485,7 +605,10 @@ type OpenAISink interface {
 }
 
 // BuildChatContext 从原始请求体构造转发上下文。
-func BuildChatContext(model string, body map[string]any, defaultModel string) *ChatContext {
+//
+// sessionKey 由调用方从请求头/请求体里取（x-session-id / conversation_id 等），
+// 用于会话粘性。取不到就是空串，粘性自动关闭，不影响转发。
+func BuildChatContext(model string, body map[string]any, defaultModel, sessionKey string) *ChatContext {
 	prepared := raccoon.PrepareBody(model, body, defaultModel)
 	messages, _ := prepared["messages"].([]any)
 	title := ""
@@ -498,7 +621,35 @@ func BuildChatContext(model string, body map[string]any, defaultModel string) *C
 		Body:        prepared,
 		Title:       title,
 		SessionSeed: string(seed),
+		SessionKey:  sessionKey,
 	}
+}
+
+// SessionKeyOf 从请求头或请求体里取会话标识，用于会话粘性。
+//
+// 顺序与 aigw-backend 对齐：先看三个常见头，再看请求体里的三个字段。
+// 取不到就返回空串——粘性是优化，不是转发的前提。
+func SessionKeyOf(r *http.Request, body map[string]any) string {
+	for _, h := range []string{"X-Session-Id", "X-Conversation-Id", "Session-Id"} {
+		if v := strings.TrimSpace(r.Header.Get(h)); v != "" {
+			return truncateSessionKey(v)
+		}
+	}
+	for _, f := range []string{"session_key", "session_id", "conversation_id"} {
+		if v, ok := body[f].(string); ok && strings.TrimSpace(v) != "" {
+			return truncateSessionKey(strings.TrimSpace(v))
+		}
+	}
+	return ""
+}
+
+// truncateSessionKey 限制长度：粘性键会进库做主键，过长的值没必要保留。
+func truncateSessionKey(s string) string {
+	const max = 80
+	if len([]rune(s)) <= max {
+		return s
+	}
+	return string([]rune(s)[:max])
 }
 
 func firstUserText(messages []any) string {

@@ -1196,10 +1196,106 @@ async function loadSettings() {
     $('setCreditResumeAbove').value = s.creditResumeAbove ?? 0;
     $('setMaxConcurrent').value = s.maxConcurrent ?? 0;
     $('setQueueWaitSec').value = s.queueWaitSec ?? 600;
+    $('setClientVersion').value = s.clientVersion || '';
+    $('setWebClientVersion').value = s.webClientVersion || '';
+    $('setClientOSVersion').value = s.clientOSVersion || '';
+    $('setClientPlatform').value = s.clientPlatform || '';
+    // 输入框回填原始值（空 = 自动派生）；旁边提示实际发送的 UA，避免用户以为没生效。
+    $('setClientUserAgent').value = s.clientUserAgent || '';
+    $('setWebUserAgent').value = s.webUserAgent || '';
+    $('setClientUserAgent').placeholder = '留空 = ' + (s.effectiveClientUserAgent || '按版本号派生');
+    $('setWebUserAgent').placeholder = '留空 = ' + (s.effectiveWebUserAgent || '按版本号派生');
+    // 调度设置
+    $('setLeaseEnabled').value = String(s.leaseEnabled !== false);
+    $('setLeaseTTLSec').value = s.leaseTTLSec ?? 300;
+    $('setRetryDelayMS').value = s.retryDelayMS ?? 800;
+    $('setBackoffEnabled').value = String(s.backoffEnabled !== false);
+    $('setBackoffBaseMS').value = s.backoffBaseMS ?? 2000;
+    $('setBackoffMaxMS').value = s.backoffMaxMS ?? 60000;
+    $('setAffinityEnabled').value = String(s.affinityEnabled !== false);
+    $('setAffinityTTLSec').value = s.affinityTTLSec ?? 86400;
   } catch (e) {
     $('settingsMsg').textContent = e.message;
   }
 }
+
+// 调度设置单独保存：只提交本卡片字段。
+$('saveDispatchBtn').addEventListener('click', async () => {
+  const nums = {
+    setLeaseTTLSec: ['租约时长', 30, 3600],
+    setRetryDelayMS: ['换号间隔', 0, 60000],
+    setBackoffBaseMS: ['退避起点', 100, 600000],
+    setBackoffMaxMS: ['退避上限', 100, 3600000],
+    setAffinityTTLSec: ['会话绑定时长', 60, 2592000],
+  };
+  const vals = {};
+  for (const [id, [label, min, max]] of Object.entries(nums)) {
+    const v = numOrNaN($(id));
+    if (!Number.isFinite(v) || v < min || v > max) {
+      $('dispatchMsg').textContent = `${label}请填写 ${min}~${max}`;
+      return;
+    }
+    vals[id] = Math.round(v);
+  }
+  if (vals.setBackoffMaxMS < vals.setBackoffBaseMS) {
+    $('dispatchMsg').textContent = '退避上限不能小于起点';
+    return;
+  }
+  try {
+    await api('/api/settings', {
+      method: 'PUT',
+      body: JSON.stringify({
+        leaseEnabled: $('setLeaseEnabled').value === 'true',
+        leaseTTLSec: vals.setLeaseTTLSec,
+        retryDelayMS: vals.setRetryDelayMS,
+        backoffEnabled: $('setBackoffEnabled').value === 'true',
+        backoffBaseMS: vals.setBackoffBaseMS,
+        backoffMaxMS: vals.setBackoffMaxMS,
+        affinityEnabled: $('setAffinityEnabled').value === 'true',
+        affinityTTLSec: vals.setAffinityTTLSec,
+      }),
+    });
+    $('dispatchMsg').textContent = '已保存，立即生效';
+    await loadSettings();
+  } catch (e) {
+    $('dispatchMsg').textContent = e.message;
+  }
+});
+
+// 指纹设置单独保存：只提交指纹字段，避免和别的卡片互相覆盖。
+// 四个版本/平台项不能留空（后端也会拒绝）；两个 UA 留空是合法值，表示按版本号派生。
+$('saveFingerprintBtn').addEventListener('click', async () => {
+  const required = [
+    ['setClientVersion', '对话端版本号'],
+    ['setWebClientVersion', '管理面版本号'],
+    ['setClientOSVersion', '系统版本'],
+    ['setClientPlatform', '桌面平台'],
+  ];
+  for (const [id, label] of required) {
+    if (String($(id).value).trim() === '') {
+      $('fingerprintMsg').textContent = label + '不能为空';
+      return;
+    }
+  }
+  try {
+    await api('/api/settings', {
+      method: 'PUT',
+      body: JSON.stringify({
+        clientVersion: $('setClientVersion').value.trim(),
+        webClientVersion: $('setWebClientVersion').value.trim(),
+        clientOSVersion: $('setClientOSVersion').value.trim(),
+        clientPlatform: $('setClientPlatform').value.trim(),
+        // 留空 = 自动派生；这里不 trim 成 undefined，空串本身就是要保存的值。
+        clientUserAgent: $('setClientUserAgent').value.trim(),
+        webUserAgent: $('setWebUserAgent').value.trim(),
+      }),
+    });
+    $('fingerprintMsg').textContent = '已保存，立即生效';
+    await loadSettings();
+  } catch (e) {
+    $('fingerprintMsg').textContent = e.message;
+  }
+});
 
 // 并发设置单独保存：只提交并发相关字段，避免和别的卡片互相覆盖。
 $('saveConcurrencyBtn').addEventListener('click', async () => {

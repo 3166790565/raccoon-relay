@@ -290,6 +290,7 @@ func (s *Store) migrate() error {
 // 顺序固定、只追加不改名：SQLite 的 ALTER 与 Postgres 的 ADD COLUMN 都是增量操作。
 var accountAddedColumns = []struct{ name, ddl string }{
 	{"max_concurrent", `ALTER TABLE accounts ADD COLUMN max_concurrent %INTEGER_OR_BIGINT% NOT NULL DEFAULT 0`},
+	{"lease_until", `ALTER TABLE accounts ADD COLUMN lease_until %INTEGER_OR_BIGINT% NOT NULL DEFAULT 0`},
 	{"provider", `ALTER TABLE accounts ADD COLUMN provider TEXT NOT NULL DEFAULT 'raccoon'`},
 	{"sn_username", `ALTER TABLE accounts ADD COLUMN sn_username TEXT NOT NULL DEFAULT ''`},
 	{"sn_password", `ALTER TABLE accounts ADD COLUMN sn_password TEXT NOT NULL DEFAULT ''`},

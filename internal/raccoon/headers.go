@@ -10,25 +10,20 @@ import (
 //   · 管理面（余额/签到/刷新）：大写 X-Client-*，版本带 v
 // 手机端首登奖那条端点额外报 app-android / v1.0.3。
 
-const (
-	ClientName         = "raccoon-ai"
-	ClientVersion      = "1.0.35"
-	WebClientVersion   = "v1.1.3"
-	MobilePlatform     = "app-android"
-	MobileClientVers   = "v1.0.3"
-	DefaultOSVersion   = "10.0.26200"
-	DefaultDesktopPlat = "desktop-windows-x64"
-)
-
 // chatHeaders 是小浣熊对话端点的头集。title 取首条用户消息前 20 字，非 ASCII percent-encode。
+//
+// User-Agent 必须显式下发：Go 的 net/http 缺省会补 Go-http-client/1.1，
+// 与「自称桌面客户端」的其余头自相矛盾，是最容易被上游判成异常客户端的一处。
 func chatHeaders(token string, idn Identity, sessionID, turnID, title string) map[string]string {
+	fp := CurrentFingerprint()
 	h := map[string]string{
 		"content-type":         "application/json",
 		"accept":               "application/json, text/event-stream",
+		"user-agent":           fp.ChatUA(),
 		"authorization":        "Bearer " + token,
 		"x-client-name":        ClientName,
 		"x-client-platform":    idn.Platform,
-		"x-client-version":     ClientVersion,
+		"x-client-version":     fp.ClientVersion,
 		"x-client-os-version":  idn.OSVersion,
 		"x-client-channel":     idn.ClientChannel,
 		"x-client-device-id":   idn.DeviceID,
@@ -51,8 +46,9 @@ func webHeaders(token string, idn Identity, platform string) map[string]string {
 	h := map[string]string{
 		"content-type":       "application/json",
 		"accept":             "application/json",
+		"user-agent":         CurrentFingerprint().WebUA(),
 		"X-Client-Platform":  platform,
-		"X-Client-Version":   WebClientVersion,
+		"X-Client-Version":   CurrentFingerprint().WebClientVersion,
 		"X-Client-Device-ID": idn.DeviceID,
 		"X-Raccoon-Language": idn.Language,
 	}
@@ -67,11 +63,13 @@ func webHeaders(token string, idn Identity, platform string) map[string]string {
 
 // refreshHeaders 只带 refresh_token，绝不带旧 access——带上去会被 401。
 func refreshHeaders(idn Identity) map[string]string {
+	fp := CurrentFingerprint()
 	h := map[string]string{
 		"content-type":       "application/json",
 		"accept":             "application/json",
+		"user-agent":         fp.WebUA(),
 		"X-Client-Platform":  idn.PlatformNoArch,
-		"X-Client-Version":   WebClientVersion,
+		"X-Client-Version":   fp.WebClientVersion,
 		"X-Client-Device-ID": idn.DeviceID,
 	}
 	if isTeam(idn.OfficeIdentity) {
@@ -82,12 +80,14 @@ func refreshHeaders(idn Identity) map[string]string {
 
 // mobileHeaders 是手机端首登奖端点专用形态。
 func mobileHeaders(token string, idn Identity) map[string]string {
+	fp := CurrentFingerprint()
 	h := map[string]string{
 		"content-type":      "application/json",
 		"accept":            "application/json",
+		"user-agent":        fp.MobileUA(),
 		"authorization":     "Bearer " + token,
-		"X-Client-Platform": MobilePlatform,
-		"X-Client-Version":  MobileClientVers,
+		"X-Client-Platform": fp.MobilePlatform,
+		"X-Client-Version":  fp.MobileVersion,
 	}
 	if isTeam(idn.OfficeIdentity) {
 		h["X-Org-Code"] = idn.OfficeIdentity
@@ -97,13 +97,15 @@ func mobileHeaders(token string, idn Identity) map[string]string {
 
 // bindHeaders 是可信设备绑定请求的头集。
 func bindHeaders(token, deviceID string) map[string]string {
+	fp := CurrentFingerprint()
 	return map[string]string{
 		"content-type":       "application/json",
 		"accept":             "application/json",
+		"user-agent":         fp.ChatUA(),
 		"authorization":      "Bearer " + token,
 		"X-Client-Platform":  "desktop-windows",
 		"X-Client-Device-ID": deviceID,
-		"X-Client-Version":   ClientVersion,
+		"X-Client-Version":   fp.ClientVersion,
 	}
 }
 

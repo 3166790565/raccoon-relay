@@ -52,6 +52,8 @@ type accountRow struct {
 	// 供应商与日日新凭据（v4 新增列）。旧库没有时按零值导入。
 	Provider, SNUsername, SNPassword, SNToken, SNRefreshToken, SNPool string
 	SNTokenExp, SNPoolAt                                              int64
+	// LeaseUntil 是 v1.4 新增列；旧库没有时按 0（无在途租约）处理。
+	LeaseUntil int64
 }
 
 type keyRow struct {
@@ -257,6 +259,8 @@ func readAccounts(db *sql.DB) ([]accountRow, error) {
 		return ok
 	}
 	hasMax := has("max_concurrent")
+	// lease_until 也必须逐列判断：只判断 max_concurrent 会让缺这一列的旧库 SELECT 失败。
+	hasLease := has("lease_until")
 	hasProvider := has("provider")
 	hasSN := has("sn_username")
 	// 注意：accountCols 是跨行常量，换行符会让不可变列名的字符串匹配失效。
@@ -265,6 +269,9 @@ func readAccounts(db *sql.DB) ([]accountRow, error) {
 	const snBlock = "sn_username, sn_password, sn_token, sn_token_exp, sn_refresh_token, sn_pool, sn_pool_at"
 	if !hasSN {
 		cols = removeColumnBlock(cols, snBlock)
+	}
+	if !hasLease {
+		cols = removeColumnBlock(cols, "lease_until")
 	}
 	if !hasProvider {
 		cols = removeColumnBlock(cols, "provider")
@@ -288,6 +295,9 @@ func readAccounts(db *sql.DB) ([]accountRow, error) {
 			&a.LastCheckinDay, &a.CreatedAt, &a.UpdatedAt, &a.LastUsed}
 		if hasMax {
 			dest = append(dest, &a.MaxConcurrent)
+		}
+		if hasLease {
+			dest = append(dest, &a.LeaseUntil)
 		}
 		if hasProvider {
 			dest = append(dest, &a.Provider)
@@ -537,7 +547,7 @@ func (s *Store) insertDumpRows(ctx context.Context, tx *sql.Tx, d *sqliteDump) e
 			ph   []string
 		)
 		for _, a := range d.Accounts[i:end] {
-			ph = append(ph, "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+			ph = append(ph, "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
 			provider := a.Provider
 			if provider == "" {
 				provider = ProviderRaccoon
@@ -546,7 +556,7 @@ func (s *Store) insertDumpRows(ctx context.Context, tx *sql.Tx, d *sqliteDump) e
 				a.Credits, a.CreditsAt, a.Status, a.CoolUntil, a.CoolReason, a.ExpiresAt,
 				a.DeviceID, a.DeviceName, a.OSVersion, a.OfficeIdentity, a.Platform,
 				a.ClientChannel, a.Language, a.Meta, a.Priority, a.Enabled,
-				a.LastCheckinDay, a.CreatedAt, a.UpdatedAt, a.LastUsed, a.MaxConcurrent,
+				a.LastCheckinDay, a.CreatedAt, a.UpdatedAt, a.LastUsed, a.MaxConcurrent, a.LeaseUntil,
 				provider, a.SNUsername, a.SNPassword, a.SNToken, a.SNTokenExp,
 				a.SNRefreshToken, a.SNPool, a.SNPoolAt)
 		}
@@ -717,7 +727,8 @@ func (s *Store) verifyTargetCounts(ctx context.Context, tx *sql.Tx, d *sqliteDum
 // 只检查用户数据表：schema_migrations / migration_state 是迁移自身的记账。
 func (s *Store) targetIsEmpty(ctx context.Context) (bool, error) {
 	for _, table := range []string{"accounts", "api_keys", "model_cooldowns", "account_cooldowns",
-		"checkin_history", "usage_logs", "settings", "runtime_events"} {
+		"checkin_history", "usage_logs", "settings", "runtime_events",
+		"session_affinity", "account_backoffs"} {
 		var n int64
 		if err := s.queryRow(ctx, `SELECT COUNT(*) FROM `+table).Scan(&n); err != nil {
 			return false, err

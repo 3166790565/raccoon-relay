@@ -955,7 +955,7 @@ func TestClientCancelDoesNotPenalizeAccount(t *testing.T) {
 	sink := newAggWriter("sn-test-model")
 	_, err := h.engine.RunOpenAI(ctx, BuildChatContext("sn-test-model",
 		map[string]any{"messages": []any{map[string]any{"role": "user", "content": "hi"}}},
-		DefaultModel), sink)
+		DefaultModel, ""), sink)
 	if err == nil {
 		t.Fatal("已取消的请求应返回错误")
 	}
@@ -999,7 +999,7 @@ func TestAllAccountsFailKeepsLastAccount(t *testing.T) {
 
 	ctx := context.Background()
 	cc := BuildChatContext("sn-test-model",
-		map[string]any{"messages": []any{map[string]any{"role": "user", "content": "hi"}}}, DefaultModel)
+		map[string]any{"messages": []any{map[string]any{"role": "user", "content": "hi"}}}, DefaultModel, "")
 	res, err := h.engine.RunOpenAI(ctx, cc, newAggWriter("sn-test-model"))
 	if err == nil {
 		t.Fatal("全失败应返回错误")

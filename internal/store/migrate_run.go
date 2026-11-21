@@ -168,7 +168,8 @@ func (s *Store) writeMigrationState(ctx context.Context, tx *sql.Tx, state, deta
 
 func (s *Store) targetIsEmptyTx(ctx context.Context, tx *sql.Tx) (bool, error) {
 	for _, table := range []string{"accounts", "api_keys", "model_cooldowns", "account_cooldowns",
-		"checkin_history", "usage_logs", "settings", "runtime_events"} {
+		"checkin_history", "usage_logs", "settings", "runtime_events",
+		"session_affinity", "account_backoffs"} {
 		var n int64
 		if err := s.queryRowTx(ctx, tx, `SELECT COUNT(*) FROM `+table).Scan(&n); err != nil {
 			return false, err

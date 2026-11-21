@@ -39,6 +39,9 @@ var sqliteSchema = []string{
 		updated_at      INTEGER NOT NULL DEFAULT 0,
 		last_used       INTEGER NOT NULL DEFAULT 0,
 		max_concurrent  INTEGER NOT NULL DEFAULT 0,
+		-- 在途租约：非 0 且未到期时，该账号已被某个请求独占（同号请求排队）。
+		-- 默认 0 = 不禁用，保持升级前的行为，由面板开关决定是否启用。
+		lease_until     INTEGER NOT NULL DEFAULT 0,
 		-- provider 区分上游：raccoon（小浣熊）与 sensenova（商汤日日新 Token Plan）。
 		-- 两种号在同一张表里，但凭据形态、额度接口、选号模型都不同，靠这一列分流。
 		provider        TEXT NOT NULL DEFAULT 'raccoon',
@@ -152,6 +155,28 @@ var sqliteSchema = []string{
 		PRIMARY KEY (day, api)
 	)`,
 
+	// 会话粘性：同一段对话尽量固定用同一个账号。
+	// 上游风控看的是「同一账号在一段时间内接了多少互不相干的请求」，
+	// 每轮重新选号会让对话在多个账号之间跳来跳去，是明显的第三方特征。
+	`CREATE TABLE IF NOT EXISTS session_affinity (
+		session_key TEXT PRIMARY KEY,
+		account_id  TEXT NOT NULL DEFAULT '',
+		model       TEXT NOT NULL DEFAULT '',
+		expires_at  INTEGER NOT NULL DEFAULT 0,
+		updated_at  INTEGER NOT NULL DEFAULT 0
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_session_expiry ON session_affinity(expires_at)`,
+
+	// 换号退避门闸：一次失败后让这个号在短时间内不再接新请求。
+	// 与「冷却」分开：冷却会改账号状态（面板显示为停用），退避只是调度层跳过，
+	// 403 / 5xx / 网络抖动这类上游波动不该被当成账号坏掉。
+	`CREATE TABLE IF NOT EXISTS account_backoffs (
+		account_id TEXT PRIMARY KEY,
+		"until"    INTEGER NOT NULL DEFAULT 0,
+		reason     TEXT NOT NULL DEFAULT '',
+		hits       INTEGER NOT NULL DEFAULT 0
+	)`,
+
 	`CREATE TABLE IF NOT EXISTS settings (
 		key   TEXT PRIMARY KEY,
 		value TEXT NOT NULL DEFAULT ''
@@ -219,6 +244,7 @@ var pgSchema = []string{
 		updated_at      BIGINT NOT NULL DEFAULT 0,
 		last_used       BIGINT NOT NULL DEFAULT 0,
 		max_concurrent  BIGINT NOT NULL DEFAULT 0,
+		lease_until     BIGINT NOT NULL DEFAULT 0,
 		provider        TEXT NOT NULL DEFAULT 'raccoon',
 		sn_username      TEXT NOT NULL DEFAULT '',
 		sn_password      TEXT NOT NULL DEFAULT '',
@@ -318,6 +344,22 @@ var pgSchema = []string{
 		prompt_tokens     BIGINT NOT NULL DEFAULT 0,
 		completion_tokens BIGINT NOT NULL DEFAULT 0,
 		PRIMARY KEY (day, api)
+	)`,
+
+	`CREATE TABLE IF NOT EXISTS session_affinity (
+		session_key TEXT PRIMARY KEY,
+		account_id  TEXT NOT NULL DEFAULT '',
+		model       TEXT NOT NULL DEFAULT '',
+		expires_at  BIGINT NOT NULL DEFAULT 0,
+		updated_at  BIGINT NOT NULL DEFAULT 0
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_session_expiry ON session_affinity(expires_at)`,
+
+	`CREATE TABLE IF NOT EXISTS account_backoffs (
+		account_id TEXT PRIMARY KEY,
+		"until"    BIGINT NOT NULL DEFAULT 0,
+		reason     TEXT NOT NULL DEFAULT '',
+		hits       BIGINT NOT NULL DEFAULT 0
 	)`,
 
 	`CREATE TABLE IF NOT EXISTS settings (

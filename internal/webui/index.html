@@ -909,6 +909,70 @@
       </section>
 
       <section class="card">
+        <h2>调度：单号串行、换号间隔与会话粘性</h2>
+        <div class="grid2">
+          <div class="field"><label>单号串行（在途租约）</label>
+            <select id="setLeaseEnabled">
+              <option value="true">开启 · 同一账号同时只跑一个请求</option>
+              <option value="false">关闭 · 允许同号并发</option>
+            </select>
+          </div>
+          <div class="field"><label>租约时长（秒）</label><input type="number" id="setLeaseTTLSec" min="30" max="3600"></div>
+          <div class="field"><label>换号间隔（毫秒）</label><input type="number" id="setRetryDelayMS" min="0" max="60000"></div>
+          <div class="field"><label>失败后退避</label>
+            <select id="setBackoffEnabled">
+              <option value="true">开启 · 刚失败的号短暂不再被选中</option>
+              <option value="false">关闭 · 失败后立刻可再选</option>
+            </select>
+          </div>
+          <div class="field"><label>退避起点（毫秒）</label><input type="number" id="setBackoffBaseMS" min="100" max="600000"></div>
+          <div class="field"><label>退避上限（毫秒）</label><input type="number" id="setBackoffMaxMS" min="100" max="3600000"></div>
+          <div class="field"><label>会话粘性</label>
+            <select id="setAffinityEnabled">
+              <option value="true">开启 · 同一段对话固定用同一个号</option>
+              <option value="false">关闭 · 每轮重新选号</option>
+            </select>
+          </div>
+          <div class="field"><label>会话绑定时长（秒）</label><input type="number" id="setAffinityTTLSec" min="60" max="2592000"></div>
+        </div>
+        <p class="hint">这三项都在回答同一个问题：<strong>「一次请求在外部看起来是什么形态」</strong>。
+          上游风控看的不是单个请求，而是同一账号一段时间内接了多少互不相干的请求。<br>
+          <strong>单号串行</strong>：开启后同一账号同时只处理一个请求，其余请求自动换号；
+          代价是单号并发能力下降，好处是不会出现「一台设备同时跑多段对话」。租约到期自动失效，
+          进程崩溃留下的残租约也能回收；长回答会按租约时长的 1/3 滚动续期。<br>
+          <strong>换号间隔</strong>：失败后等一小会儿再换号，避免同一秒内横扫整个号池。<br>
+          <strong>失败后退避</strong>：403 / 5xx / 网络抖动这类上游波动会让该号在窗口内暂不被选中，
+          时长从起点开始逐次翻倍、封顶上限。它<strong>不改变账号状态</strong>（面板上不会显示成停用），
+          与「冷却」是两回事。调用成功即清空退避链。<br>
+          <strong>会话粘性</strong>：从 <code>X-Session-Id</code> / <code>X-Conversation-Id</code> /
+          <code>session_id</code> / <code>conversation_id</code> 取会话标识，同一段对话优先复用上次成功的号；
+          该号失败时立即解绑，避免一直撞同一个号。取不到标识时粘性自动不生效。保存后立即生效。</p>
+        <button class="primary" id="saveDispatchBtn">保存调度设置</button>
+        <p class="msg" id="dispatchMsg"></p>
+      </section>
+
+      <section class="card">
+        <h2>客户端指纹</h2>
+        <div class="grid2">
+          <div class="field"><label>对话端版本号（x-client-version）</label><input id="setClientVersion" type="text" maxlength="128" placeholder="1.0.35"></div>
+          <div class="field"><label>管理面版本号（X-Client-Version）</label><input id="setWebClientVersion" type="text" maxlength="128" placeholder="v1.1.3"></div>
+          <div class="field"><label>新号缺省系统版本</label><input id="setClientOSVersion" type="text" maxlength="128" placeholder="10.0.26200"></div>
+          <div class="field"><label>新号缺省桌面平台</label><input id="setClientPlatform" type="text" maxlength="128" placeholder="desktop-windows-x64"></div>
+          <div class="field"><label>对话端 User-Agent（留空自动派生）</label><input id="setClientUserAgent" type="text" maxlength="256" placeholder="留空 = raccoon-ai/&lt;版本号&gt;"></div>
+          <div class="field"><label>管理面 User-Agent（留空自动派生）</label><input id="setWebUserAgent" type="text" maxlength="256" placeholder="留空 = raccoon-ai/&lt;版本号&gt;"></div>
+        </div>
+        <p class="hint">这些值决定我们向小浣熊上游「以什么身份自称」，对话、签到、余额、续期全部共用一份。
+          上游桌面客户端发版后，旧版本号会过期——<strong>「旧版本号 + 全新会话」是第三方客户端最典型的特征</strong>，
+          所以版本变化时请在面板里直接改，不必重新发版。<br>
+          User-Agent <strong>必须留成与版本号一致</strong>：留空会按版本号自动生成（如 <code>raccoon-ai/1.0.35</code>）。
+          以前不发 UA，Go 会补 <code>Go-http-client/1.1</code>，与「自称桌面客户端」的其余头自相矛盾。<br>
+          「新号缺省系统版本 / 桌面平台」只影响<strong>之后新导入的账号</strong>；已有账号沿用入库时记录的值
+          （在号池行里可单独改），不会因为这里改了就被批量改写——每号指纹必须保持稳定。保存后立即生效。</p>
+        <button class="primary" id="saveFingerprintBtn">保存指纹设置</button>
+        <p class="msg" id="fingerprintMsg"></p>
+      </section>
+
+      <section class="card">
         <h2>主动续期</h2>
         <div class="grid2">
           <div class="field"><label>提前续期（天）</label><input type="number" id="setRenewWindowDays" min="0" max="30" step="0.5"></div>

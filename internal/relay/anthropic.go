@@ -25,7 +25,7 @@ func (s *Server) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusBadRequest, anthropicError("invalid_request_error", err.Error()))
 		return
 	}
-	cc := BuildChatContext(model, oaBody, DefaultModel)
+	cc := BuildChatContext(model, oaBody, DefaultModel, SessionKeyOf(r, body))
 	start := time.Now()
 
 	// 并发上限：超出时排队，拿到槽位才继续。

@@ -66,6 +66,10 @@ type Account struct {
 	SNRefreshToken string
 	SNPool         string // 最近一次读到的 5 小时池剩余量（JSON，供面板显示）
 	SNPoolAt       int64
+
+	// LeaseUntil 是该账号的在途租约到期时刻（毫秒）。> now 表示已被某个请求独占，
+	// 选号时跳过；0 表示无租约。仅在面板开启「单号串行」时写入。
+	LeaseUntil int64
 }
 
 // IsSenseNova 判断是否商汤日日新账号。空 provider 按小浣熊处理。
@@ -82,7 +86,7 @@ func (a *Account) ProviderName() string {
 const accountCols = `id, uid, name, note, token, refresh_token, token_exp, credits, credits_at,
 	status, cool_until, cool_reason, expires_at, device_id, device_name, os_version,
 	office_identity, platform, client_channel, language, meta, priority, enabled,
-	last_checkin_day, created_at, updated_at, last_used, max_concurrent,
+	last_checkin_day, created_at, updated_at, last_used, max_concurrent, lease_until,
 	provider, sn_username, sn_password, sn_token, sn_token_exp, sn_refresh_token, sn_pool, sn_pool_at`
 
 // 写入用的字段补丁：nil 表示不改。
@@ -112,6 +116,8 @@ type AccountPatch struct {
 	LastUsed       *int64
 	MaxConcurrent  *int64
 
+	LeaseUntil *int64
+
 	// Provider 一般只在新建时给；通用补丁里保留，便于测试与纠错。
 	Provider       *string
 	SNUsername     *string
@@ -132,7 +138,7 @@ func (s *Store) scanAccount(sc interface{ Scan(...any) error }) (*Account, error
 		&a.Credits, &a.CreditsAt, &a.Status, &a.CoolUntil, &a.CoolReason, &a.ExpiresAt,
 		&a.DeviceID, &a.DeviceName, &a.OSVersion, &a.OfficeIdentity, &a.Platform,
 		&a.ClientChannel, &a.Language, &meta, &a.Priority, &enabled,
-		&a.LastCheckinDay, &a.CreatedAt, &a.UpdatedAt, &a.LastUsed, &a.MaxConcurrent,
+		&a.LastCheckinDay, &a.CreatedAt, &a.UpdatedAt, &a.LastUsed, &a.MaxConcurrent, &a.LeaseUntil,
 		&a.Provider, &snUser, &snPass, &snTok, &a.SNTokenExp, &snRef, &snPool, &a.SNPoolAt)
 	if err != nil {
 		return nil, err
@@ -242,12 +248,12 @@ func (s *Store) CreateAccount(ctx context.Context, a *Account) error {
 		enabled = 1
 	}
 	_, err := s.exec(ctx, `INSERT INTO accounts (`+accountCols+`)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		a.ID, a.UID, a.Name, a.Note, s.cipher.Encrypt(a.Token), s.cipher.Encrypt(a.RefreshToken),
 		a.TokenExp, a.Credits, a.CreditsAt, a.Status, a.CoolUntil, a.CoolReason, a.ExpiresAt,
 		a.DeviceID, a.DeviceName, a.OSVersion, a.OfficeIdentity, a.Platform, a.ClientChannel,
 		a.Language, string(meta), a.Priority, enabled, a.LastCheckinDay,
-		a.CreatedAt, a.UpdatedAt, a.LastUsed, a.MaxConcurrent,
+		a.CreatedAt, a.UpdatedAt, a.LastUsed, a.MaxConcurrent, a.LeaseUntil,
 		a.Provider, s.cipher.Encrypt(a.SNUsername), s.cipher.Encrypt(a.SNPassword),
 		s.cipher.Encrypt(a.SNToken), a.SNTokenExp, s.cipher.Encrypt(a.SNRefreshToken),
 		s.cipher.Encrypt(a.SNPool), a.SNPoolAt)
@@ -341,6 +347,9 @@ func (s *Store) UpdateAccount(ctx context.Context, id string, p AccountPatch) er
 	if p.MaxConcurrent != nil {
 		add("max_concurrent", *p.MaxConcurrent)
 	}
+	if p.LeaseUntil != nil {
+		add("lease_until", *p.LeaseUntil)
+	}
 	if p.Provider != nil {
 		add("provider", *p.Provider)
 	}
@@ -387,6 +396,68 @@ func (s *Store) GetByProviderUID(ctx context.Context, provider, uid string) (*Ac
 	return a, err
 }
 
+// AcquireLease 尝试独占账号，返回本次租约的到期时刻（0 = 已被别人占着）。
+//
+// 用一条带条件的 UPDATE 做 CAS，多副本下也是原子的：
+// 只有「租约已过期」或「本来就没有租约」时才能抢到。
+//
+// 注意占位符顺序：now 出现在 SET 与 WHERE 两处，所以传两次。
+func (s *Store) AcquireLease(ctx context.Context, id string, ttlMS, now int64) (int64, error) {
+	until := now + ttlMS
+	res, err := s.exec(ctx,
+		`UPDATE accounts SET lease_until = ?, updated_at = ?
+		 WHERE id = ? AND lease_until <= ?`,
+		until, now, id, now)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return 0, nil
+	}
+	s.invalidateAccounts()
+	return until, nil
+}
+
+// RenewLease 把租约续到新的到期时刻。expect 是当初 AcquireLease 返回的值：
+// CAS 比对它才能确认「这条租约还是我的」，不会把别人抢到手的租约一起改掉。
+func (s *Store) RenewLease(ctx context.Context, id string, ttlMS, expect, now int64) (int64, error) {
+	until := now + ttlMS
+	res, err := s.exec(ctx,
+		`UPDATE accounts SET lease_until = ?, updated_at = ?
+		 WHERE id = ? AND lease_until = ?`,
+		until, now, id, expect)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return 0, nil
+	}
+	s.invalidateAccounts()
+	return until, nil
+}
+
+// ReleaseLease 释放租约。expect > 0 时做 CAS（只释放自己的），
+// expect == 0 时强制清零（面板手动解除残租约用）。
+func (s *Store) ReleaseLease(ctx context.Context, id string, expect int64) error {
+	var err error
+	if expect > 0 {
+		_, err = s.exec(ctx,
+			`UPDATE accounts SET lease_until = 0, updated_at = ?
+			 WHERE id = ? AND lease_until = ?`,
+			time.Now().UnixMilli(), id, expect)
+	} else {
+		_, err = s.exec(ctx,
+			`UPDATE accounts SET lease_until = 0, updated_at = ? WHERE id = ?`,
+			time.Now().UnixMilli(), id)
+	}
+	if err == nil {
+		s.invalidateAccounts()
+	}
+	return err
+}
+
 func (s *Store) DeleteAccount(ctx context.Context, id string) error {
 	tx, err := s.beginTx(ctx)
 	if err != nil {
@@ -412,6 +483,8 @@ func (s *Store) deleteAccountRows(ctx context.Context, tx *sql.Tx, id string) er
 	for _, q := range []string{
 		`DELETE FROM model_cooldowns WHERE account_id = ?`,
 		`DELETE FROM account_cooldowns WHERE account_id = ?`,
+		`DELETE FROM account_backoffs WHERE account_id = ?`,
+		`DELETE FROM session_affinity WHERE account_id = ?`,
 		`DELETE FROM checkin_history WHERE account_id = ?`,
 		`DELETE FROM accounts WHERE id = ?`,
 	} {
