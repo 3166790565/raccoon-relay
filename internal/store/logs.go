@@ -29,7 +29,7 @@ func (s *Store) AddCheckin(ctx context.Context, r CheckinRecord) error {
 	if r.At == 0 {
 		r.At = time.Now().UnixMilli()
 	}
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.exec(ctx,
 		`INSERT INTO checkin_history (account_id, day, action, source, ok, already, credit, message, at) VALUES (?,?,?,?,?,?,?,?,?)`,
 		r.AccountID, r.Day, r.Action, r.Source, ok, already, r.Credit, r.Message, r.At)
 	return err
@@ -38,7 +38,7 @@ func (s *Store) AddCheckin(ctx context.Context, r CheckinRecord) error {
 // CheckinFailCount 返回某账号某日某动作的连续失败次数，用于当日熔断。
 func (s *Store) CheckinFailCount(ctx context.Context, accountID, day, action string) (int, error) {
 	var n int
-	err := s.db.QueryRowContext(ctx,
+	err := s.queryRow(ctx,
 		`SELECT COUNT(*) FROM checkin_history WHERE account_id = ? AND day = ? AND action = ? AND ok = 0`,
 		accountID, day, action).Scan(&n)
 	return n, err
@@ -46,7 +46,7 @@ func (s *Store) CheckinFailCount(ctx context.Context, accountID, day, action str
 
 func (s *Store) CheckinDoneToday(ctx context.Context, accountID, day string) (bool, error) {
 	var n int
-	err := s.db.QueryRowContext(ctx,
+	err := s.queryRow(ctx,
 		`SELECT COUNT(*) FROM checkin_history WHERE account_id = ? AND day = ? AND ok = 1`,
 		accountID, day).Scan(&n)
 	return n > 0, err
@@ -157,7 +157,7 @@ func (s *Store) QueryUsage(ctx context.Context, f UsageFilter) ([]UsageRow, int6
 	const from = ` FROM usage_logs u LEFT JOIN accounts a ON a.id = u.account_id`
 
 	var total, failed int64
-	if err := s.db.QueryRowContext(ctx,
+	if err := s.queryRow(ctx,
 		`SELECT COUNT(*), COALESCE(SUM(CASE WHEN u.status >= 400 THEN 1 ELSE 0 END), 0)`+from+where,
 		args...).Scan(&total, &failed); err != nil {
 		return nil, 0, 0, err
@@ -167,7 +167,7 @@ func (s *Store) QueryUsage(ctx context.Context, f UsageFilter) ([]UsageRow, int6
 		u.model, u.api, u.status, u.prompt_tokens, u.completion_tokens, u.total_tokens, u.ms, u.error` +
 		from + where + ` ORDER BY u.id DESC LIMIT ? OFFSET ?`
 	pageArgs := append(append([]any{}, args...), f.PageSize, int64(f.Page-1)*int64(f.PageSize))
-	rows, err := s.db.QueryContext(ctx, sel, pageArgs...)
+	rows, err := s.query(ctx, sel, pageArgs...)
 	if err != nil {
 		return nil, 0, 0, err
 	}
@@ -199,7 +199,7 @@ func (s *Store) UsageFacets(ctx context.Context, sinceMS int64) (models, apis []
 		args = append(args, sinceMS)
 	}
 	q += ` ORDER BY model LIMIT 300`
-	rows, err := s.db.QueryContext(ctx, q, args...)
+	rows, err := s.query(ctx, q, args...)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -222,7 +222,7 @@ func (s *Store) UsageFacets(ctx context.Context, sinceMS int64) (models, apis []
 		args = append(args, sinceMS)
 	}
 	q += ` ORDER BY api`
-	rows2, err := s.db.QueryContext(ctx, q, args...)
+	rows2, err := s.query(ctx, q, args...)
 	if err != nil {
 		return models, nil, err
 	}
@@ -241,7 +241,7 @@ func (s *Store) AddUsage(ctx context.Context, u UsageLog) error {
 	if u.TS == 0 {
 		u.TS = time.Now().UnixMilli()
 	}
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.exec(ctx,
 		`INSERT INTO usage_logs (ts, account_id, model, api, status, prompt_tokens, completion_tokens, total_tokens, ms, error)
 		 VALUES (?,?,?,?,?,?,?,?,?,?)`,
 		u.TS, u.AccountID, u.Model, u.API, u.Status, u.PromptTokens, u.CompletionTokens, u.TotalTokens, u.MS, u.Error)
@@ -249,7 +249,7 @@ func (s *Store) AddUsage(ctx context.Context, u UsageLog) error {
 }
 
 func (s *Store) RecentUsage(ctx context.Context, limit int) ([]UsageLog, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.query(ctx,
 		`SELECT ts, account_id, model, api, status, prompt_tokens, completion_tokens, total_tokens, ms, error
 		 FROM usage_logs ORDER BY id DESC LIMIT ?`, limit)
 	if err != nil {
@@ -276,7 +276,7 @@ func (s *Store) PurgeUsageBefore(ctx context.Context, cutoffMS int64, limit int)
 	if limit <= 0 {
 		limit = 1000
 	}
-	res, err := s.db.ExecContext(ctx,
+	res, err := s.exec(ctx,
 		`DELETE FROM usage_logs WHERE id IN (
 			SELECT id FROM usage_logs WHERE ts < ? ORDER BY id LIMIT ?)`, cutoffMS, limit)
 	if err != nil {
@@ -290,7 +290,7 @@ func (s *Store) PurgeCheckinBefore(ctx context.Context, cutoffMS int64, limit in
 	if limit <= 0 {
 		limit = 1000
 	}
-	res, err := s.db.ExecContext(ctx,
+	res, err := s.exec(ctx,
 		`DELETE FROM checkin_history WHERE id IN (
 			SELECT id FROM checkin_history WHERE at < ? ORDER BY id LIMIT ?)`, cutoffMS, limit)
 	if err != nil {
@@ -301,21 +301,21 @@ func (s *Store) PurgeCheckinBefore(ctx context.Context, cutoffMS int64, limit in
 
 // UsageStats 返回调用流水的条数与最早一条的时间戳（空表时 earliest 为 0）。
 func (s *Store) UsageStats(ctx context.Context) (count, earliest int64, err error) {
-	err = s.db.QueryRowContext(ctx,
+	err = s.queryRow(ctx,
 		`SELECT COUNT(*), COALESCE(MIN(ts), 0) FROM usage_logs`).Scan(&count, &earliest)
 	return count, earliest, err
 }
 
 // CheckinStats 返回签到记录的条数与最早一条的时间戳。
 func (s *Store) CheckinStats(ctx context.Context) (count, earliest int64, err error) {
-	err = s.db.QueryRowContext(ctx,
+	err = s.queryRow(ctx,
 		`SELECT COUNT(*), COALESCE(MIN(at), 0) FROM checkin_history`).Scan(&count, &earliest)
 	return count, earliest, err
 }
 
 func (s *Store) GetSetting(ctx context.Context, key, def string) string {
 	var v string
-	if err := s.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, key).Scan(&v); err != nil {
+	if err := s.queryRow(ctx, `SELECT value FROM settings WHERE key = ?`, key).Scan(&v); err != nil {
 		return def
 	}
 	if v == "" {
@@ -325,7 +325,7 @@ func (s *Store) GetSetting(ctx context.Context, key, def string) string {
 }
 
 func (s *Store) SetSetting(ctx context.Context, key, value string) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.exec(ctx,
 		`INSERT INTO settings (key, value) VALUES (?,?)
 		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value)
 	return err

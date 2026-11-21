@@ -26,7 +26,7 @@ func (s *Store) CreateKey(ctx context.Context, name string) (*APIKey, string, er
 		Enabled:   true,
 		CreatedAt: time.Now().UnixMilli(),
 	}
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.exec(ctx,
 		`INSERT INTO api_keys (id, name, prefix, hash, enabled, created_at, last_used) VALUES (?,?,?,?,1,?,0)`,
 		k.ID, k.Name, k.Prefix, KeyHash(secret), k.CreatedAt)
 	if err != nil {
@@ -36,7 +36,7 @@ func (s *Store) CreateKey(ctx context.Context, name string) (*APIKey, string, er
 }
 
 func (s *Store) ListKeys(ctx context.Context) ([]*APIKey, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, prefix, enabled, created_at, last_used FROM api_keys ORDER BY created_at ASC`)
+	rows, err := s.query(ctx, `SELECT id, name, prefix, enabled, created_at, last_used FROM api_keys ORDER BY created_at ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -55,7 +55,7 @@ func (s *Store) ListKeys(ctx context.Context) ([]*APIKey, error) {
 }
 
 func (s *Store) DeleteKey(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM api_keys WHERE id = ?`, id)
+	_, err := s.exec(ctx, `DELETE FROM api_keys WHERE id = ?`, id)
 	return err
 }
 
@@ -68,24 +68,24 @@ func (s *Store) VerifyKey(ctx context.Context, plain string) bool {
 	h := KeyHash(plain)
 	var id string
 	var enabled int64
-	err := s.db.QueryRowContext(ctx, `SELECT id, enabled FROM api_keys WHERE hash = ?`, h).Scan(&id, &enabled)
+	err := s.queryRow(ctx, `SELECT id, enabled FROM api_keys WHERE hash = ?`, h).Scan(&id, &enabled)
 	if err != nil || enabled == 0 {
 		return false
 	}
 	// 即便 SQL 已按哈希等值匹配，这里再做一次常量时间比较，防时序侧信道。
 	var stored string
-	if err := s.db.QueryRowContext(ctx, `SELECT hash FROM api_keys WHERE id = ?`, id).Scan(&stored); err != nil {
+	if err := s.queryRow(ctx, `SELECT hash FROM api_keys WHERE id = ?`, id).Scan(&stored); err != nil {
 		return false
 	}
 	if subtle.ConstantTimeCompare([]byte(stored), []byte(h)) != 1 {
 		return false
 	}
-	_, _ = s.db.ExecContext(ctx, `UPDATE api_keys SET last_used = ? WHERE id = ?`, time.Now().UnixMilli(), id)
+	_, _ = s.exec(ctx, `UPDATE api_keys SET last_used = ? WHERE id = ?`, time.Now().UnixMilli(), id)
 	return true
 }
 
 func (s *Store) HasAnyKey(ctx context.Context) (bool, error) {
 	var n int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM api_keys`).Scan(&n)
+	err := s.queryRow(ctx, `SELECT COUNT(*) FROM api_keys`).Scan(&n)
 	return n > 0, err
 }

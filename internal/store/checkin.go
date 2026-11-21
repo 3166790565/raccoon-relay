@@ -112,7 +112,7 @@ func (s *Store) QueryCheckins(ctx context.Context, f CheckinFilter) ([]CheckinRo
 	const from = ` FROM checkin_history c LEFT JOIN accounts a ON a.id = c.account_id`
 
 	var sum CheckinSummary
-	if err := s.db.QueryRowContext(ctx,
+	if err := s.queryRow(ctx,
 		`SELECT COUNT(*),
 			COALESCE(SUM(CASE WHEN c.ok = 1 THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN c.ok = 0 THEN 1 ELSE 0 END), 0),
@@ -126,7 +126,7 @@ func (s *Store) QueryCheckins(ctx context.Context, f CheckinFilter) ([]CheckinRo
 		c.day, c.action, c.source, c.ok, c.already, c.credit, c.message, c.at` +
 		from + where + ` ORDER BY c.id DESC LIMIT ? OFFSET ?`
 	pageArgs := append(append([]any{}, args...), f.PageSize, int64(f.Page-1)*int64(f.PageSize))
-	rows, err := s.db.QueryContext(ctx, sel, pageArgs...)
+	rows, err := s.query(ctx, sel, pageArgs...)
 	if err != nil {
 		return nil, CheckinSummary{}, err
 	}
@@ -168,7 +168,7 @@ type CheckinCenterAccount struct {
 // CheckinCenterAccounts 返回全部账号及各自「今日」最近一次签到结果。
 // 一次 SQL 取齐，避免面板逐号查询；LEFT JOIN 到今日最新一条记录。
 func (s *Store) CheckinCenterAccounts(ctx context.Context, day string) ([]CheckinCenterAccount, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.query(ctx, `
 		SELECT a.id, a.name, a.uid, a.note, a.enabled, a.status, a.credits, a.last_checkin_day,
 			c.id, COALESCE(c.ok, 0), COALESCE(c.already, 0), COALESCE(c.message, ''),
 			COALESCE(c.at, 0), COALESCE(c.source, '')
@@ -204,14 +204,14 @@ func (s *Store) CheckinCenterAccounts(ctx context.Context, day string) ([]Checki
 // CheckinTotal 返回签到记录总数，签到中心「累计记录」用。
 func (s *Store) CheckinTotal(ctx context.Context) (int64, error) {
 	var n int64
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM checkin_history`).Scan(&n)
+	err := s.queryRow(ctx, `SELECT COUNT(*) FROM checkin_history`).Scan(&n)
 	return n, err
 }
 
 // CheckinCreditTotal 返回签到累计领到的积分（只累计成功且真正领取的记录）。
 func (s *Store) CheckinCreditTotal(ctx context.Context) (int64, error) {
 	var n int64
-	err := s.db.QueryRowContext(ctx,
+	err := s.queryRow(ctx,
 		`SELECT COALESCE(SUM(credit), 0) FROM checkin_history WHERE ok = 1`).Scan(&n)
 	return n, err
 }

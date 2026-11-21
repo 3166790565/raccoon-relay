@@ -111,7 +111,7 @@ func (s *Store) scanAccount(sc interface{ Scan(...any) error }) (*Account, error
 }
 
 func (s *Store) ListAccounts(ctx context.Context) ([]*Account, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+accountCols+` FROM accounts ORDER BY created_at ASC`)
+	rows, err := s.query(ctx, `SELECT `+accountCols+` FROM accounts ORDER BY created_at ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -128,7 +128,7 @@ func (s *Store) ListAccounts(ctx context.Context) ([]*Account, error) {
 }
 
 func (s *Store) GetAccount(ctx context.Context, id string) (*Account, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT `+accountCols+` FROM accounts WHERE id = ?`, id)
+	row := s.queryRow(ctx, `SELECT `+accountCols+` FROM accounts WHERE id = ?`, id)
 	a, err := s.scanAccount(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -137,7 +137,7 @@ func (s *Store) GetAccount(ctx context.Context, id string) (*Account, error) {
 }
 
 func (s *Store) GetByUID(ctx context.Context, uid string) (*Account, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT `+accountCols+` FROM accounts WHERE uid = ?`, uid)
+	row := s.queryRow(ctx, `SELECT `+accountCols+` FROM accounts WHERE uid = ?`, uid)
 	a, err := s.scanAccount(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -166,7 +166,7 @@ func (s *Store) CreateAccount(ctx context.Context, a *Account) error {
 	if a.Enabled {
 		enabled = 1
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO accounts (`+accountCols+`)
+	_, err := s.exec(ctx, `INSERT INTO accounts (`+accountCols+`)
 		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		a.ID, a.UID, a.Name, a.Note, s.cipher.Encrypt(a.Token), s.cipher.Encrypt(a.RefreshToken),
 		a.TokenExp, a.Credits, a.CreditsAt, a.Status, a.CoolUntil, a.CoolReason, a.ExpiresAt,
@@ -258,17 +258,17 @@ func (s *Store) UpdateAccount(ctx context.Context, id string, p AccountPatch) er
 		add("last_used", *p.LastUsed)
 	}
 	args = append(args, id)
-	_, err := s.db.ExecContext(ctx, `UPDATE accounts SET `+joinComma(sets)+` WHERE id = ?`, args...)
+	_, err := s.exec(ctx, `UPDATE accounts SET `+joinComma(sets)+` WHERE id = ?`, args...)
 	return err
 }
 
 func (s *Store) DeleteAccount(ctx context.Context, id string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := deleteAccountRows(ctx, tx, id); err != nil {
+	if err := s.deleteAccountRows(ctx, tx, id); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -277,16 +277,16 @@ func (s *Store) DeleteAccount(ctx context.Context, id string) error {
 // deleteAccountRows 删掉账号及挂在它下面的冷却与签到记录。
 // 三张表必须一起删：只删 accounts 会留下孤儿行，之后同 uid 重新导入时
 // 旧冷却会把新号立刻压回冷却状态。
-func deleteAccountRows(ctx context.Context, ex interface {
-	ExecContext(context.Context, string, ...any) (sql.Result, error)
-}, id string) error {
+//
+// 走 execTx 而不是裸 tx.ExecContext：Postgres 下占位符需要 rebind。
+func (s *Store) deleteAccountRows(ctx context.Context, tx *sql.Tx, id string) error {
 	for _, q := range []string{
 		`DELETE FROM model_cooldowns WHERE account_id = ?`,
 		`DELETE FROM account_cooldowns WHERE account_id = ?`,
 		`DELETE FROM checkin_history WHERE account_id = ?`,
 		`DELETE FROM accounts WHERE id = ?`,
 	} {
-		if _, err := ex.ExecContext(ctx, q, id); err != nil {
+		if _, err := s.execTx(ctx, tx, q, id); err != nil {
 			return err
 		}
 	}
@@ -348,7 +348,7 @@ func (s *Store) PurgeDeadAccounts(ctx context.Context, ids []string) (int, error
 	if len(ids) == 0 {
 		return 0, nil
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -359,7 +359,7 @@ func (s *Store) PurgeDeadAccounts(ctx context.Context, ids []string) (int, error
 		if id == "" {
 			continue
 		}
-		if err := deleteAccountRows(ctx, tx, id); err != nil {
+		if err := s.deleteAccountRows(ctx, tx, id); err != nil {
 			return 0, err
 		}
 		deleted++

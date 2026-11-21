@@ -15,7 +15,7 @@ type ModelCooldown struct {
 }
 
 func (s *Store) ListModelCooldowns(ctx context.Context) ([]ModelCooldown, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT account_id, model, until, reason, hits FROM model_cooldowns`)
+	rows, err := s.query(ctx, `SELECT account_id, model, until, reason, hits FROM model_cooldowns`)
 	if err != nil {
 		return nil, err
 	}
@@ -32,7 +32,7 @@ func (s *Store) ListModelCooldowns(ctx context.Context) ([]ModelCooldown, error)
 }
 
 func (s *Store) UpsertModelCooldown(ctx context.Context, c ModelCooldown) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.exec(ctx,
 		`INSERT INTO model_cooldowns (account_id, model, until, reason, hits) VALUES (?,?,?,?,?)
 		 ON CONFLICT(account_id, model) DO UPDATE SET until=excluded.until, reason=excluded.reason, hits=excluded.hits`,
 		c.AccountID, strings.ToLower(c.Model), c.Until, c.Reason, c.Hits)
@@ -40,7 +40,7 @@ func (s *Store) UpsertModelCooldown(ctx context.Context, c ModelCooldown) error 
 }
 
 func (s *Store) DeleteModelCooldown(ctx context.Context, accountID, model string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM model_cooldowns WHERE account_id = ? AND model = ?`,
+	_, err := s.exec(ctx, `DELETE FROM model_cooldowns WHERE account_id = ? AND model = ?`,
 		accountID, strings.ToLower(model))
 	return err
 }
@@ -55,7 +55,7 @@ type AccountCooldown struct {
 }
 
 func (s *Store) ListAccountCooldowns(ctx context.Context) ([]AccountCooldown, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT account_id, until, reason, hits FROM account_cooldowns`)
+	rows, err := s.query(ctx, `SELECT account_id, until, reason, hits FROM account_cooldowns`)
 	if err != nil {
 		return nil, err
 	}
@@ -72,7 +72,7 @@ func (s *Store) ListAccountCooldowns(ctx context.Context) ([]AccountCooldown, er
 }
 
 func (s *Store) UpsertAccountCooldown(ctx context.Context, c AccountCooldown) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.exec(ctx,
 		`INSERT INTO account_cooldowns (account_id, until, reason, hits) VALUES (?,?,?,?)
 		 ON CONFLICT(account_id) DO UPDATE SET until=excluded.until, reason=excluded.reason, hits=excluded.hits`,
 		c.AccountID, c.Until, c.Reason, c.Hits)
@@ -80,6 +80,6 @@ func (s *Store) UpsertAccountCooldown(ctx context.Context, c AccountCooldown) er
 }
 
 func (s *Store) DeleteAccountCooldown(ctx context.Context, accountID string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM account_cooldowns WHERE account_id = ?`, accountID)
+	_, err := s.exec(ctx, `DELETE FROM account_cooldowns WHERE account_id = ?`, accountID)
 	return err
 }
