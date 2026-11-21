@@ -264,6 +264,12 @@ func (s *Store) migrate() error {
 		if err := s.ensureAccountColumnsTx(ctx, tx); err != nil {
 			return err
 		}
+		// 报表聚合表同理要补列。老版本建出来的表缺「输入/输出 Token」「成功数」，
+		// 不补的话新聚合 SQL 会整页 500。和 accounts 一样必须放在事务里走，
+		// 多副本启动时由上面的 advisory lock 串行化。
+		if err := s.ensureReportColumnsTx(ctx, tx); err != nil {
+			return err
+		}
 		if err := s.applySchemaVersionTx(ctx, tx); err != nil {
 			return err
 		}
@@ -352,16 +358,20 @@ func (s *Store) ensureAccountColumnsTx(ctx context.Context, tx *sql.Tx) error {
 // 聚合表是 CREATE TABLE IF NOT EXISTS 建的：上一版已经建出来的表不会自动多出
 // 这些列，不补的话新聚合 SQL 会直接报「no such column」，报表页整页 500。
 // 新表本身（request_daily_api）由 schema 段负责创建，这里只管老表补列。
+//
+// 两种方言共用同一份补列清单，避免两边漏改一边。
+type reportColumnPatch struct{ table, column, ddl string }
+
+var reportColumnPatches = []reportColumnPatch{
+	{"request_daily", "prompt_tokens", `ALTER TABLE request_daily ADD COLUMN prompt_tokens BIGINT NOT NULL DEFAULT 0`},
+	{"request_daily", "completion_tokens", `ALTER TABLE request_daily ADD COLUMN completion_tokens BIGINT NOT NULL DEFAULT 0`},
+	{"request_daily_model", "successful", `ALTER TABLE request_daily_model ADD COLUMN successful BIGINT NOT NULL DEFAULT 0`},
+	{"request_daily_model", "prompt_tokens", `ALTER TABLE request_daily_model ADD COLUMN prompt_tokens BIGINT NOT NULL DEFAULT 0`},
+	{"request_daily_model", "completion_tokens", `ALTER TABLE request_daily_model ADD COLUMN completion_tokens BIGINT NOT NULL DEFAULT 0`},
+}
+
 func (s *Store) ensureReportColumns() error {
-	type add struct{ table, column, ddl string }
-	patches := []add{
-		{"request_daily", "prompt_tokens", `ALTER TABLE request_daily ADD COLUMN prompt_tokens BIGINT NOT NULL DEFAULT 0`},
-		{"request_daily", "completion_tokens", `ALTER TABLE request_daily ADD COLUMN completion_tokens BIGINT NOT NULL DEFAULT 0`},
-		{"request_daily_model", "successful", `ALTER TABLE request_daily_model ADD COLUMN successful BIGINT NOT NULL DEFAULT 0`},
-		{"request_daily_model", "prompt_tokens", `ALTER TABLE request_daily_model ADD COLUMN prompt_tokens BIGINT NOT NULL DEFAULT 0`},
-		{"request_daily_model", "completion_tokens", `ALTER TABLE request_daily_model ADD COLUMN completion_tokens BIGINT NOT NULL DEFAULT 0`},
-	}
-	for _, p := range patches {
+	for _, p := range reportColumnPatches {
 		has, err := s.columnExistsAny(p.table, p.column)
 		if err != nil {
 			return fmt.Errorf("检查 %s.%s 列失败: %w", p.table, p.column, err)
@@ -370,6 +380,23 @@ func (s *Store) ensureReportColumns() error {
 			continue
 		}
 		if _, err := s.db.Exec(p.ddl); err != nil {
+			return fmt.Errorf("补充 %s.%s 失败: %w", p.table, p.column, err)
+		}
+	}
+	return nil
+}
+
+// ensureReportColumnsTx 是 Postgres 迁移事务里的同一逻辑。
+func (s *Store) ensureReportColumnsTx(ctx context.Context, tx *sql.Tx) error {
+	for _, p := range reportColumnPatches {
+		has, err := columnExistsTx(ctx, tx, p.table, p.column)
+		if err != nil {
+			return fmt.Errorf("检查 %s.%s 列失败: %w", p.table, p.column, err)
+		}
+		if has {
+			continue
+		}
+		if _, err := s.execTx(ctx, tx, p.ddl); err != nil {
 			return fmt.Errorf("补充 %s.%s 失败: %w", p.table, p.column, err)
 		}
 	}

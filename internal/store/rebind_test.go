@@ -67,3 +67,16 @@ func TestRebindPlaceholderCountMatchesArgs(t *testing.T) {
 		}
 	}
 }
+
+// 迁移事务里的列存在性检查走 information_schema，必须先把 ? 改写成 $n。
+// CI 的 Postgres 作业曾因这里漏 rebind 直接 syntax error，本地 SQLite 测不出来。
+func TestColumnExistsTxQueryIsRebound(t *testing.T) {
+	q := `SELECT 1 FROM information_schema.columns WHERE table_name = ? AND column_name = ?`
+	got := dialectPostgres.rebind(q)
+	if got != `SELECT 1 FROM information_schema.columns WHERE table_name = $1 AND column_name = $2` {
+		t.Fatalf("Postgres 未正确改写占位符: %s", got)
+	}
+	if sqliteGot := dialectSQLite.rebind(q); sqliteGot != q {
+		t.Fatalf("SQLite 不应改写: %s", sqliteGot)
+	}
+}

@@ -426,9 +426,14 @@ func columnExists(db *sql.DB, table, column string) (bool, error) {
 
 // columnExistsTx 是事务内的版本，供 Postgres 迁移在同一把 advisory lock 下补列。
 // Postgres 走 information_schema。
+//
+// 注意这里必须先 rebind：本仓库的 SQL 一律写 ? 占位符，而 database/sql 的
+// ExecContext/QueryContext 不会替我们改写方言。漏掉 rebind 时 PG 会收到字面
+// 的「? AND column_name = ?」，直接报 syntax error（CI 的 Postgres 作业就是
+// 这样红的）。
 func columnExistsTx(ctx context.Context, tx *sql.Tx, table, column string) (bool, error) {
 	rows, err := tx.QueryContext(ctx,
-		`SELECT 1 FROM information_schema.columns WHERE table_name = ? AND column_name = ?`,
+		dialectPostgres.rebind(`SELECT 1 FROM information_schema.columns WHERE table_name = ? AND column_name = ?`),
 		table, column)
 	if err != nil {
 		return false, err

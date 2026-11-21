@@ -40,7 +40,8 @@ func TestReportColumnsBackfilledOnUpgrade(t *testing.T) {
 		{"request_daily_model", "prompt_tokens"},
 		{"request_daily_model", "completion_tokens"},
 	} {
-		ok, err := columnExists(st.DB(), p[0], p[1])
+		// 用方言无关的检查：columnExists 走 PRAGMA，Postgres 下会语法错误。
+		ok, err := st.columnExistsAny(p[0], p[1])
 		if err != nil || !ok {
 			t.Fatalf("%s.%s 应已补齐（err=%v ok=%v）", p[0], p[1], err, ok)
 		}
