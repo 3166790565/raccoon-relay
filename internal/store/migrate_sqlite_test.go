@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
 	"testing"
@@ -92,6 +93,64 @@ func TestVerifyDumpCipherRejectsWrongKey(t *testing.T) {
 	}
 	if err := verifyDumpCipher(wrong, dump); err == nil {
 		t.Fatal("SECRET_KEY 不一致时应报错")
+	}
+}
+
+// 旧版本可能缺后来新增的表/列（例如 account_cooldowns、checkin_history.source）。
+// 迁移应把它们读成空值，而不是整体失败。
+func TestReadDumpToleratesOlderSchema(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "relay.db")
+
+	// 手工建一个「老版本」库：没有 account_cooldowns，checkin_history 没有 source。
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stmts := []string{
+		`CREATE TABLE accounts (id TEXT PRIMARY KEY, uid TEXT NOT NULL, name TEXT NOT NULL DEFAULT '',
+			note TEXT NOT NULL DEFAULT '', token TEXT NOT NULL DEFAULT '', refresh_token TEXT NOT NULL DEFAULT '',
+			token_exp INTEGER NOT NULL DEFAULT 0, credits INTEGER NOT NULL DEFAULT -1,
+			credits_at INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'online',
+			cool_until INTEGER NOT NULL DEFAULT 0, cool_reason TEXT NOT NULL DEFAULT '',
+			expires_at INTEGER NOT NULL DEFAULT 0, device_id TEXT NOT NULL DEFAULT '',
+			device_name TEXT NOT NULL DEFAULT '', os_version TEXT NOT NULL DEFAULT '',
+			office_identity TEXT NOT NULL DEFAULT '', platform TEXT NOT NULL DEFAULT '',
+			client_channel TEXT NOT NULL DEFAULT '', language TEXT NOT NULL DEFAULT 'zh',
+			meta TEXT NOT NULL DEFAULT '{}', priority INTEGER NOT NULL DEFAULT 0,
+			enabled INTEGER NOT NULL DEFAULT 1, last_checkin_day TEXT NOT NULL DEFAULT '',
+			created_at INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL DEFAULT 0,
+			last_used INTEGER NOT NULL DEFAULT 0)`,
+		`CREATE TABLE api_keys (id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '',
+			prefix TEXT NOT NULL DEFAULT '', hash TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
+			created_at INTEGER NOT NULL DEFAULT 0, last_used INTEGER NOT NULL DEFAULT 0)`,
+		`CREATE TABLE checkin_history (id INTEGER PRIMARY KEY AUTOINCREMENT,
+			account_id TEXT NOT NULL, day TEXT NOT NULL, action TEXT NOT NULL DEFAULT '',
+			ok INTEGER NOT NULL DEFAULT 0, already INTEGER NOT NULL DEFAULT 0,
+			credit INTEGER NOT NULL DEFAULT 0, message TEXT NOT NULL DEFAULT '',
+			at INTEGER NOT NULL DEFAULT 0)`,
+		`INSERT INTO accounts (id, uid, token) VALUES ('a1', 'u1', 'enc:plain:tok')`,
+		`INSERT INTO checkin_history (account_id, day, action, ok) VALUES ('a1', '2026-01-01', 'daily', 1)`,
+	}
+	for _, q := range stmts {
+		if _, err := raw.Exec(q); err != nil {
+			t.Fatalf("建旧库失败: %v\nSQL: %s", err, q)
+		}
+	}
+	_ = raw.Close()
+
+	dump, err := readSQLiteDump(dbPath)
+	if err != nil {
+		t.Fatalf("旧 schema 不应导致读取失败: %v", err)
+	}
+	if len(dump.Accounts) != 1 || len(dump.Checkins) != 1 {
+		t.Fatalf("账号/签到读取不符: %d / %d", len(dump.Accounts), len(dump.Checkins))
+	}
+	if dump.Checkins[0].Source != "" {
+		t.Fatalf("缺失的 source 列应为空串，实际 %q", dump.Checkins[0].Source)
+	}
+	if dump.AccountCools != nil {
+		t.Fatalf("缺失的 account_cooldowns 应为空集，实际 %d 行", len(dump.AccountCools))
 	}
 }
 

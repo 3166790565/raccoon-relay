@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -175,6 +176,9 @@ func finishDumpFiles(importing string) error {
 }
 
 // readSQLiteDump 以只读方式读出旧库全部行。可脱离 Postgres 单测。
+//
+// 旧版本可能没有后来新增的表（例如 v1.2.x 才有 account_cooldowns），
+// 缺失的表按空集处理，而不是让整个迁移失败。
 func readSQLiteDump(path string) (*sqliteDump, error) {
 	dsn := "file:" + filepath.ToSlash(path) + "?mode=ro&_pragma=query_only(1)"
 	db, err := sql.Open("sqlite", dsn)
@@ -184,31 +188,44 @@ func readSQLiteDump(path string) (*sqliteDump, error) {
 	defer db.Close()
 
 	d := &sqliteDump{}
+	// accounts / api_keys 是基础表，缺失说明这不是一个 relay 库，直接报错。
 	if d.Accounts, err = readAccounts(db); err != nil {
 		return nil, fmt.Errorf("读取 accounts: %w", err)
 	}
 	if d.Keys, err = readKeys(db); err != nil {
 		return nil, fmt.Errorf("读取 api_keys: %w", err)
 	}
-	if d.ModelCools, err = readModelCools(db); err != nil {
-		return nil, fmt.Errorf("读取 model_cooldowns: %w", err)
+	if d.ModelCools, err = readIfExists(db, "读取 model_cooldowns", readModelCools); err != nil {
+		return nil, err
 	}
-	if d.AccountCools, err = readAccountCools(db); err != nil {
-		return nil, fmt.Errorf("读取 account_cooldowns: %w", err)
+	if d.AccountCools, err = readIfExists(db, "读取 account_cooldowns", readAccountCools); err != nil {
+		return nil, err
 	}
-	if d.Checkins, err = readCheckins(db); err != nil {
-		return nil, fmt.Errorf("读取 checkin_history: %w", err)
+	if d.Checkins, err = readIfExists(db, "读取 checkin_history", readCheckins); err != nil {
+		return nil, err
 	}
-	if d.Usage, err = readUsage(db); err != nil {
-		return nil, fmt.Errorf("读取 usage_logs: %w", err)
+	if d.Usage, err = readIfExists(db, "读取 usage_logs", readUsage); err != nil {
+		return nil, err
 	}
-	if d.Settings, err = readSettings(db); err != nil {
-		return nil, fmt.Errorf("读取 settings: %w", err)
+	if d.Settings, err = readIfExists(db, "读取 settings", readSettings); err != nil {
+		return nil, err
 	}
-	if d.Events, err = readEvents(db); err != nil {
-		return nil, fmt.Errorf("读取 runtime_events: %w", err)
+	if d.Events, err = readIfExists(db, "读取 runtime_events", readEvents); err != nil {
+		return nil, err
 	}
 	return d, nil
+}
+
+// readIfExists 在表不存在时返回空集；其它错误照常上抛。
+func readIfExists[T any](db *sql.DB, what string, fn func(*sql.DB) ([]T, error)) ([]T, error) {
+	rows, err := fn(db)
+	if err != nil && strings.Contains(err.Error(), "no such table") {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", what, err)
+	}
+	return rows, nil
 }
 
 func readAccounts(db *sql.DB) ([]accountRow, error) {
@@ -284,7 +301,16 @@ func readAccountCools(db *sql.DB) ([]accountCoolRow, error) {
 }
 
 func readCheckins(db *sql.DB) ([]checkinRow, error) {
-	rows, err := db.Query(`SELECT id, account_id, day, action, source, ok, already, credit, message, at FROM checkin_history ORDER BY id`)
+	// source 是后来加的列，旧库没有时按空串处理。
+	hasSource, err := columnExists(db, "checkin_history", "source")
+	if err != nil {
+		return nil, err
+	}
+	cols := `id, account_id, day, action, ok, already, credit, message, at`
+	if hasSource {
+		cols = `id, account_id, day, action, source, ok, already, credit, message, at`
+	}
+	rows, err := db.Query(`SELECT ` + cols + ` FROM checkin_history ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -292,13 +318,45 @@ func readCheckins(db *sql.DB) ([]checkinRow, error) {
 	var out []checkinRow
 	for rows.Next() {
 		var r checkinRow
-		if err := rows.Scan(&r.ID, &r.AccountID, &r.Day, &r.Action, &r.Source,
-			&r.OK, &r.Already, &r.Credit, &r.Message, &r.At); err != nil {
-			return nil, err
+		if hasSource {
+			if err := rows.Scan(&r.ID, &r.AccountID, &r.Day, &r.Action, &r.Source,
+				&r.OK, &r.Already, &r.Credit, &r.Message, &r.At); err != nil {
+				return nil, err
+			}
+		} else {
+			if err := rows.Scan(&r.ID, &r.AccountID, &r.Day, &r.Action,
+				&r.OK, &r.Already, &r.Credit, &r.Message, &r.At); err != nil {
+				return nil, err
+			}
 		}
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// columnExists 用 PRAGMA table_info 判断列是否存在。
+func columnExists(db *sql.DB, table, column string) (bool, error) {
+	rows, err := db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			cid        int
+			name, typ  string
+			notNull    int
+			dflt       sql.NullString
+			primaryKey int
+		)
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &dflt, &primaryKey); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 func readUsage(db *sql.DB) ([]usageRow, error) {
