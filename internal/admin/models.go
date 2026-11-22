@@ -309,14 +309,19 @@ func (p *Panel) externalCatalogs(r *http.Request) []modelrules.ProviderCatalog {
 		}
 		items := make([]modelrules.CatalogModel, 0, len(models))
 		for _, m := range models {
+			// 外部渠道的内置快照是「这条通道」自己的事实（例如码道一律不支持
+			// 图片，它对图片回 InferHub 错误），六项都已明确声明，不能让
+			// models.dev 用实验室 API 的能力把它推翻。
+			images, tools, reason := m.SupportsImages, m.SupportsTools, m.SupportsReason
 			items = append(items, modelrules.CatalogModel{
-				ID:              m.ID,
-				Name:            m.Name,
-				ContextLength:   m.ContextLength,
-				MaxOutputTokens: m.MaxOutputTokens,
-				SupportsImages:  m.SupportsImages,
-				SupportsTools:   m.SupportsTools,
-				SupportsReason:  m.SupportsReason,
+				ID: m.ID, Name: m.Name,
+				ContextLength: m.ContextLength, MaxOutputTokens: m.MaxOutputTokens,
+				SupportsImages: images, SupportsTools: tools, SupportsReason: reason,
+				DeclaredContext:   int64(m.ContextLength),
+				DeclaredMaxOutput: int64(m.MaxOutputTokens),
+				DeclaredImages:    &images,
+				DeclaredTools:     &tools,
+				DeclaredReason:    &reason,
 			})
 		}
 		out = append(out, modelrules.ProviderCatalog{
@@ -347,6 +352,9 @@ func (p *Panel) modelCatalogs(r *http.Request) []modelrules.ProviderCatalog {
 			SupportsImages:  m.SupportsImages,
 			SupportsTools:   m.SupportsTools,
 			SupportsReason:  m.SupportsReason,
+			// 实时清单里上游已给出的上下限就是「上游声明」。
+			DeclaredContext:   int64(m.ContextLength),
+			DeclaredMaxOutput: int64(m.MaxOutputTokens),
 		}
 		if sensenova.IsKnownModel(m.ID) {
 			sn = append(sn, item)

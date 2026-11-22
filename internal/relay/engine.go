@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -415,7 +416,14 @@ func (e *Engine) RunOpenAI(ctx context.Context, req *ChatContext, sink OpenAISin
 var errNoAccount = errors.New("号池没有可用账号（全部冷却、积分耗尽或凭证失效）")
 
 // runOne 是对单个账号的一次尝试。按账号来源分流到对应上游。
+//
+// 在分流之前先过出站策略（见 GatewayPolicy）：角色归一必须在所有改写的最前面，
+// 脱敏紧随其后，这样后面各层（请求体整形、各家适配器）看到的都是统一形态，
+// 且客户端发来的原文只在「发给上游的副本」上被改。
 func (e *Engine) runOne(ctx context.Context, at *Attempt, req *ChatContext, sink OpenAISink) error {
+	if e.gatewayApplies(at.Account) {
+		req = e.applyGateway(at, req)
+	}
 	if at.Account.IsExternal() {
 		return e.runOneExternal(ctx, at, req, sink)
 	}
@@ -423,6 +431,61 @@ func (e *Engine) runOne(ctx context.Context, at *Attempt, req *ChatContext, sink
 		return e.runOneSenseNova(ctx, at, req, sink)
 	}
 	return e.runOneRaccoon(ctx, at, req, sink)
+}
+
+// gatewayApplies 判断该账号是否需要走出站策略。
+//
+// 三家都接：它们的 OpenChat 都直接序列化 relay 准备好的请求体（外部渠道只在
+// 自己的包里改写 model 字段），所以在这一层改写对谁都同样生效。脱敏的应用
+// 范围仍由 SanitizeProviders 控制（留空 = 全部）。
+func (e *Engine) gatewayApplies(acc *store.Account) bool {
+	return acc != nil
+}
+
+// applyGateway 按当前策略复制一份请求体并执行「角色归一 → 脱敏」。
+// 没有任何改动时原样返回（调用方继续走零拷贝路径）。
+func (e *Engine) applyGateway(at *Attempt, req *ChatContext) *ChatContext {
+	policy := CurrentGatewayPolicy()
+	if req == nil || req.Body == nil {
+		return req
+	}
+	provider := at.Account.Provider
+	if provider == "" {
+		provider = store.ProviderRaccoon
+	}
+	body := req.Body
+	changed := false
+	roleChanged := false
+	if policy.DeveloperRoleCompat {
+		if next, hit := normalizeDeveloperRole(body); hit {
+			body, changed, roleChanged = next, true, true
+		}
+	}
+	hitCount := 0
+	if policy.SanitizeAppliesTo(provider) {
+		if result := policy.SanitizeRules.SanitizeRequest(body); result.Changed {
+			body, changed = result.Body, true
+			for _, hit := range result.Hits {
+				hitCount += hit.Count
+			}
+		}
+	}
+	if !changed {
+		return req
+	}
+	if roleChanged || hitCount > 0 {
+		detail := "模型：" + req.Model + "\n提供商：" + provider
+		if roleChanged {
+			detail += "\n角色归一：developer → system"
+		}
+		if hitCount > 0 {
+			detail += "\n脱敏命中：" + strconv.Itoa(hitCount) + " 处"
+		}
+		e.report(store.LevelInfo, "出站策略改写了发往上游的请求", detail, at.Account.ID)
+	}
+	next := *req
+	next.Body = body
+	return &next
 }
 
 // runOneRaccoon 是小浣熊的原有路径。

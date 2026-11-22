@@ -120,6 +120,17 @@ type Config struct {
 	UpdateDownloadBase string
 	UpdateMirrors      string // 空格/逗号分隔的镜像前缀，直连失败时依次兜底
 	UpdateTarget       string
+
+	// 出站策略：指纹脱敏与开发者角色兼容。
+	// 两者都只改「发给上游的副本」，客户端看到的响应不受影响。
+	// 面板「设置 → 网关」里可热更新并持久化到 settings；这里只是首次启动的默认值。
+	SanitizeEnabled bool
+	// SanitizeProviders 为空 = 应用到全部提供商（含之后新增的）。
+	SanitizeProviders []string
+	// DeveloperRoleCompat：转发前把 messages 里的 role:"developer" 改写为 "system"。
+	DeveloperRoleCompat bool
+	// ModelsDevEnabled：用 models.dev 补齐上游没声明的模型能力与思考档位。
+	ModelsDevEnabled bool
 }
 
 func env(key, def string) string {
@@ -151,6 +162,24 @@ func envInt64(key string, def int64) int64 {
 		return def
 	}
 	return n
+}
+
+// splitList 把空格 / 逗号分隔的串拆成去重后的列表（保留原顺序，统一小写）。
+func splitList(raw string) []string {
+	fields := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t' || r == '\n'
+	})
+	out := make([]string, 0, len(fields))
+	seen := map[string]bool{}
+	for _, f := range fields {
+		v := strings.ToLower(strings.TrimSpace(f))
+		if v == "" || seen[v] {
+			continue
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
+	return out
 }
 
 func envBool(key string, def bool) bool {
@@ -257,6 +286,13 @@ func Load() (*Config, error) {
 		UpdateDownloadBase: strings.TrimRight(env("UPDATE_DOWNLOAD_BASE", ""), "/"),
 		UpdateMirrors:      env("UPDATE_MIRRORS", ""),
 		UpdateTarget:       env("UPDATE_TARGET", ""),
+
+		// 出站策略默认值：脱敏与开发者角色兼容默认开（与 Agent2API 取向一致），
+		// models.dev 元数据默认开（只补上游没声明的空位，不会推翻上游声明）。
+		SanitizeEnabled:     envBool("SANITIZE_ENABLE", true),
+		SanitizeProviders:   splitList(env("SANITIZE_PROVIDERS", "")),
+		DeveloperRoleCompat: envBool("DEVELOPER_ROLE_COMPAT", true),
+		ModelsDevEnabled:    envBool("MODELS_DEV_ENABLE", true),
 	}
 	if c.AdminToken == "" {
 		c.AdminToken = RandomToken()

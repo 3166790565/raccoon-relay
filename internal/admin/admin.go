@@ -27,6 +27,7 @@ import (
 	"github.com/3166790565/raccoon-relay/internal/pool"
 	"github.com/3166790565/raccoon-relay/internal/raccoon"
 	"github.com/3166790565/raccoon-relay/internal/relay"
+	"github.com/3166790565/raccoon-relay/internal/sanitize"
 	"github.com/3166790565/raccoon-relay/internal/scheduler"
 	"github.com/3166790565/raccoon-relay/internal/sensenova"
 	"github.com/3166790565/raccoon-relay/internal/store"
@@ -87,6 +88,10 @@ type Panel struct {
 	// 运行日志页筛选下拉的缓存（来源清单）
 	eventScopes  []string
 	eventFacetAt time.Time
+
+	// 出站策略（脱敏 / 开发者角色兼容 / models.dev）的进程内状态。
+	// 懒初始化：零值面板（测试）也能直接读写。
+	gatewayState *gatewaySelf
 }
 
 func New(cfg *config.Config, st *store.Store, client *raccoon.Client, refresh *relay.Refresher,
@@ -264,6 +269,14 @@ func (p *Panel) Route(w http.ResponseWriter, r *http.Request) {
 		p.handleModelCapabilities(w, r)
 	case path == "/api/models/test" && r.Method == http.MethodPost:
 		p.handleModelTest(w, r)
+	case path == "/api/gateway/sanitize" && r.Method == http.MethodGet:
+		p.handleGetSanitize(w, r)
+	case path == "/api/gateway/sanitize" && r.Method == http.MethodPut:
+		p.handlePutSanitize(w, r)
+	case path == "/api/gateway/modelsdev" && r.Method == http.MethodGet:
+		p.handleGetModelsDev(w, r)
+	case path == "/api/gateway/modelsdev/refresh" && r.Method == http.MethodPost:
+		p.handleRefreshModelsDev(w, r)
 	case strings.HasPrefix(path, "/api/accounts/"):
 		p.handleAccountAction(w, r)
 	case strings.HasPrefix(path, "/api/keys/"):
@@ -1265,6 +1278,7 @@ func (p *Panel) ApplyStoredSettings(ctx context.Context) {
 	p.applyStoredFingerprintSettings(ctx)
 	p.applyStoredDispatchSettings(ctx)
 	p.applyStoredExternalSettings(ctx)
+	p.applyStoredGatewaySettings(ctx)
 }
 
 // applyStoredCheckinSettings 恢复面板里改过的签到配置。
@@ -1398,6 +1412,16 @@ func (p *Panel) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	for k, v := range p.externalSettings() {
 		settings[k] = v
+	}
+	for k, v := range p.gatewaySettings() {
+		settings[k] = v
+	}
+	// 面板「应用提供商」与「词表编辑」要的下拉与上限。
+	settings["sanitizeProviderOptions"] = p.sanitizeProviderOptions()
+	settings["sanitizeDefaults"] = sanitizeDefaults()
+	settings["sanitizeLimits"] = map[string]any{
+		"maxRules": sanitize.MaxRules, "maxNameChars": sanitize.MaxNameChars,
+		"maxPatternChars": sanitize.MaxPatternChars, "maxReplacementChars": sanitize.MaxReplacementChars,
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "settings": settings})
 }
@@ -1784,6 +1808,14 @@ type settingsBody struct {
 	AffinityEnabled *bool `json:"affinityEnabled"`
 	AffinityTTLSec  *int  `json:"affinityTTLSec"`
 
+	// 出站策略：指纹脱敏、开发者角色兼容、models.dev 元数据。
+	// sanitizeRules 三态：未给 = 不动；[] = 恢复内置词表；数组 = 自定义词表。
+	SanitizeEnabled     *bool            `json:"sanitizeEnabled"`
+	SanitizeRules       *[]sanitize.Rule `json:"sanitizeRules"`
+	SanitizeProviders   *[]string        `json:"sanitizeProviders"`
+	DeveloperRoleCompat *bool            `json:"developerRoleCompat"`
+	ModelsDevEnabled    *bool            `json:"modelsDevEnabled"`
+
 	// 外部渠道（AutoClaw / CodeArts）的上游基址。空串 = 用内置默认地址。
 	AutoClawIntlBase      *string `json:"autoClawIntlBase"`
 	AutoClawCNBase        *string `json:"autoClawCNBase"`
@@ -1881,6 +1913,10 @@ func (p *Panel) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := p.applyExternalSettings(r.Context(), body); err != nil {
+		writeJSON(w, 400, map[string]any{"ok": false, "message": err.Error()})
+		return
+	}
+	if err := p.applyGatewaySettings(r.Context(), body); err != nil {
 		writeJSON(w, 400, map[string]any{"ok": false, "message": err.Error()})
 		return
 	}

@@ -223,7 +223,13 @@ type Server struct {
 	sem cache.Semaphore
 	// Rules 是模型管理规则；nil 表示未启用（不做映射改写）。
 	Rules ModelRules
+	// CapMeta 查一条 models.dev 元数据，仅用于在 /v1/models 里补齐能力位；
+	// nil 表示不补齐。补齐只影响「广告出去的能力」，不影响请求路由。
+	CapMeta func(model string) *MetaRecord
 }
+
+// SetCapabilityMeta 注入 models.dev 元数据查询入口（/v1/models 补齐用）。
+func (s *Server) SetCapabilityMeta(fn func(model string) *MetaRecord) { s.CapMeta = fn }
 
 func NewServer(cfg *config.Config, st *store.Store, engine *Engine, catalog *Catalog) *Server {
 	return &Server{cfg: cfg, st: st, engine: engine, catalog: catalog}

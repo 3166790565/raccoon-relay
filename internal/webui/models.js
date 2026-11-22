@@ -40,13 +40,30 @@ function fmtModelTokens(n) {
   return String(n);
 }
 
+// SOURCE_LABELS 把能力来源标记翻成界面文案（与后端 capSources 的字面量一一对应）。
+const SOURCE_LABELS = { upstream: '上游', modelsdev: 'models.dev', user: '已覆盖' };
+
 function capBadges(m) {
   const out = [];
   if (m.supportsToolCall) out.push('工具');
   if (m.supportsImages) out.push('图片');
   if (m.supportsVideo) out.push('视频');
   if (m.supportsReasoning) out.push('思考');
-  return out.length ? out.map((x) => `<span class="tag">${x}</span>`).join(' ') : '—';
+  if (!out.length) return '—';
+  // 来源标记：六个键里只要有一个不是上游声明的，就标出来，免得把「外部数据补的」
+  // 当成「上游真实值」。
+  const src = m.capSources || {};
+  const extra = [...new Set(Object.values(src).filter((v) => v && v !== 'upstream'))];
+  const marks = extra.map((v) => `<span class="tag">${SOURCE_LABELS[v] || v}</span>`).join(' ');
+  return out.map((x) => `<span class="tag">${x}</span>`).join(' ') + (marks ? ' ' + marks : '');
+}
+
+// reasoningHint 展示该模型认识的思考档位（未声明时不显示，避免占满表格）。
+function reasoningHint(m) {
+  const levels = m.reasoningLevels || [];
+  if (!levels.length) return '';
+  const tag = m.reasoningSource === 'modelsdev' ? ' <span class="tag">models.dev</span>' : '';
+  return `<br><span class="hint" style="font-size:10.5px">档位：${levels.map(esc).join(' / ')}${tag}</span>`;
 }
 
 function modelFiltered() {
@@ -96,7 +113,7 @@ function renderModels() {
   } else {
     tbody.innerHTML = rows.map((m) => `
       <tr data-provider="${esc(m.provider)}" data-id="${esc(m.id)}">
-        <td><b>${esc(m.id)}</b>${m.name && m.name !== m.id ? `<br><span class="tag">${esc(m.name)}</span>` : ''}</td>
+        <td><b>${esc(m.id)}</b>${m.name && m.name !== m.id ? `<br><span class="tag">${esc(m.name)}</span>` : ''}${reasoningHint(m)}</td>
         <td>${esc(m.providerLabel || m.provider)}</td>
         <td>${m.isCustom ? '<span class="tag">自定义</span>' : esc(m.source === 'remote' ? '实时' : '内置')}</td>
         <td>${fmtModelTokens(m.capabilities.maxInputTokens)}</td>
@@ -222,6 +239,16 @@ function openAliasDialog(provider, target) {
   };
 }
 
+// reasoningOptionsFor 优先用该模型真实认识的档位（models.dev / 上游声明），
+// 没有时才回落通用表 —— 让用户只看到能绑的档。
+function reasoningOptionsFor(modelId, current) {
+  const view = modelView();
+  const row = (view.models || []).find((m) => m.id === modelId);
+  let levels = (row && row.reasoningLevels && row.reasoningLevels.length) ? row.reasoningLevels : REASONING_LEVELS;
+  if (current && !levels.includes(current)) levels = [current, ...levels];
+  return levels.map((l) => `<option value="${esc(l)}" ${l === current ? 'selected' : ''}>${esc(l)}</option>`).join('');
+}
+
 function openMappingEditDialog(row) {
   const level = row.reasoning || '';
   openModelDialog(row.isDefault ? '设置思考等级' : '编辑映射', `
@@ -231,7 +258,7 @@ function openMappingEditDialog(row) {
       <label>思考等级
         <select id="mapLevel">
           <option value="">不覆盖</option>
-          ${REASONING_LEVELS.map((l) => `<option value="${l}" ${l === level ? 'selected' : ''}>${l}</option>`).join('')}
+          ${reasoningOptionsFor(row.target, level)}
         </select>
       </label>
       <label class="row" style="gap:8px"><input type="checkbox" id="mapEnabled" ${row.enabled ? 'checked' : ''}> 启用这条映射</label>

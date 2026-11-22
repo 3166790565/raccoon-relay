@@ -320,7 +320,9 @@ func main() {
 	modelMgr := modelrules.NewManager(context.Background(), st)
 	srv.SetModelRules(modelMgr.Rules)
 	panel.SetModelCatalog(catalog, modelMgr, snClient)
-	// 面板里改过的选号策略/重试策略优先于环境变量，保证重启后仍然生效
+	// 面板里改过的选号策略/重试策略优先于环境变量，保证重启后仍然生效。
+	// 同时装载出站策略（脱敏 / 开发者角色兼容 / models.dev），并把元数据
+	// 查询入口推给数据面 —— 必须在 srv.SetModelRules 之后调用。
 	panel.ApplyStoredSettings(context.Background())
 
 	// 首次启动自动生成一把 API Key，避免开机后无从调用
@@ -372,6 +374,31 @@ func main() {
 	if sch != nil {
 		go sch.Run(ctx)
 	}
+
+	// models.dev 元数据的每日刷新：与「模型目录刷新」同节奏。
+	// 只在多副本里选一个实例跑（复用 pool-tick 同一把分布式锁的独立性：
+	// 这里用单独的 model-meta-refresh 锁，互不阻塞）。
+	// 首次启动等 2 分钟再拉，避免与登录 / 目录首刷抢带宽；之后每 24 小时一次。
+	go func() {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(2 * time.Minute):
+		}
+		ticker := time.NewTicker(admin.ModelsDevInterval())
+		defer ticker.Stop()
+		for {
+			if release, ok := rds.Lock(ctx, "model-meta-refresh", 20*time.Minute); ok {
+				panel.RefreshModelsDev(ctx)
+				release()
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
 
 	// 主动续期：token 是 30 天有效期的 JWT，转发路径只在有请求打到这个号时才刷新。
 	// 冷门号可能长期不被选中，到期后直接从号池消失且再也不会被触发刷新。

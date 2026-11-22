@@ -15,6 +15,7 @@ import (
 	"github.com/3166790565/raccoon-relay/internal/config"
 	"github.com/3166790565/raccoon-relay/internal/pool"
 	"github.com/3166790565/raccoon-relay/internal/raccoon"
+	"github.com/3166790565/raccoon-relay/internal/sanitize"
 	"github.com/3166790565/raccoon-relay/internal/store"
 )
 
@@ -1010,5 +1011,70 @@ func TestAllAccountsFailKeepsLastAccount(t *testing.T) {
 	}
 	if res.AccountID == "" {
 		t.Fatal("全池失败时应保留最后尝试的账号")
+	}
+}
+
+// ---- 出站策略（脱敏 / 开发者角色兼容）----
+
+// 开启后，发往上游的副本里 developer 角色被归一为 system、命中词表的文本被改写；
+// 客户端收到的响应不受影响。
+func TestGatewayPolicyRewritesUpstreamBody(t *testing.T) {
+	t.Cleanup(func() { SetGatewayPolicy(GatewayPolicy{}) })
+	rules, err := sanitize.Compile([]sanitize.Rule{{
+		ID: "acme", Name: "ACME", Enabled: true, MatchType: sanitize.MatchLiteral,
+		Pattern: "ACME-CORP", Replacement: "example",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	SetGatewayPolicy(GatewayPolicy{
+		SanitizeOn:          true,
+		SanitizeRules:       rules,
+		DeveloperRoleCompat: true,
+	})
+
+	h := newHarness(t, []chatResult{{status: 200, frames: sseFrames("ok"), usage: usageFrame}})
+	h.addAccount(t, "pu-1", 100)
+
+	w := h.do(t, "POST", "/v1/chat/completions",
+		`{"model":"sn-test-model","messages":[`+
+			`{"role":"developer","content":"You work at ACME-CORP"},`+
+			`{"role":"user","content":"hi ACME-CORP"}]}`)
+	if w.Code != 200 {
+		t.Fatalf("期望 200，实际 %d：%s", w.Code, w.Body.String())
+	}
+	if len(h.up.bodies) != 1 {
+		t.Fatalf("应有一次上游调用，实际 %d", len(h.up.bodies))
+	}
+	sent := h.up.bodies[0]
+	if strings.Contains(sent, `"role":"developer"`) {
+		t.Fatalf("developer 角色未归一: %s", sent)
+	}
+	if strings.Contains(sent, "ACME-CORP") {
+		t.Fatalf("脱敏未生效: %s", sent)
+	}
+	if !strings.Contains(sent, `"role":"system"`) || !strings.Contains(sent, "example") {
+		t.Fatalf("改写后的内容缺失: %s", sent)
+	}
+	// 客户端响应仍是上游内容（脱敏只改副本）。
+	if !strings.Contains(w.Body.String(), `"ok"`) {
+		t.Fatalf("响应异常: %s", w.Body.String())
+	}
+}
+
+// 关闭时原样透传（零拷贝路径）。
+func TestGatewayPolicyDisabledIsTransparent(t *testing.T) {
+	t.Cleanup(func() { SetGatewayPolicy(GatewayPolicy{}) })
+	SetGatewayPolicy(GatewayPolicy{})
+
+	h := newHarness(t, []chatResult{{status: 200, frames: sseFrames("ok"), usage: usageFrame}})
+	h.addAccount(t, "pu-1", 100)
+	w := h.do(t, "POST", "/v1/chat/completions",
+		`{"model":"sn-test-model","messages":[{"role":"developer","content":"keep me"}]}`)
+	if w.Code != 200 {
+		t.Fatalf("期望 200，实际 %d", w.Code)
+	}
+	if !strings.Contains(h.up.bodies[0], `"role":"developer"`) {
+		t.Fatalf("关闭后不应改写角色: %s", h.up.bodies[0])
 	}
 }

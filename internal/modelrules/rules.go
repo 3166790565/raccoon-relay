@@ -97,10 +97,47 @@ type snapshot struct {
 	Capabilities []CapabilityOverride `json:"capabilities"`
 }
 
+// MetaRecord 是 models.dev 补进来的一条元数据（只留网关会用到的字段）。
+type MetaRecord struct {
+	Reasoning *bool
+	ToolCall  *bool
+	Images    *bool
+	Video     *bool
+	Context   *int64
+	Output    *int64
+	Levels    []string
+}
+
+// MetaInfo 是 models.dev 元数据的只读视图：当前快照的来源、条数与查询函数。
+// 装配层注入（relay 不 import modelmeta，避免按需加载时多一层依赖）。
+type MetaInfo struct {
+	Source    string
+	UpdatedAt int64
+	Count     int
+	Enabled   bool
+	Lookup    func(model string) *MetaRecord
+}
+
 // Rules 是规则的进程内快照。读写都过 mu；读多写少，写时整份替换。
 type Rules struct {
 	mu   sync.RWMutex
 	snap snapshot
+	// meta 是 models.dev 元数据的查询入口（nil = 未接入，只显示上游声明）。
+	meta *MetaInfo
+}
+
+// SetMeta 注入 models.dev 元数据查询入口。装配层与刷新链路调用。
+func (r *Rules) SetMeta(meta *MetaInfo) {
+	r.mu.Lock()
+	r.meta = meta
+	r.mu.Unlock()
+}
+
+// Meta 返回当前元数据视图（可能为 nil）。
+func (r *Rules) Meta() *MetaInfo {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.meta
 }
 
 // New 从存储加载规则。读不到或解析失败时返回空规则（管理页仍能打开）。

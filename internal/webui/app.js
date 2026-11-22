@@ -1440,6 +1440,8 @@ async function loadSettings() {
     $('setAutoClawCNManagedBase').value = s.autoClawCNManagedBase || '';
     $('setCodeArtsMainlandBase').value = s.codeArtsMainlandBase || '';
     $('setCodeArtsIntlBase').value = s.codeArtsIntlBase || '';
+    // 网关出站改写与 models.dev（同一份 /api/settings 里的字段）
+    if (typeof applyGatewayState === 'function') applyGatewayState(s);
   } catch (e) {
     $('settingsMsg').textContent = e.message;
   }
@@ -1710,6 +1712,330 @@ $('saveLogSettingsBtn').addEventListener('click', async () => {
     $('logSettingsMsg').textContent = e.message;
   }
 });
+
+// ---------- 网关 · 出站改写与 models.dev ----------
+// 脱敏词表编辑器：表格直接编辑，改动先留在 GATEWAY.rules，点「保存」才提交。
+// 三态与后端一致：未改 = 不动；空数组 = 恢复内置；数组 = 自定义。
+const GATEWAY = {
+  rules: [],            // 当前编辑中的词表
+  defaults: [],         // 内置词表（恢复用）
+  providers: [],        // 已选应用提供商（空 = 全部）
+  providerOptions: [],
+  limits: { maxRules: 200, maxNameChars: 128, maxPatternChars: 4096, maxReplacementChars: 4096 },
+  roles: ['system', 'developer', 'user', 'assistant', 'tool', 'function'],
+  custom: false,
+  restore: false,
+  dirty: false,
+};
+
+const ROLE_LABELS = { system: '系统', developer: '开发者', user: '用户', assistant: '助手', tool: '工具', function: '函数' };
+
+function cloneRules(list) {
+  return (list || []).map((r) => ({
+    id: r.id, name: r.name, enabled: r.enabled !== false,
+    matchType: r.matchType === 'regex' ? 'regex' : 'literal',
+    pattern: r.pattern || '', replacement: r.replacement || '',
+    repeat: r.repeat === true, roles: Array.isArray(r.roles) ? r.roles.slice() : [],
+  }));
+}
+
+// 前端先做与后端一致的校验，避免每次保存都等一次往返。
+function validateRule(rule, index) {
+  const lim = GATEWAY.limits;
+  const label = `第 ${index + 1} 条`;
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(rule.id)) return `${label}：id 必须是 1–64 位字母、数字、连字符或下划线`;
+  if (!rule.name.trim() || [...rule.name.trim()].length > lim.maxNameChars) return `${label}：名称不能为空且最多 ${lim.maxNameChars} 字`;
+  if (!rule.pattern.trim() || [...rule.pattern].length > lim.maxPatternChars) return `${label}：匹配内容不能为空且最多 ${lim.maxPatternChars} 字`;
+  if ([...rule.replacement].length > lim.maxReplacementChars) return `${label}：替换内容最多 ${lim.maxReplacementChars} 字`;
+  if (rule.repeat && (rule.matchType !== 'regex' || rule.replacement !== '')) return `${label}：只有正则删除规则可以启用重复清理`;
+  if (rule.matchType === 'regex') {
+    try { new RegExp(rule.pattern); } catch (e) { return `${label}：正则无效（${e.message}）`; }
+  }
+  return '';
+}
+
+function sanitizeStateText(on, custom) {
+  if (!on) return '已关闭';
+  return custom ? '已开启 · 自定义词表' : '已开启 · 内置词表';
+}
+
+function renderSanitizeProviders() {
+  const wrap = $('sanitizeProviders');
+  if (!wrap) return;
+  const selected = new Set(GATEWAY.providers);
+  wrap.innerHTML = GATEWAY.providerOptions.map((opt) => `
+    <label class="chip ${selected.has(opt.id) ? 'on' : ''}" data-provider="${esc(opt.id)}">
+      <input type="checkbox" ${selected.has(opt.id) ? 'checked' : ''}>${esc(opt.label || opt.id)}
+    </label>`).join('');
+  wrap.querySelectorAll('.chip').forEach((chip) => {
+    chip.addEventListener('click', (e) => {
+      e.preventDefault();
+      const id = chip.dataset.provider;
+      const set = new Set(GATEWAY.providers);
+      if (set.has(id)) set.delete(id); else set.add(id);
+      GATEWAY.providers = [...set];
+      GATEWAY.dirty = true;
+      renderSanitizeProviders();
+    });
+  });
+}
+
+function roleToggles(rule) {
+  // 空列表 = 全字段；一旦点了某个角色，就变成「只作用于这些角色的正文」。
+  const active = new Set(rule.roles);
+  return GATEWAY.roles.map((role) => `
+    <span class="role-toggle ${active.has(role) ? 'on' : ''}" data-role="${role}">${ROLE_LABELS[role] || role}</span>`).join('');
+}
+
+function renderSanitizeTable() {
+  const tbody = document.querySelector('#sanitizeTable tbody');
+  if (!tbody) return;
+  if (!GATEWAY.rules.length) {
+    tbody.innerHTML = '<tr><td colspan="7" class="hint">词表为空。点「新增规则」或「恢复内置词表」。</td></tr>';
+  } else {
+    tbody.innerHTML = GATEWAY.rules.map((rule, i) => `
+      <tr data-index="${i}">
+        <td><label class="switch"><input type="checkbox" data-field="enabled" ${rule.enabled ? 'checked' : ''}><span></span></label></td>
+        <td>
+          <input type="text" data-field="name" value="${esc(rule.name)}" placeholder="名称">
+          <input type="text" data-field="id" value="${esc(rule.id)}" placeholder="id" style="margin-top:4px;font-family:var(--font-mono)">
+        </td>
+        <td>
+          <select data-field="matchType">
+            <option value="literal" ${rule.matchType === 'literal' ? 'selected' : ''}>字面</option>
+            <option value="regex" ${rule.matchType === 'regex' ? 'selected' : ''}>正则</option>
+          </select>
+          <label class="hint" style="display:flex;gap:5px;align-items:center;margin-top:6px;font-size:10.5px">
+            <input type="checkbox" data-field="repeat" ${rule.repeat ? 'checked' : ''}> 重复清理
+          </label>
+        </td>
+        <td><textarea data-field="pattern" rows="2" placeholder="匹配内容">${esc(rule.pattern)}</textarea></td>
+        <td><textarea data-field="replacement" rows="2" placeholder="留空 = 删除">${esc(rule.replacement)}</textarea></td>
+        <td class="roles-cell">${roleToggles(rule)}</td>
+        <td class="row" style="gap:4px"><button class="danger tiny" data-act="del">删</button></td>
+      </tr>`).join('');
+  }
+  $('sanitizeCount').textContent = `${GATEWAY.rules.length} 条`;
+  $('sanitizeModeTag').textContent = GATEWAY.restore ? '将恢复内置' : (GATEWAY.dirty ? '未保存' : (GATEWAY.custom ? '自定义' : '内置'));
+}
+
+function bindSanitizeTable() {
+  const tbody = document.querySelector('#sanitizeTable tbody');
+  if (!tbody || tbody.dataset.bound) return;
+  tbody.dataset.bound = '1';
+
+  tbody.addEventListener('input', (e) => {
+    const tr = e.target.closest('tr[data-index]');
+    if (!tr) return;
+    const rule = GATEWAY.rules[Number(tr.dataset.index)];
+    if (!rule) return;
+    const field = e.target.dataset.field;
+    if (!field) return;
+    if (field === 'enabled' || field === 'repeat') rule[field] = e.target.checked;
+    else rule[field] = e.target.value;
+    GATEWAY.dirty = true;
+    $('sanitizeModeTag').textContent = '未保存';
+  });
+  tbody.addEventListener('change', (e) => {
+    if (e.target.dataset.field === 'matchType') {
+      const tr = e.target.closest('tr[data-index]');
+      const rule = GATEWAY.rules[Number(tr.dataset.index)];
+      if (rule) { rule.matchType = e.target.value; GATEWAY.dirty = true; }
+    }
+  });
+  tbody.addEventListener('click', (e) => {
+    const tr = e.target.closest('tr[data-index]');
+    if (!tr) return;
+    const rule = GATEWAY.rules[Number(tr.dataset.index)];
+    if (!rule) return;
+    if (e.target.closest('button[data-act=del]')) {
+      GATEWAY.rules.splice(Number(tr.dataset.index), 1);
+      GATEWAY.dirty = true;
+      renderSanitizeTable();
+      return;
+    }
+    const role = e.target.closest('.role-toggle');
+    if (role) {
+      const set = new Set(rule.roles);
+      if (set.has(role.dataset.role)) set.delete(role.dataset.role); else set.add(role.dataset.role);
+      rule.roles = GATEWAY.roles.filter((r) => set.has(r));
+      GATEWAY.dirty = true;
+      renderSanitizeTable();
+    }
+  });
+}
+
+function applySanitizeState(s) {
+  GATEWAY.providerOptions = Array.isArray(s.sanitizeProviderOptions) ? s.sanitizeProviderOptions : [];
+  GATEWAY.defaults = cloneRules(s.sanitizeDefaults);
+  GATEWAY.limits = Object.assign(GATEWAY.limits, s.sanitizeLimits || {});
+  GATEWAY.providers = Array.isArray(s.sanitizeProviders) ? s.sanitizeProviders.slice() : [];
+  GATEWAY.custom = s.sanitizeCustomRules === true;
+  if (!GATEWAY.dirty) {
+    GATEWAY.rules = cloneRules(s.sanitizeRules);
+    renderSanitizeTable();
+  }
+  const on = s.sanitizeEnabled === true;
+  $('setSanitizeEnabled').checked = on;
+  $('sanitizeStateTag').textContent = sanitizeStateText(on, GATEWAY.custom);
+  renderSanitizeProviders();
+}
+
+// models.dev 状态 → 面板读数。
+function applyModelsDevState(s) {
+  const on = s.modelsDevEnabled === true;
+  $('setModelsDevEnabled').checked = on;
+  $('modelsDevStateTag').textContent = on ? '已开启' : '已关闭（现有数据继续用）';
+  const src = s.modelsDevSource === 'builtin' ? '随包内嵌快照'
+    : s.modelsDevSource === 'cache' ? '上次刷新的缓存'
+      : s.modelsDevSource === 'network' ? '联网拉取' : '—';
+  $('modelsDevSource').textContent = src;
+  $('modelsDevCount').textContent = s.modelsDevCount ? `${Number(s.modelsDevCount).toLocaleString('zh-CN')} 条` : '—';
+  $('modelsDevUpdated').textContent = s.modelsDevUpdatedAt ? fmtTime(s.modelsDevUpdatedAt) : '—';
+  $('modelsDevLastRefresh').textContent = s.modelsDevLastRefreshAt
+    ? `${s.modelsDevLastRefresh || ''} · ${fmtTime(s.modelsDevLastRefreshAt)}`
+    : '尚未手动刷新';
+}
+
+function applyGatewayState(s) {
+  applySanitizeState(s);
+  applyModelsDevState(s);
+  const role = s.developerRoleCompat !== false;
+  $('setDeveloperRoleCompat').checked = role;
+  $('roleCompatStateTag').textContent = role ? '已开启' : '已关闭';
+}
+
+// 打开设置页时单独拉一次网关状态（与 /api/settings 同源，避免漏项）。
+async function loadGatewaySettings() {
+  try {
+    const r = await api('/api/settings');
+    applyGatewayState(r.settings || {});
+  } catch (e) {
+    $('sanitizeMsg').textContent = e.message;
+  }
+}
+
+function bindGatewayEvents() {
+  if (!$('saveGatewayToggleBtn')) return;
+
+  $('setSanitizeEnabled').addEventListener('change', () => {
+    $('sanitizeStateTag').textContent = sanitizeStateText($('setSanitizeEnabled').checked, GATEWAY.custom);
+  });
+  $('setDeveloperRoleCompat').addEventListener('change', () => {
+    $('roleCompatStateTag').textContent = $('setDeveloperRoleCompat').checked ? '已开启' : '已关闭';
+  });
+
+  $('sanitizeAddRule').addEventListener('click', () => {
+    if (GATEWAY.rules.length >= GATEWAY.limits.maxRules) {
+      $('sanitizeMsg').textContent = `词表最多 ${GATEWAY.limits.maxRules} 条`;
+      return;
+    }
+    GATEWAY.rules.push({
+      id: 'rule-' + Date.now().toString(36), name: '新规则', enabled: true,
+      matchType: 'literal', pattern: '', replacement: '', repeat: false, roles: [],
+    });
+    GATEWAY.dirty = true;
+    renderSanitizeTable();
+  });
+
+  $('sanitizeRestore').addEventListener('click', () => {
+    if (!confirm('恢复内置词表？当前编辑中的规则会被丢弃。')) return;
+    GATEWAY.rules = cloneRules(GATEWAY.defaults);
+    GATEWAY.restore = true;
+    GATEWAY.dirty = true;
+    renderSanitizeTable();
+  });
+
+  $('sanitizeExport').addEventListener('click', () => {
+    const blob = new Blob([JSON.stringify(GATEWAY.rules, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'raccoon-sanitize-rules.json';
+    a.click();
+    URL.revokeObjectURL(a.href);
+  });
+
+  $('sanitizeImport').addEventListener('change', async (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    try {
+      const list = JSON.parse(await file.text());
+      if (!Array.isArray(list)) throw new Error('文件内容必须是规则数组');
+      GATEWAY.rules = cloneRules(list);
+      GATEWAY.restore = false;
+      GATEWAY.dirty = true;
+      renderSanitizeTable();
+      $('sanitizeMsg').textContent = '已导入，点「保存」生效';
+    } catch (err) {
+      $('sanitizeMsg').textContent = '导入失败：' + err.message;
+    } finally {
+      e.target.value = '';
+    }
+  });
+
+  bindSanitizeTable();
+
+  // 保存：先本地校验，再整体提交（后端会再做一次完整校验）。
+  $('saveGatewayToggleBtn').addEventListener('click', async () => {
+    for (let i = 0; i < GATEWAY.rules.length; i++) {
+      const err = validateRule(GATEWAY.rules[i], i);
+      if (err) { $('sanitizeMsg').textContent = err; return; }
+    }
+    const ids = new Set();
+    for (const rule of GATEWAY.rules) {
+      if (ids.has(rule.id)) { $('sanitizeMsg').textContent = `规则 id 重复：${rule.id}`; return; }
+      ids.add(rule.id);
+    }
+    const body = {
+      sanitizeEnabled: $('setSanitizeEnabled').checked,
+      developerRoleCompat: $('setDeveloperRoleCompat').checked,
+      sanitizeProviders: GATEWAY.providers,
+      // 恢复内置 = 提交空数组（后端据此回落内置词表）。
+      sanitizeRules: GATEWAY.restore ? [] : GATEWAY.rules,
+    };
+    $('sanitizeMsg').textContent = '保存中…';
+    try {
+      await api('/api/settings', { method: 'PUT', body: JSON.stringify(body) });
+      GATEWAY.dirty = false;
+      GATEWAY.restore = false;
+      $('sanitizeMsg').textContent = '已保存，下一个请求立即生效';
+      toast('网关出站策略已保存');
+      await loadGatewaySettings();
+    } catch (e) {
+      $('sanitizeMsg').textContent = e.message;
+    }
+  });
+
+  $('saveModelsDevBtn').addEventListener('click', async () => {
+    $('modelsDevMsg').textContent = '保存中…';
+    try {
+      await api('/api/settings', {
+        method: 'PUT',
+        body: JSON.stringify({ modelsDevEnabled: $('setModelsDevEnabled').checked }),
+      });
+      $('modelsDevMsg').textContent = '已保存';
+      await loadGatewaySettings();
+      // 能力补齐状态变了，模型管理页的来源标记也要跟着刷新。
+      if (STATE.loaded.has('models')) loadModels();
+    } catch (e) {
+      $('modelsDevMsg').textContent = e.message;
+    }
+  });
+
+  $('refreshModelsDevBtn').addEventListener('click', async () => {
+    $('modelsDevMsg').textContent = '正在拉取 models.dev…（首次可能几秒）';
+    try {
+      const r = await api('/api/gateway/modelsdev/refresh', { method: 'POST' });
+      $('modelsDevMsg').textContent = (r.ok ? '' : '未刷新：') + (r.message || '');
+      await loadGatewaySettings();
+      if (r.ok && STATE.loaded.has('models')) loadModels();
+    } catch (e) {
+      $('modelsDevMsg').textContent = e.message;
+    }
+  });
+}
+
+bindGatewayEvents();
 
 // ---------- 调用日志 ----------
 // 服务端分页 + 筛选：日志可能有几十万条，一次只取一页，筛选条件交给 SQL。

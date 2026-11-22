@@ -1143,6 +1143,102 @@
       </section>
 
       <section class="card">
+        <h2>网关 · 出站改写</h2>
+        <p class="hint">以下三项都<strong>只改发给上游的副本</strong>：客户端发来的原文不受影响，
+          上游返回的响应也原样回给客户端。保存后下一个请求立即生效，无需重启。</p>
+
+        <div class="field" style="margin-top:12px">
+          <label class="row" style="gap:8px;align-items:center">
+            <label class="switch"><input type="checkbox" id="setSanitizeEnabled"><span></span></label>
+            出站请求指纹脱敏
+            <span class="tag" id="sanitizeStateTag">—</span>
+          </label>
+        </div>
+        <p class="hint">开启后按下面的词表改写发给上游的文本（system / user / assistant 等消息正文、
+          推理内容与工具参数）。上游按「连续文本」逐字识别客户端指纹，这些规则只做<b>最小改写</b>，
+          让指纹失配即可，不会改动你的项目规范与工具说明。<br>
+          <strong>应用提供商</strong>：留空 = 全部提供商（含之后新增的）；勾选后只对勾选的生效。
+          小浣熊、日日新与外部渠道（AutoClaw / 码道）都在出站前经过这一层。</p>
+        <div class="divider-row">
+          <span class="hint" style="margin:0">应用提供商</span>
+          <span id="sanitizeProviders" class="chip-row"></span>
+        </div>
+
+        <div class="cardhead" style="margin-top:14px">
+          <h3 style="margin:0;font-size:13px">脱敏词表
+            <span class="tag" id="sanitizeCount">0 条</span>
+            <span class="tag" id="sanitizeModeTag">内置</span>
+          </h3>
+          <div class="row" style="gap:6px">
+            <button class="ghost tiny" id="sanitizeAddRule">＋ 新增规则</button>
+            <button class="ghost tiny" id="sanitizeRestore">恢复内置词表</button>
+            <button class="ghost tiny" id="sanitizeExport">导出</button>
+            <label class="ghost tiny" style="cursor:pointer;padding:5px 9px">导入
+              <input type="file" id="sanitizeImport" accept="application/json" hidden>
+            </label>
+          </div>
+        </div>
+        <div class="tablewrap">
+          <table id="sanitizeTable">
+            <thead><tr>
+              <th>启用</th><th>名称 / ID</th><th>匹配方式</th><th>匹配内容</th>
+              <th>替换为</th><th>作用角色</th><th></th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p class="hint">正则删除规则可以勾选「重复清理」，直到文本不再变化（用于清理嵌套残留）。
+          其余规则只执行一轮，避免文本被反复扩张而无法收敛。</p>
+        <p class="msg" id="sanitizeMsg"></p>
+
+        <hr class="hr">
+
+        <div class="field">
+          <label class="row" style="gap:8px;align-items:center">
+            <label class="switch"><input type="checkbox" id="setDeveloperRoleCompat"><span></span></label>
+            开发者角色兼容
+            <span class="tag" id="roleCompatStateTag">—</span>
+          </label>
+        </div>
+        <p class="hint">OpenAI 新版 API 用 <code>developer</code> 取代 <code>system</code> 承载指令，
+          但部分 OpenAI 兼容上游不认识这个角色，会直接 400。开启后转发前把
+          <code>role:"developer"</code> 的消息改写为 <code>"system"</code>：只改 role 字段本身，
+          消息内容与顺序都不动。默认开启，三个渠道都在出站前经过这一层。</p>
+        <button class="primary" id="saveGatewayToggleBtn">保存开关</button>
+        <p class="msg" id="gatewayToggleMsg"></p>
+      </section>
+
+      <section class="card">
+        <h2>models.dev 模型元数据</h2>
+        <p class="hint">models.dev 是一个开源的模型资料库（社区维护）。这里用它补齐「上游没告诉我们」
+          的模型能力：上下文窗口、最大输出、工具调用、图片、视频、是否支持思考，以及这个模型认识哪些思考档位。<br>
+          优先级是：<strong>你在「模型管理 → 能力」里手工改的值 &gt; 上游清单自己声明的值 &gt; models.dev 的值</strong>
+          —— 它只填上游没声明的空位，从不推翻上游已声明的。网关随包内嵌了一份快照，所以离线、
+          首次启动、访问不通时也有数据；开启后每天自动联网刷新一次，也可在这里立即刷新。
+          关闭只停联网刷新，已经拿到的数据继续用。</p>
+        <div class="field">
+          <label class="row" style="gap:8px;align-items:center">
+            <label class="switch"><input type="checkbox" id="setModelsDevEnabled"><span></span></label>
+            启用 models.dev 元数据
+            <span class="tag" id="modelsDevStateTag">—</span>
+          </label>
+        </div>
+        <div class="stat-grid">
+          <div><span class="q-label">数据来源</span><b id="modelsDevSource">—</b></div>
+          <div><span class="q-label">收录模型</span><b id="modelsDevCount">—</b></div>
+          <div><span class="q-label">快照时间</span><b id="modelsDevUpdated">—</b></div>
+          <div><span class="q-label">最近刷新</span><b id="modelsDevLastRefresh">—</b></div>
+        </div>
+        <p class="hint">「模型管理」里每个能力的来源标记（上游 / models.dev / 已覆盖）读的就是这份数据；
+          /v1/models 广告的能力位也按同一优先级补齐。</p>
+        <div class="row">
+          <button class="primary" id="saveModelsDevBtn">保存</button>
+          <button id="refreshModelsDevBtn">立即刷新</button>
+        </div>
+        <p class="msg" id="modelsDevMsg"></p>
+      </section>
+
+      <section class="card">
         <h2>主动续期</h2>
         <div class="grid2">
           <div class="field"><label>提前续期（天）</label><input type="number" id="setRenewWindowDays" min="0" max="30" step="0.5"></div>

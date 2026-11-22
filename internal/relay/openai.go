@@ -389,19 +389,79 @@ func (s *Server) HandleModels(w http.ResponseWriter, r *http.Request) {
 		if s.Rules != nil && s.Rules.Hidden(m.ID) {
 			continue
 		}
-		data = append(data, map[string]any{
-			"id": m.ID, "object": "model", "created": now, "owned_by": "raccoon",
-		})
+		data = append(data, s.modelEntry(m, m.ID, now))
 		// 指向这个模型的显式别名也一并广告，客户端才能请求它。
+		// alias == 上游 id 是模型行的默认绑定，已经作为上面的条目出现过，
+		// 再广告一次会出现两条同 id 的条目（客户端下拉里重复）。
 		if s.Rules != nil {
 			for _, alias := range s.Rules.AliasesOf(m.ID) {
-				data = append(data, map[string]any{
-					"id": alias, "object": "model", "created": now, "owned_by": "raccoon",
-				})
+				if alias == m.ID {
+					continue
+				}
+				data = append(data, s.modelEntry(m, alias, now))
 			}
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data})
+}
+
+// modelEntry 生成 /v1/models 的一条条目。上游已声明的能力原样广告，
+// 上游没声明的位由 models.dev 补齐（优先级：上游声明 > models.dev > 不广告）。
+// 只补「好数据」是对的键：上游给了就不动，避免拿外部数据否认本通道的实测事实。
+func (s *Server) modelEntry(m raccoon.Model, id string, now int64) map[string]any {
+	entry := map[string]any{"id": id, "object": "model", "created": now, "owned_by": "raccoon"}
+	declared := map[string]any{}
+	if m.ContextLength > 0 {
+		declared["maxInputTokens"] = m.ContextLength
+	}
+	if m.MaxOutputTokens > 0 {
+		declared["maxOutputTokens"] = m.MaxOutputTokens
+	}
+	if m.SupportsTools {
+		declared["supportsToolCall"] = true
+	}
+	if m.SupportsImages {
+		declared["supportsImages"] = true
+	}
+	if m.SupportsReason {
+		declared["supportsReasoning"] = true
+	}
+	var rec *MetaRecord
+	if s.CapMeta != nil {
+		rec = s.CapMeta(stripProviderPrefix(id))
+	}
+	for _, key := range []string{"maxInputTokens", "maxOutputTokens", "supportsToolCall", "supportsImages", "supportsReasoning"} {
+		if v, ok := declared[key]; ok {
+			entry[key] = v
+			continue
+		}
+		if rec == nil {
+			continue
+		}
+		switch key {
+		case "maxInputTokens":
+			if rec.Context != nil {
+				entry[key] = *rec.Context
+			}
+		case "maxOutputTokens":
+			if rec.Output != nil {
+				entry[key] = *rec.Output
+			}
+		case "supportsToolCall":
+			if rec.ToolCall != nil {
+				entry[key] = *rec.ToolCall
+			}
+		case "supportsImages":
+			if rec.Images != nil {
+				entry[key] = *rec.Images
+			}
+		case "supportsReasoning":
+			if rec.Reasoning != nil {
+				entry[key] = *rec.Reasoning
+			}
+		}
+	}
+	return entry
 }
 
 func boolOf(v any) bool {
