@@ -7,7 +7,7 @@
  *
  * 所有写接口都回整份 view，前端就地重绘，不再单独拉一次。 */
 
-const MODEL_STATE = { view: null, busy: false };
+const MODEL_STATE = { view: null, busy: false, provider: '' };
 
 const MODEL_CAP_LABELS = {
   maxInputTokens: '上下文',
@@ -52,7 +52,7 @@ function capBadges(m) {
 function modelFiltered() {
   const view = modelView();
   const q = $('modelSearch').value.trim().toLowerCase();
-  const provider = $('modelProvider').value;
+  const provider = MODEL_STATE.provider;
   const state = $('modelState').value;
   return view.models.filter((m) => {
     if (provider && m.provider !== provider) return false;
@@ -67,13 +67,27 @@ function modelFiltered() {
 function renderModels() {
   const view = modelView();
 
-  // 供应商下拉：保留当前选项，避免刷新后跳回「全部」。
-  const sel = $('modelProvider');
-  const keep = sel.value;
+  // 左侧渠道栏：内置供应商 + 「全部」；每个渠道显示模型数。
+  // 选中的渠道若已不存在（账号被删 / 上游清空），回落到「全部」。
   const providers = view.providers || [];
-  sel.innerHTML = '<option value="">全部供应商</option>' +
-    providers.map((p) => `<option value="${esc(p.provider)}">${esc(p.providerLabel || p.provider)}（${p.count}）</option>`).join('');
-  sel.value = keep;
+  const ids = new Set(providers.map((p) => p.provider));
+  if (MODEL_STATE.provider && !ids.has(MODEL_STATE.provider)) MODEL_STATE.provider = '';
+  const rail = $('modelRail');
+  if (rail) {
+    const total = view.models.length;
+    rail.innerHTML =
+      `<button class="rail-item ${MODEL_STATE.provider === '' ? 'active' : ''}" data-provider="">
+         <span>全部渠道</span><span class="n">${total}</span></button>` +
+      providers.map((p) => `
+        <button class="rail-item ${MODEL_STATE.provider === p.provider ? 'active' : ''}"
+                data-provider="${esc(p.provider)}">
+          <span>${esc(p.providerLabel || p.provider)}</span>
+          <span class="n">${p.count}</span>
+        </button>`).join('');
+  }
+  const cur = providers.find((p) => p.provider === MODEL_STATE.provider);
+  const title = $('modelTitle');
+  if (title) title.textContent = cur ? (cur.providerLabel || cur.provider) : '模型';
 
   const rows = modelFiltered();
   const tbody = document.querySelector('#modelTable tbody');
@@ -312,7 +326,12 @@ document.addEventListener('DOMContentLoaded', () => {
   const search = $('modelSearch');
   if (search) {
     search.addEventListener('input', renderModels);
-    $('modelProvider').addEventListener('change', renderModels);
+    $('modelRail')?.addEventListener('click', (e) => {
+      const btn = e.target.closest('.rail-item');
+      if (!btn) return;
+      MODEL_STATE.provider = btn.dataset.provider || '';
+      renderModels();
+    });
     $('modelState').addEventListener('change', renderModels);
     $('modelRefreshBtn').addEventListener('click', loadModels);
     $('modelAddCustomBtn').addEventListener('click', openCustomDialog);

@@ -240,20 +240,19 @@ func (p *Panel) writeModelManage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"ok": true, "view": view})
 }
 
-// modelCatalogs 把日日新的实时清单包成 modelrules 的中立形状。
-// 这里只读本地 Catalog 缓存，不触发上游请求（避免管理页每次刷新都打上游）。
+// modelCatalogs 把上游实时清单包成模型页的中立形状，按供应商分组。
+//
+// 只读本地 Catalog 缓存，不触发上游请求（避免管理页每次刷新都打上游）。
+// 日日新与小浣熊都要列出来：各自有独立的模型阵容和订阅品类，
+// 少一家就会出现「号池里有号、模型页里看不到它家的模型」。
 func (p *Panel) modelCatalogs(r *http.Request) []modelrules.ProviderCatalog {
 	if p.modelCatalog == nil {
 		return nil
 	}
 	live := p.modelCatalog.List(r.Context())
-	out := make([]modelrules.CatalogModel, 0, len(live))
+	var sn, rc []modelrules.CatalogModel
 	for _, m := range live {
-		// 只有日日新模型交给模型页；小浣熊的模型由它自己的目录决定。
-		if !sensenova.IsKnownModel(m.ID) {
-			continue
-		}
-		out = append(out, modelrules.CatalogModel{
+		item := modelrules.CatalogModel{
 			ID:              m.ID,
 			Name:            m.Name,
 			ContextLength:   m.ContextLength,
@@ -261,14 +260,25 @@ func (p *Panel) modelCatalogs(r *http.Request) []modelrules.ProviderCatalog {
 			SupportsImages:  m.SupportsImages,
 			SupportsTools:   m.SupportsTools,
 			SupportsReason:  m.SupportsReason,
+		}
+		if sensenova.IsKnownModel(m.ID) {
+			sn = append(sn, item)
+		} else {
+			rc = append(rc, item)
+		}
+	}
+	out := make([]modelrules.ProviderCatalog, 0, 2)
+	if len(rc) > 0 {
+		out = append(out, modelrules.ProviderCatalog{
+			Provider: store.ProviderRaccoon, Label: "小浣熊", Models: rc, Source: "remote",
 		})
 	}
-	if len(out) == 0 {
-		return nil
+	if len(sn) > 0 {
+		out = append(out, modelrules.ProviderCatalog{
+			Provider: store.ProviderSenseNova, Label: "日日新", Models: sn, Source: "remote",
+		})
 	}
-	return []modelrules.ProviderCatalog{{
-		Provider: store.ProviderSenseNova, Label: "日日新", Models: out, Source: "remote",
-	}}
+	return out
 }
 
 func writeModelRuleError(w http.ResponseWriter, err error) {

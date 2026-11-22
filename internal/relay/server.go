@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -94,9 +95,11 @@ func (c *Catalog) fetch(ctx context.Context) []raccoon.Model {
 		if a.Token == "" || len(raccoonModels) > 0 {
 			continue
 		}
-		if models, err := c.Client.Catalog(ctx, a.Token, identityOf(a)); err == nil && len(models) > 0 {
-			raccoonModels = models
+		seen, err := c.fetchRaccoonCatalog(ctx, a)
+		if err != nil || len(seen) == 0 {
+			continue // 这个号拉不动就换下一个，不能让一个坏号把整个目录清空
 		}
+		raccoonModels = seen
 	}
 	if len(snModels) == 0 {
 		// 没有任何日日新账号时，若库里只有日日新模型可选（例如只导入了账号
@@ -106,6 +109,50 @@ func (c *Catalog) fetch(ctx context.Context) []raccoon.Model {
 		}
 	}
 	return append(raccoonModels, snModels...)
+}
+
+// fetchRaccoonCatalog 拉小浣熊目录，并合并多个账号的可见项。
+//
+// 品类（模型清单）按账号订阅不同而不同：只看第一个在线号的目录，
+// 会把别的号能用的模型整个漏掉。这里最多试 maxCatalogAccounts 个号，
+// 把各自的模型按 id 去重合并；第一个号的顺序优先（目录本身是有序的）。
+func (c *Catalog) fetchRaccoonCatalog(ctx context.Context, first *store.Account) ([]raccoon.Model, error) {
+	const maxCatalogAccounts = 3
+	merged, seen := make([]raccoon.Model, 0, 32), map[string]bool{}
+	lastErr := error(nil)
+	candidates := []*store.Account{first}
+	accounts, err := c.ST.ListAccounts(ctx)
+	if err == nil {
+		for _, a := range accounts {
+			if a.ID != first.ID && !a.IsSenseNova() && a.Enabled && a.Status == store.StatusOnline && a.Token != "" {
+				candidates = append(candidates, a)
+				if len(candidates) >= maxCatalogAccounts {
+					break
+				}
+			}
+		}
+	}
+	for _, a := range candidates {
+		models, err := c.Client.Catalog(ctx, a.Token, identityOf(a))
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		for _, m := range models {
+			if m.ID == "" || seen[m.ID] {
+				continue
+			}
+			seen[m.ID] = true
+			merged = append(merged, m)
+		}
+	}
+	if len(merged) == 0 {
+		if lastErr == nil {
+			lastErr = fmt.Errorf("没有可用的目录来源")
+		}
+		return nil, lastErr
+	}
+	return merged, nil
 }
 
 func hasAnySenseNovaSeat(accounts []*store.Account) bool {

@@ -45,7 +45,8 @@ code { background: #22262f; padding: 1px 5px; border-radius: 4px; font-size: 12p
 .chip.warn { color: var(--warn); border-color: #4a3d1e; }
 .chip.bad { color: var(--bad); border-color: #4a2020; }
 
-main { max-width: 1120px; margin: 0 auto; padding: 20px; display: grid; gap: 16px; }
+main { padding: 20px 0; max-width: none; margin: 0; display: block; }
+.app-main { gap: 16px; }
 .card {
   background: var(--card); border: 1px solid var(--line);
   border-radius: 10px; padding: 18px 20px;
@@ -89,23 +90,50 @@ button.danger { color: var(--bad); border-color: #4a2020; }
 .stat .k { font-size: 12px; color: var(--dim); }
 .stat .v { font-size: 16px; font-weight: 600; margin-top: 4px; word-break: break-all; }
 
-/* 顶层标签页导航 */
+/* 顶层导航：左侧固定栏 + 右侧内容。宽屏时侧栏常驻，
+   窄屏（<=900px）退回顶部横向滚动条，避免占掉本就有限的宽度。 */
+.app-shell {
+  display: flex; align-items: flex-start; gap: 20px;
+  max-width: 1560px; margin: 0 auto; padding: 20px;
+}
 .navtabs {
-  display: flex; gap: 4px; flex-wrap: wrap;
-  border-bottom: 1px solid var(--line);
+  flex: 0 0 168px; position: sticky; top: 76px;
+  display: flex; flex-direction: column; gap: 2px;
+  border-right: 1px solid var(--line); padding-right: 12px;
 }
 .navtab {
-  background: transparent; border: 1px solid transparent; border-bottom: none;
-  border-radius: 8px 8px 0 0; padding: 9px 16px; font-size: 14px;
-  color: var(--dim); margin-bottom: -1px;
+  display: flex; align-items: center; gap: 8px;
+  background: transparent; border: 1px solid transparent;
+  border-radius: 8px; padding: 8px 12px; font-size: 14px;
+  color: var(--dim); text-align: left; width: 100%;
 }
 .navtab:hover { color: var(--fg); background: #1b1f27; }
 .navtab.active {
-  color: var(--accent); border-color: var(--line);
-  border-bottom: 1px solid var(--card); background: var(--card); font-weight: 600;
+  color: var(--accent); background: #1f1a17; border-color: #3d2c22; font-weight: 600;
+}
+.app-main { flex: 1 1 auto; min-width: 0; display: grid; gap: 16px; }
+/* grid 轨道的 min-width 默认是 auto（= max-content），内容一宽就撑破视口。
+   minmax(0, 1fr) 强制轨道可以收缩，超出部分由各页自己的 .tablewrap 滚动。 */
+.app-main > * { min-width: 0; }
+@media (max-width: 900px) {
+  .app-shell { flex-direction: column; padding: 12px; gap: 12px; }
+  .navtabs {
+    flex: 0 0 auto; position: sticky; top: 0; z-index: 9;
+    flex-direction: row; overflow-x: auto; padding: 8px 0;
+    border-right: none; border-bottom: 1px solid var(--line);
+    background: var(--bg);
+  }
+  .navtab { width: auto; white-space: nowrap; }
+  .app-main { width: 100%; }
 }
 .page { display: none; }
 .page.active { display: block; }
+/* 表格在宽屏下按 880px 展开避免逐字换行；窄屏交给 .tablewrap 横向滚动，
+   否则 min-width 会把整个 grid 轨道撑破视口。 */
+@media (min-width: 1000px) {
+  #modelTable, #mappingTable { min-width: 880px; }
+}
+#modelTable td, #modelTable th, #mappingTable td, #mappingTable th { white-space: nowrap; }
 
 .tabs { display: flex; gap: 6px; margin-bottom: 12px; }
 .tab { padding: 6px 12px; font-size: 13px; }
@@ -138,9 +166,8 @@ td.ops button { padding: 4px 9px; font-size: 12px; }
 
 /* ---------- 号池（密集表格） ---------- */
 /* 号池页比其它页宽：13 列在 1120px 里塞不下，会横向滚动到看不清。 */
-main { max-width: 1120px; }
-.page.wide { margin: 0 -80px; }
-@media (max-width: 1280px) { .page.wide { margin: 0; } }
+/* 页面宽度由外层 .app-main 控制；旧的负边距加宽技巧在侧边栏布局下会溢出。 */
+.page.wide { margin: 0; }
 
 .pool-card { padding: 0; overflow: visible; }
 .pool-toolbar {
@@ -378,8 +405,7 @@ button.tiny { padding: 4px 9px; font-size: 12px; }
 
 /* ---------- 调用日志（服务端分页） ---------- */
 /* 日志表比其它页宽：列多且要一眼扫完，加宽页面而不是挤成横向滚动。 */
-.page.xwide { margin: 0 -160px; }
-@media (max-width: 1280px) { .page.xwide { margin: 0; } }
+.page.xwide { margin: 0; }
 
 .log-card { padding: 0; overflow: visible; }
 .log-head { padding: 14px 16px 10px; margin: 0; }
@@ -868,3 +894,34 @@ button[disabled] { opacity: .5; cursor: not-allowed; }
 #page-models .model-toolbar select { flex: 0 0 auto; width: auto; min-width: 120px; }
 #page-models .model-toolbar button { flex: 0 0 auto; }
 #modelTable td .pill { margin-right: 4px; }
+
+/* ---------- 模型页：左侧渠道栏 ---------- */
+/* 与 Agent2API 一致：每个渠道一栏，显示该渠道的模型数；点击切到该渠道。 */
+.models-layout { display: flex; align-items: flex-start; gap: 16px; min-width: 0; }
+.models-rail {
+  flex: 0 0 180px; min-width: 0; position: sticky; top: 76px;
+  display: flex; flex-direction: column; gap: 2px;
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: 10px; padding: 8px;
+}
+.rail-item {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  width: 100%; padding: 7px 10px; border-radius: 7px;
+  background: transparent; border: 1px solid transparent;
+  color: var(--dim); font-size: 13px; text-align: left;
+}
+.rail-item:hover { color: var(--fg); background: #1b1f27; }
+.rail-item.active { color: var(--accent); background: #1f1a17; border-color: #3d2c22; font-weight: 600; }
+.rail-item .n {
+  font-size: 11px; color: var(--dim); background: #12151b;
+  border: 1px solid var(--line); border-radius: 10px; padding: 0 7px;
+}
+.models-main { flex: 1 1 auto; min-width: 0; display: grid; gap: 16px; }
+@media (max-width: 900px) {
+  .models-layout { flex-direction: column; }
+  .models-rail {
+    flex: 0 0 auto; position: static; width: 100%;
+    flex-direction: row; overflow-x: auto; padding: 6px;
+  }
+  .rail-item { width: auto; white-space: nowrap; }
+}

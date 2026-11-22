@@ -26,7 +26,8 @@
   </section>
 
   <div id="app" hidden>
-    <!-- 顶部标签导航 -->
+    <div class="app-shell">
+    <!-- 左侧标签导航 -->
     <nav class="navtabs" id="navTabs">
       <button class="navtab active" data-page="overview">概览</button>
       <button class="navtab" data-page="report">报表</button>
@@ -40,6 +41,7 @@
       <button class="navtab" data-page="settings">设置</button>
       <button class="navtab" data-page="update">版本更新</button>
     </nav>
+    <div class="app-main">
 
     <!-- 概览 -->
     <section class="page active" id="page-overview">
@@ -513,14 +515,16 @@
     </section>
 
     <!-- 模型管理 -->
-    <section class="page xwide" id="page-models">
+    <section class="page" id="page-models">
+      <div class="models-layout">
+        <aside class="models-rail" id="modelRail"></aside>
+        <div class="models-main">
       <section class="card">
         <div class="cardhead">
-          <h2>模型</h2>
+          <h2 id="modelTitle">模型</h2>
         </div>
         <div class="model-toolbar">
           <input id="modelSearch" placeholder="搜索模型 / 别名" style="min-width:180px">
-          <select id="modelProvider"><option value="">全部供应商</option></select>
           <select id="modelState">
             <option value="">全部状态</option>
             <option value="on">已启用</option>
@@ -562,6 +566,9 @@
           </table>
         </div>
       </section>
+
+        </div><!-- /.models-main -->
+      </div><!-- /.models-layout -->
 
       <div class="modal-scrim" id="modelDialog" hidden>
         <div class="modal">
@@ -1075,6 +1082,8 @@
         <p class="msg" id="logSettingsMsg"></p>
       </section>
     </section>
+    </div><!-- /.app-main -->
+    </div><!-- /.app-shell -->
   </div>
 </main>
 
