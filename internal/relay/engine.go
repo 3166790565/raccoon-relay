@@ -221,7 +221,7 @@ func (e *Engine) RunOpenAI(ctx context.Context, req *ChatContext, sink OpenAISin
 			if d := e.RetryDelay(); d > 0 {
 				select {
 				case <-ctx.Done():
-					return Result{AccountID: lastAcc, Model: req.Model}, errClientGone
+					return Result{AccountID: lastAcc, Model: req.PublicModel}, errClientGone
 				case <-time.After(d):
 				}
 			}
@@ -270,7 +270,7 @@ func (e *Engine) RunOpenAI(ctx context.Context, req *ChatContext, sink OpenAISin
 				_ = e.ST.BindSession(ctx, req.SessionKey, acc.ID, req.Model,
 					e.affinityTTL().Milliseconds(), nowMillis())
 			}
-			return Result{AccountID: acc.ID, Model: req.Model}, nil
+			return Result{AccountID: acc.ID, Model: req.PublicModel}, nil
 		}
 		lastErr = leaseErr
 
@@ -280,7 +280,7 @@ func (e *Engine) RunOpenAI(ctx context.Context, req *ChatContext, sink OpenAISin
 			e.report(store.LevelWarn, "客户端已断开，本次请求终止",
 				fmt.Sprintf("模型：%s\n账号：%s\n尝试序号：%d\n原因：%s",
 					req.Model, acc.Name, attemptNo+1, strings.TrimSpace(leaseErr.Error())), acc.ID)
-			return Result{AccountID: acc.ID, Model: req.Model}, errClientGone
+			return Result{AccountID: acc.ID, Model: req.PublicModel}, errClientGone
 		}
 
 		kind, switchable, code, publicMsg := classify(leaseErr)
@@ -322,7 +322,7 @@ func (e *Engine) RunOpenAI(ctx context.Context, req *ChatContext, sink OpenAISin
 				e.Cool.CoolAccountLadder(ctx, acc.ID, publicMsg)
 				e.report(level, "账号级冷却 · "+publicMsg, detail+"\n处置：冷却整个账号，已换号重试", acc.ID)
 				if at.Started {
-					return Result{AccountID: acc.ID, Model: req.Model}, leaseErr
+					return Result{AccountID: acc.ID, Model: req.PublicModel}, leaseErr
 				}
 				continue
 			}
@@ -330,7 +330,7 @@ func (e *Engine) RunOpenAI(ctx context.Context, req *ChatContext, sink OpenAISin
 			e.report(level, "上游失败："+publicMsg,
 				detail+"\n处置：账号异常冷却已关闭，未冷却账号，已换号重试", acc.ID)
 			if at.Started {
-				return Result{AccountID: acc.ID, Model: req.Model}, leaseErr
+				return Result{AccountID: acc.ID, Model: req.PublicModel}, leaseErr
 			}
 			continue
 		}
@@ -345,7 +345,7 @@ func (e *Engine) RunOpenAI(ctx context.Context, req *ChatContext, sink OpenAISin
 			e.report(level, "积分耗尽："+publicMsg,
 				detail+"\n处置：冷却账号至下一次签到（"+resume+"），已换号重试", acc.ID)
 			if at.Started {
-				return Result{AccountID: acc.ID, Model: req.Model}, leaseErr
+				return Result{AccountID: acc.ID, Model: req.PublicModel}, leaseErr
 			}
 			continue
 		}
@@ -362,7 +362,7 @@ func (e *Engine) RunOpenAI(ctx context.Context, req *ChatContext, sink OpenAISin
 				}
 				e.report(level, "模型级冷却："+req.Model+" · "+publicMsg, detail+"\n处置："+action, acc.ID)
 				if at.Started {
-					return Result{AccountID: acc.ID, Model: req.Model}, leaseErr
+					return Result{AccountID: acc.ID, Model: req.PublicModel}, leaseErr
 				}
 				continue
 			}
@@ -372,7 +372,7 @@ func (e *Engine) RunOpenAI(ctx context.Context, req *ChatContext, sink OpenAISin
 			if isModelScoped(leaseErr) {
 				e.report(level, "模型不可用："+req.Model+" · "+publicMsg, detail+"\n处置：不冷却账号，换号重试", acc.ID)
 				if at.Started {
-					return Result{AccountID: acc.ID, Model: req.Model}, leaseErr
+					return Result{AccountID: acc.ID, Model: req.PublicModel}, leaseErr
 				}
 				continue
 			}
@@ -396,10 +396,10 @@ func (e *Engine) RunOpenAI(ctx context.Context, req *ChatContext, sink OpenAISin
 		e.report(level, "上游失败："+publicMsg, detail+"\n处置："+action, acc.ID)
 		if at.Started {
 			// 已经写出过内容，不能重试，只能如实报错
-			return Result{AccountID: acc.ID, Model: req.Model}, leaseErr
+			return Result{AccountID: acc.ID, Model: req.PublicModel}, leaseErr
 		}
 		if !switchable {
-			return Result{AccountID: acc.ID, Model: req.Model}, leaseErr
+			return Result{AccountID: acc.ID, Model: req.PublicModel}, leaseErr
 		}
 	}
 
@@ -409,7 +409,7 @@ func (e *Engine) RunOpenAI(ctx context.Context, req *ChatContext, sink OpenAISin
 	// 号池抽干才到这里：这是要人处理的状态，按错误级别记。
 	e.report(store.LevelError, "号池无可用账号，请求失败",
 		"模型："+req.Model+"\n原因："+lastErr.Error(), lastAcc)
-	return Result{AccountID: lastAcc, Model: req.Model}, lastErr
+	return Result{AccountID: lastAcc, Model: req.PublicModel}, lastErr
 }
 
 var errNoAccount = errors.New("号池没有可用账号（全部冷却、积分耗尽或凭证失效）")
@@ -667,8 +667,13 @@ func (e *Engine) ensureSNKey(ctx context.Context, acc *store.Account) (string, e
 
 // ChatContext 是一次请求的输入。
 type ChatContext struct {
+	// Model 是发给上游的真实模型名（已按映射改写）。路由、冷却、会话绑定用它。
 	Model string
-	// PublicModel 是客户端请求里的对外名（未经映射改写）。流水与回显用它。
+	// PublicModel 是回显给客户端的模型名：响应体与流水都用它。
+	//
+	// 上游可能把真实模型名换成带日期/版本的 id（例如 sn-deepseek-v4.1-flash-1017），
+	// 原样回显会让客户端认为模型被替换。对外只回客户端自己请求的名字，
+	// 上游真实名只留在上游链路里。
 	PublicModel string
 	Body        map[string]any
 	Title       string
@@ -727,6 +732,13 @@ func BuildChatContextWithRules(rules ModelRules, model string, body map[string]a
 		}
 	}
 	prepared := raccoon.PrepareBody(model, body, defaultModel)
+	resolved := prepared["model"].(string)
+	public := strings.TrimSpace(original)
+	if public == "" {
+		// 客户端没带 model 时，网关自己挑了默认模型：回显这个默认名，
+		// 而不是映射后的上游名（那可能是一个带日期后缀的真实 id）。
+		public = resolved
+	}
 	messages, _ := prepared["messages"].([]any)
 	title := ""
 	if len(messages) > 0 {
@@ -734,13 +746,15 @@ func BuildChatContextWithRules(rules ModelRules, model string, body map[string]a
 	}
 	seed, _ := json.Marshal(messages)
 	return &ChatContext{
-		Model:       prepared["model"].(string),
-		Body:        prepared,
+		Model: resolved,
+		Body:  prepared,
+		// PublicModel 是对外名：流水的 model 列与下游回显都用它。
+		// 上游真实名（可能被映射改写成 sn-… -1017 这类带版本号的 id）
+		// 只在发往上游的请求体里出现，不回给客户端。
+		PublicModel: public,
 		Title:       title,
 		SessionSeed: string(seed),
 		SessionKey:  sessionKey,
-		// PublicModel 是对外名：流水的 model 列与下游回显都用它。
-		PublicModel: original,
 	}
 }
 

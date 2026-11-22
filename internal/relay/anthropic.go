@@ -42,13 +42,13 @@ func (s *Server) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 	defer release()
 
 	if streamReq {
-		sink := newAnthropicSSE(w, cc.Model)
+		sink := newAnthropicSSE(w, cc.PublicModel)
 		res, err := s.engine.RunOpenAI(r.Context(), cc, sink)
 		s.logUsage(r.Context(), res, err, start, "anthropic", nil)
 		return
 	}
 
-	sink := newAnthropicAgg(cc.Model)
+	sink := newAnthropicAgg(cc.PublicModel)
 	res, err := s.engine.RunOpenAI(r.Context(), cc, sink)
 	s.logUsage(r.Context(), res, err, start, "anthropic", &sink.usage)
 	if err != nil {

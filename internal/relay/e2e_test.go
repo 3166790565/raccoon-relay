@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -21,6 +22,7 @@ import (
 type fakeUpstream struct {
 	mu          sync.Mutex
 	calls       []string
+	bodies      []string // 上游收到的原始请求体
 	chatHits    int
 	refreshes   int          // 刷新端点被调用次数
 	refreshDead bool         // 刷新端点是否回 401（refresh_token 已失效）
@@ -43,8 +45,10 @@ type chatResult struct {
 func (f *fakeUpstream) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc(raccoon.PathChat, func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
 		f.mu.Lock()
 		f.calls = append(f.calls, "chat")
+		f.bodies = append(f.bodies, string(raw))
 		idx := f.chatHits
 		f.chatHits++
 		var res chatResult

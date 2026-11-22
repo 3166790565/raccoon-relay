@@ -419,13 +419,13 @@ func (s *Server) HandleResponses(w http.ResponseWriter, r *http.Request) {
 	defer release()
 
 	if streamReq {
-		sink := newResponsesSSE(w, cc.Model)
+		sink := newResponsesSSE(w, cc.PublicModel)
 		res, err := s.engine.RunOpenAI(r.Context(), cc, sink)
 		s.logUsage(r.Context(), res, err, start, "responses", nil)
 		return
 	}
 
-	sink := newResponsesAgg(cc.Model)
+	sink := newResponsesAgg(cc.PublicModel)
 	res, err := s.engine.RunOpenAI(r.Context(), cc, sink)
 	s.logUsage(r.Context(), res, err, start, "responses", &sink.usage)
 	if err != nil {

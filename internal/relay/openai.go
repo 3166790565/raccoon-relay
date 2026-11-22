@@ -328,7 +328,7 @@ func (s *Server) HandleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	defer release()
 
 	if streamReq {
-		sink := newSSEWriter(w, cc.Model)
+		sink := newSSEWriter(w, cc.PublicModel)
 		res, err := s.engine.RunOpenAI(r.Context(), cc, sink)
 		s.logUsage(r.Context(), res, err, start, "openai", sink.usage)
 		if err != nil {
@@ -338,7 +338,7 @@ func (s *Server) HandleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sink := newAggWriter(cc.Model)
+	sink := newAggWriter(cc.PublicModel)
 	res, err := s.engine.RunOpenAI(r.Context(), cc, sink)
 	s.logUsage(r.Context(), res, err, start, "openai", sink.usage)
 	if err != nil {

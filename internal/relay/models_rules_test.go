@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/3166790565/raccoon-relay/internal/modelrules"
@@ -133,5 +134,57 @@ func TestAliasToDisabledTargetRejected(t *testing.T) {
 	}
 	if h.up.chatHits != 0 {
 		t.Fatalf("不应打到上游，实际 %d 次", h.up.chatHits)
+	}
+}
+
+// 别名请求：发给上游的是真实模型名，回给客户端的是别名。
+//
+// 上游会把真实模型名换成带日期后缀的 id（sn-deepseek-v4.1-flash-1017），
+// 原样回显会让下游面板报「响应模型不一致」。对外只回客户端请求的名字。
+func TestAliasEchoedInsteadOfUpstreamModel(t *testing.T) {
+	const upstreamFrames = `{"model":"sn-deepseek-v4-1-flash-1017","choices":[{"index":0,"delta":{"content":"hi"}}]}`
+	h := newHarness(t, []chatResult{{status: 200, frames: []string{upstreamFrames}, usage: usageFrame}})
+	h.addAccount(t, "acc-1", 1000)
+	h.srv.SetModelRules(&fakeRules{aliases: map[string]string{"my-fast": "sn-deepseek-v4.1-flash-1017"}})
+
+	// 非流式：响应体 model 是别名。
+	w := h.do(t, http.MethodPost, "/v1/chat/completions",
+		`{"model":"my-fast","messages":[{"role":"user","content":"hi"}]}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("期望 200，实际 %d: %s", w.Code, w.Body.String())
+	}
+	var out struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Model != "my-fast" {
+		t.Fatalf("响应 model 应为别名 my-fast，实际 %q", out.Model)
+	}
+	// 上游收到的仍是真实模型名：改写只影响回显，不影响转发。
+	if len(h.up.bodies) != 1 || !strings.Contains(h.up.bodies[0], `"model":"sn-deepseek-v4.1-flash-1017"`) {
+		t.Fatalf("上游请求体应带真实模型名，实际 %v", h.up.bodies)
+	}
+
+	// 流式：每一帧的 model 也是别名。
+	w = h.do(t, http.MethodPost, "/v1/chat/completions",
+		`{"model":"my-fast","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	for _, line := range strings.Split(w.Body.String(), "\n") {
+		if strings.HasPrefix(line, "data: {") && strings.Contains(line, `"model"`) &&
+			!strings.Contains(line, `"model":"my-fast"`) {
+			t.Fatalf("流式帧回显了非别名模型: %s", line)
+		}
+	}
+
+	// 没设别名时，回显客户端原始模型名。
+	w = h.do(t, http.MethodPost, "/v1/chat/completions",
+		`{"model":"sn-deepseek-v4.1-flash","messages":[{"role":"user","content":"hi"}]}`)
+	var plain struct {
+		Model string `json:"model"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &plain)
+	if plain.Model != "sn-deepseek-v4.1-flash" {
+		t.Fatalf("无别名时应回显原始模型名，实际 %q", plain.Model)
 	}
 }
