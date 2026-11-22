@@ -99,6 +99,20 @@ const PAGE_LOADERS = {
   update: () => loadUpdate(),
 };
 
+// 顶栏面包屑的末段：与侧栏导航文字保持一致（导航里带图标，这里只取文字）。
+const PAGE_TITLES = {
+  overview: '概览', report: '报表', accounts: '号池', checkin: '签到中心',
+  add: '添加账号', models: '模型', keys: 'API Keys', logs: '调用日志',
+  syslogs: '运行日志', settings: '设置', update: '版本更新',
+};
+
+function setCrumb(page) {
+  const el = $('crumb');
+  if (!el) return;
+  el.innerHTML = `<span>小浣熊反代</span><span class="sep">/</span>` +
+    `<b class="cur">${esc(PAGE_TITLES[page] || page)}</b>`;
+}
+
 function switchPage(page, { force = false } = {}) {
   if (!PAGE_LOADERS[page]) page = 'overview';
   STATE.page = page;
@@ -108,8 +122,15 @@ function switchPage(page, { force = false } = {}) {
 
   document.querySelectorAll('.navtab').forEach((b) => b.classList.toggle('active', b.dataset.page === page));
   document.querySelectorAll('.page').forEach((p) => p.classList.toggle('active', p.id === 'page-' + page));
+  setCrumb(page);
 
   if (location.hash.slice(1) !== page) history.replaceState(null, '', '#' + page);
+  closeSidebar();
+
+  // 每个页面自己是滚动容器（壳层固定视口），换页要把该页的滚动位置归零，
+  // 否则从「调用日志」底部切到「概览」会停在半截。
+  const cur = document.getElementById('page-' + page);
+  if (cur) cur.scrollTop = 0;
   window.scrollTo(0, 0);
 
   // 顶部状态条每个页面都要显示，所以每次切页都刷新一次。
@@ -129,6 +150,42 @@ document.querySelectorAll('.navtab').forEach((btn) => {
 });
 window.addEventListener('hashchange', () => switchPage(location.hash.slice(1)));
 
+// ---------- 侧栏抽屉（窄屏） ----------
+// 壳层在 820px 以下把侧栏变成抽屉：顶栏的 ☰ 打开，点遮罩/选页/按 Esc 关闭。
+function openSidebar() { document.body.classList.add('side-open'); }
+function closeSidebar() { document.body.classList.remove('side-open'); }
+$('menuBtn')?.addEventListener('click', openSidebar);
+$('sidebarScrim')?.addEventListener('click', closeSidebar);
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && document.body.classList.contains('side-open')) closeSidebar();
+});
+
+// ---------- 主题（跟随 / 浅色 / 深色） ----------
+// 首屏的那一贴由 index.html 的 head 脚本完成，这里只负责切换与持久化。
+function applyTheme(mode) {
+  const m = mode === 'light' || mode === 'dark' ? mode : 'system';
+  localStorage.setItem('rc-theme', m);
+  document.documentElement.dataset.theme = m;
+  const dark = m === 'dark'
+    || (m === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+  document.documentElement.style.colorScheme = dark ? 'dark' : 'light';
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.setAttribute('content', dark ? '#000000' : '#f7f7f9');
+  document.querySelectorAll('#themeSwitch button').forEach((b) => {
+    b.classList.toggle('on', b.dataset.themeVal === m);
+  });
+}
+document.querySelectorAll('#themeSwitch button').forEach((btn) => {
+  btn.addEventListener('click', () => applyTheme(btn.dataset.themeVal));
+});
+applyTheme(localStorage.getItem('rc-theme') || 'system');
+// 「跟随系统」时系统切换深浅，颜色要立刻跟上（只影响令牌，不动存储值）。
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+  if ((localStorage.getItem('rc-theme') || 'system') === 'system') {
+    applyTheme('system');
+  }
+});
+
 // ---------- 概览 ----------
 async function loadStatus() {
   try {
@@ -143,6 +200,19 @@ async function loadStatus() {
       `<span class="chip bad">需重登 ${a.relogin || 0}</span>`,
     ];
     $('chips').innerHTML = chips.join('');
+    // 侧栏底部的运行状态：只要连得上管理面就算「运行中」，
+    // 颜色的意义交给需重登 / 冷却的数量（有异常才变黄/红）。
+    const dot = $('sideDot');
+    const txt = $('sideStatusText');
+    if (dot && txt) {
+      const badN = (a.relogin || 0) + (a.exhausted || 0);
+      const warnN = a.cooling || 0;
+      dot.className = 'status-dot ' + (badN ? 'bad' : warnN ? 'warn' : 'online');
+      txt.textContent = badN ? `${badN} 个账号异常` : warnN ? `${warnN} 个账号冷却中` : '网关运行中';
+      txt.title = `共 ${a.total || 0} 个账号 · 在线 ${a.online || 0} · 冷却 ${warnN} · 异常 ${badN}`;
+    }
+    const navCnt = $('navAccountsCount');
+    if (navCnt) navCnt.textContent = a.total ? String(a.total) : '';
     // 服务端时区的「今天」，号池的「今日签到」用它判断，不用浏览器时区
     STATE.today = (s.checkin || {}).today || '';
     if (STATE.page === 'accounts' && STATE.accounts.length) renderAccounts();
@@ -332,7 +402,9 @@ function renderAccounts() {
   const rows = filteredAccounts();
   const total = STATE.accounts.length;
 
-  $('poolEmpty').hidden = rows.length > 0 || total === 0;
+  // 空状态：没有筛选结果时一定要给一句话，否则表格区只剩一块白底，
+  // 看起来像「加载失败」而不是「还没有号」。
+  $('poolEmpty').hidden = rows.length > 0;
   $('poolEmpty').textContent = total === 0 ? '还没有账号，去「添加账号」页导入' : '当前筛选下没有账号';
   $('poolFootInfo').textContent = total === 0
     ? '共 0 条'
@@ -2634,10 +2706,13 @@ async function waitForRestart(expected) {
 }
 
 // ---------- 启动 ----------
+// 登录前后是整个壳层的两副形态：未登录收起侧栏与顶栏（body.logged-out），
+// 登录后恢复。登录卡片本身永远在 DOM 里，靠 body 类切换显示，避免首屏闪一下。
 function showLogin() {
   $('loginCard').hidden = false;
   $('app').hidden = true;
   $('logoutBtn').hidden = true;
+  document.body.classList.add('logged-out');
   // 重新登录后旧会话的数据已经作废，清掉「已加载」标记让它重新拉。
   STATE.loaded.clear();
 }
@@ -2647,6 +2722,7 @@ function showPanel() {
   $('loginCard').hidden = true;
   $('app').hidden = false;
   $('logoutBtn').hidden = false;
+  document.body.classList.remove('logged-out');
   switchPage(location.hash.slice(1));
 }
 
@@ -2967,11 +3043,20 @@ const REPORT = {
 };
 
 // 饼图/堆叠柱/图例共用一套调色板，同一模型在所有图里颜色一致。
-const RP_COLORS = [
-  '#ff8f4d', '#4ea1ff', '#3fb96a', '#d8a13a', '#c260e8', '#2fc7c7',
-  '#e05555', '#8ea8ff', '#7ed321', '#ff6fa8', '#9b8cff', '#5fd0a0',
-  '#f2c94c', '#56ccf2', '#bb6bd9', '#f2994a',
+// 取值一律来自 CSS 令牌（--chart-1…12），主题切换时图表自动跟着换色；
+// 令牌取不到时再退回一组写死的蓝紫色（老浏览器不支持 oklch 的情况）。
+const RP_COLOR_VARS = Array.from({ length: 12 }, (_, i) => `var(--chart-${i + 1})`);
+const RP_COLORS_FALLBACK = [
+  '#4ea1ff', '#2fc7c7', '#9b8cff', '#e579c8', '#3fb96a',
+  '#d8a13a', '#e0745a', '#56c2c2', '#b18cf0', '#6f9ae8',
+  '#7ec46a', '#d477a8',
 ];
+function rpColors() {
+  const cs = getComputedStyle(document.documentElement);
+  const probe = cs.getPropertyValue('--chart-1').trim();
+  return probe ? RP_COLOR_VARS : RP_COLORS_FALLBACK;
+}
+const RP_COLORS = rpColors();
 const RP_DIM_TITLE = { models: '模型', apis: '协议', accounts: '账号' };
 
 function rpFmtInt(n) {
@@ -3054,18 +3139,19 @@ function renderReport() {
 
   // ── 概览 KPI ──
   // 成功率在 0 请求时没有意义（0/0），显示破折号而不是 0%。
+  // 8 个读数在 4 列网格里正好两行，第三行再放「延迟五连」。
   const successRate = o.requests ? rpPct(o.successRate) : '—';
   const top = s.models && s.models.length ? s.models[0] : null;
   const kpis = [
     ['总 Token', rpFmtInt(o.tokens), `输入 ${rpFmtInt(o.promptTokens)} · 输出 ${rpFmtInt(o.completionTokens)}`, 'accent'],
     ['成功请求数', rpFmtInt(o.successful), `成功率 ${successRate}`, 'ok'],
     ['总请求数', rpFmtInt(o.requests), s.label || '', ''],
-    ['活跃天数', String(o.activeDays || 0), `区间共 ${(s.trend || []).length} 天`, ''],
-    ['当前连续天数', String(o.streak || 0), '含今天在内往前数', ''],
     ['Top 模型', top ? top.model : '—',
       top ? `${rpFmtInt(top.tokens)} token · 占 ${rpPct(top.share)}` : '所选范围内还没有模型用量', ''],
     ['平均耗时', rpFmtMs(lat.avgMs), 'P95 ' + rpFmtMs(lat.p95Ms), ''],
     ['输出速度', (lat.tokenPerSec || 0) + ' tok/s', '峰值 ' + rpFmtMs(lat.maxMs), ''],
+    ['活跃天数', String(o.activeDays || 0), `区间共 ${(s.trend || []).length} 天`, ''],
+    ['当前连续天数', String(o.streak || 0), '含今天在内往前数', ''],
   ];
   $('rpKpis').innerHTML = kpis.map(([k, v, sub, cls]) =>
     `<div class="rp-kpi ${cls}"><div class="k">${esc(k)}</div>` +
@@ -3081,6 +3167,10 @@ function renderReport() {
     ['平均输出速度', (lat.tokenPerSec || 0) + ' tok/s', 'ok'],
   ].map(([k, v, cls]) =>
     `<div class="rp-kpi ${cls}"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></div>`).join('');
+
+  // 报表页的 8 个 KPI 在 4 列网格里是两整行，容器类名跟着改一下。
+  const kpiBox = $('rpKpis');
+  if (kpiBox) kpiBox.classList.add('rp-kpis-8');
 
   // ── Top 排行（账号 / 协议）──
   renderRpRank('rpAccounts', 'rpAccountsTotal', (s.accounts || []).map((a) => ({
@@ -3268,7 +3358,7 @@ function renderRpTrend() {
     const x = padL + i * (bw + gap);
     let base = padT + plotH;
     const segs = row.segments.length ? row.segments : [{ name: '总量', tokens: row.total }];
-    const usedNames = row.segments.length ? colors : new Map([['总量', '#ff8f4d']]);
+    const usedNames = row.segments.length ? colors : new Map([['总量', RP_COLORS[0]]]);
     for (const seg of segs) {
       if (seg.tokens <= 0) continue;
       const h = (seg.tokens / axisMax) * plotH;

@@ -3,45 +3,99 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#f7f7f9">
 <title>小浣熊反代 · 控制台</title>
+<script>
+// 主题在 CSS 解析前落地：避免浅色/深色首屏闪一下。
+// 与 Agent2API 同款约定：system / light / dark 三档，存 localStorage。
+(() => {
+  const mode = localStorage.getItem('rc-theme') || 'system';
+  document.documentElement.dataset.theme = mode;
+  const dark = mode === 'dark'
+    || (mode === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+  document.documentElement.style.colorScheme = dark ? 'dark' : 'light';
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.setAttribute('content', dark ? '#000000' : '#f7f7f9');
+})();
+</script>
 <link rel="stylesheet" href="/admin/style.css">
 </head>
-<body>
-<header class="topbar">
-  <div class="brand">🦝 小浣熊反代</div>
-  <div class="status-chips" id="chips"></div>
-  <button class="ghost" id="logoutBtn" hidden>退出</button>
-</header>
-
-<main>
-  <!-- 登录 -->
-  <section class="card" id="loginCard">
-    <h2>管理口令</h2>
-    <p class="hint">首次启动时容器日志里会打印一次 ADMIN_TOKEN。</p>
-    <div class="row">
-      <input type="password" id="adminToken" placeholder="ADMIN_TOKEN" autocomplete="current-password">
-      <button class="primary" id="loginBtn">进入</button>
+<body class="logged-out">
+<div class="shell">
+  <!-- 左侧导航：分组 / 选中为主色实心，与 Agent2API 的侧栏同款 -->
+  <aside class="sidebar" id="sidebar">
+    <div class="brand">
+      <span class="brand-logo" aria-hidden="true">🦝</span>
+      <span class="brand-text">
+        <b>小浣熊反代</b>
+        <small>多账号聚合网关</small>
+      </span>
     </div>
-    <p class="err" id="loginErr"></p>
-  </section>
 
-  <div id="app" hidden>
-    <div class="app-shell">
-    <!-- 左侧标签导航 -->
-    <nav class="navtabs" id="navTabs">
-      <button class="navtab active" data-page="overview">概览</button>
-      <button class="navtab" data-page="report">报表</button>
-      <button class="navtab" data-page="accounts">号池</button>
-      <button class="navtab" data-page="checkin">签到中心</button>
-      <button class="navtab" data-page="add">添加账号</button>
-      <button class="navtab" data-page="models">模型</button>
-      <button class="navtab" data-page="keys">API Keys</button>
-      <button class="navtab" data-page="logs">调用日志</button>
-      <button class="navtab" data-page="syslogs">运行日志</button>
-      <button class="navtab" data-page="settings">设置</button>
-      <button class="navtab" data-page="update">版本更新</button>
+    <nav class="nav" id="navTabs">
+      <div class="nav-group-label">运行状态</div>
+      <button class="navtab active" data-page="overview"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 9.5 6 6l3 2 5-4.5V13a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1Z"/><path d="M2 3.5v2M2 3.5h2"/></svg><span>概览</span></button>
+      <button class="navtab" data-page="report"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.5"/><path d="M8 2.5v5.5l3.5 2"/></svg><span>报表</span></button>
+
+      <div class="nav-group-label">账号与签到</div>
+      <button class="navtab" data-page="accounts"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="5.5" cy="5" r="2.3"/><path d="M1.8 13c.4-2.4 1.9-3.6 3.7-3.6S8.8 10.6 9.2 13"/><circle cx="11.2" cy="5.6" r="1.8"/><path d="M10 9.4c1.9-.2 3.4.9 3.9 3"/></svg><span>号池</span><em class="nav-count" id="navAccountsCount"></em></button>
+      <button class="navtab" data-page="checkin"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2.5" y="3.5" width="11" height="10" rx="2"/><path d="M2.5 6.5h11M5.5 2v3M10.5 2v3M5.5 9.5l1.6 1.6 3-3.2"/></svg><span>签到中心</span></button>
+      <button class="navtab" data-page="add"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.6"/><path d="M8 5.4v5.2M5.4 8h5.2"/></svg><span>添加账号</span></button>
+
+      <div class="nav-group-label">转发能力</div>
+      <button class="navtab" data-page="models"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.8 13.6 5v6L8 14.2 2.4 11V5Z"/><path d="M2.4 5 8 8.2 13.6 5M8 8.2v6"/></svg><span>模型</span></button>
+      <button class="navtab" data-page="keys"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="5.4" cy="10.6" r="2.6"/><path d="M7.4 8.6 13 3M10.6 5.4l1.8 1.8M12.2 3.8l1.8 1.8"/></svg><span>API Keys</span></button>
+
+      <div class="nav-group-label">诊断</div>
+      <button class="navtab" data-page="logs"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 2.6h10v10.8H3Z"/><path d="M5.2 5.6h5.6M5.2 8h5.6M5.2 10.4h3.4"/></svg><span>调用日志</span></button>
+      <button class="navtab" data-page="syslogs"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.6 4.2h10.8v8.2H2.6Z"/><path d="M2.6 6.6h10.8M4.8 3v2.4M11.2 3v2.4"/></svg><span>运行日志</span></button>
+
+      <div class="nav-group-label">系统</div>
+      <button class="navtab" data-page="settings"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="2.1"/><path d="M8 1.9v1.7M8 12.4v1.7M1.9 8h1.7M12.4 8h1.7M3.7 3.7l1.2 1.2M11.1 11.1l1.2 1.2M12.3 3.7l-1.2 1.2M4.9 11.1l-1.2 1.2"/></svg><span>设置</span></button>
+      <button class="navtab" data-page="update"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13.4 8a5.4 5.4 0 1 1-1.6-3.8"/><path d="M13.4 2.6v3h-3"/></svg><span>版本更新</span></button>
     </nav>
-    <div class="app-main">
+
+    <div class="sidebar-foot">
+      <div class="sidebar-status" id="sidebarStatus">
+        <span class="status-line"><i class="status-dot" id="sideDot"></i><span class="txt" id="sideStatusText">尚未连接</span></span>
+      </div>
+      <div class="theme-switch" id="themeSwitch" role="group" aria-label="主题">
+        <button data-theme-val="system" title="跟随系统">跟随</button>
+        <button data-theme-val="light" title="浅色">浅色</button>
+        <button data-theme-val="dark" title="深色">深色</button>
+      </div>
+    </div>
+  </aside>
+
+  <div class="sidebar-scrim" id="sidebarScrim"></div>
+
+  <div class="main">
+    <header class="topbar">
+      <button class="ghost menu-btn" id="menuBtn" aria-label="菜单">☰</button>
+      <div class="crumb" id="crumb"><span>小浣熊反代</span><span class="sep">/</span><b class="cur">概览</b></div>
+      <div class="topbar-actions">
+        <div class="status-chips" id="chips"></div>
+        <button class="ghost" id="logoutBtn" hidden>退出</button>
+      </div>
+    </header>
+
+    <div class="content">
+      <div class="content-inner">
+        <!-- 登录 -->
+        <section class="login-card" id="loginCard">
+          <div class="login-logo">🦝</div>
+          <h1>小浣熊反代</h1>
+          <p class="hint">多账号聚合网关 · 管理控制台</p>
+          <div class="login-form">
+            <label for="adminToken">管理口令</label>
+            <input type="password" id="adminToken" placeholder="ADMIN_TOKEN" autocomplete="current-password">
+            <button class="primary" id="loginBtn">进入控制台</button>
+          </div>
+          <p class="err" id="loginErr"></p>
+          <p class="hint login-foot">首次启动时容器日志里会打印一次 ADMIN_TOKEN。</p>
+        </section>
+
+        <div id="app" hidden>
 
     <!-- 概览 -->
     <section class="page active" id="page-overview">
@@ -1143,10 +1197,11 @@
         <p class="msg" id="logSettingsMsg"></p>
       </section>
     </section>
-    </div><!-- /.app-main -->
-    </div><!-- /.app-shell -->
+        </div>
+      </div>
+    </div>
   </div>
-</main>
+</div>
 
 <script src="/admin/models.js"></script>
 <script src="/admin/app.js"></script>
