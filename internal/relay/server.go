@@ -74,6 +74,11 @@ func (c *Catalog) fetch(ctx context.Context) []raccoon.Model {
 		if !a.Enabled || a.Status != store.StatusOnline {
 			continue
 		}
+		// 外部渠道的模型清单由各自的实现提供（内置快照 + 实时拉取），
+		// 与账号是否在线一并考虑：即便全在冷却，也要让客户端看得到可选项。
+		if a.IsExternal() {
+			continue
+		}
 		if a.IsSenseNova() {
 			// 实时清单优先；拉不到（账号没 Key、上游故障）再回落内置快照。
 			if len(snModels) == 0 && c.SN != nil {
@@ -101,6 +106,9 @@ func (c *Catalog) fetch(ctx context.Context) []raccoon.Model {
 		}
 		raccoonModels = seen
 	}
+	// 外部渠道：只按「库里有没有这类账号」广告内置清单。实时清单由
+	// /api/models/manage 与模型管理页负责，转发热路径不额外打上游。
+	extModels := externalCatalogModels(accounts)
 	if len(snModels) == 0 {
 		// 没有任何日日新账号时，若库里只有日日新模型可选（例如只导入了账号
 		// 但被停用），也让 /v1/models 至少能看到它们，方便客户端先配置。
@@ -108,7 +116,41 @@ func (c *Catalog) fetch(ctx context.Context) []raccoon.Model {
 			snModels = senseNovaModels()
 		}
 	}
-	return append(raccoonModels, snModels...)
+	return append(append(raccoonModels, snModels...), extModels...)
+}
+
+// externalCatalogModels 返回库里出现过的外部渠道的内置模型快照（带对外前缀）。
+//
+// 只负责「让客户端看得到」，不负责「这个号能不能调」——后者由选号时的
+// 状态过滤决定。所以被停用/冷却的号也会让它的渠道出现在清单里。
+func externalCatalogModels(accounts []*store.Account) []raccoon.Model {
+	seen := map[string]bool{}
+	var out []raccoon.Model
+	for _, a := range accounts {
+		p := a.Provider
+		if (p != store.ProviderAutoClaw && p != store.ProviderCodeArts) || seen[p] {
+			continue
+		}
+		seen[p] = true
+		out = append(out, externalModels(p)...)
+	}
+	return out
+}
+
+// externalModels 是外部渠道的内置模型快照，由装配层注入（各渠道包自己提供）。
+// relay 不 import 那些包，避免 relay ↔ 渠道包成环。
+var externalModels = func(provider string) []raccoon.Model { return nil }
+
+// SetExternalModels 由装配层注入「按供应商返回内置模型清单」的函数。
+func SetExternalModels(fn func(provider string) []raccoon.Model) {
+	if fn != nil {
+		externalModels = fn
+	}
+}
+
+// ExternalCatalog 返回某外部渠道的内置模型清单（供模型管理页）。
+func ExternalCatalog(provider string) []raccoon.Model {
+	return externalModels(provider)
 }
 
 // fetchRaccoonCatalog 拉小浣熊目录，并合并多个账号的可见项。

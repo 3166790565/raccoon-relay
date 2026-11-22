@@ -53,7 +53,18 @@ var sqliteSchema = []string{
 		sn_token_exp     INTEGER NOT NULL DEFAULT 0,
 		sn_refresh_token TEXT NOT NULL DEFAULT '',
 		sn_pool          TEXT NOT NULL DEFAULT '',
-		sn_pool_at       INTEGER NOT NULL DEFAULT 0
+		sn_pool_at       INTEGER NOT NULL DEFAULT 0,
+		-- 外部渠道（autoclaw / codearts）共用的凭据槽。两家凭据形态不同，
+		-- 但都是「一段会轮换、需要整体写回的不透明凭据」，共用一组列即可。
+		-- ext_rev 是写回时的版本号，用于多副本下的 CAS：只有版本没变才写得进去，
+		-- 避免两个副本各自续期后互相覆盖。
+		ext_token        TEXT NOT NULL DEFAULT '',
+		ext_token_exp    INTEGER NOT NULL DEFAULT 0,
+		ext_refresh_token TEXT NOT NULL DEFAULT '',
+		ext_refresh_exp  INTEGER NOT NULL DEFAULT 0,
+		ext_site         TEXT NOT NULL DEFAULT '',
+		ext_extra        TEXT NOT NULL DEFAULT '',
+		ext_rev          INTEGER NOT NULL DEFAULT 0
 	)`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_uid ON accounts(uid)`,
 
@@ -252,7 +263,14 @@ var pgSchema = []string{
 		sn_token_exp     BIGINT NOT NULL DEFAULT 0,
 		sn_refresh_token TEXT NOT NULL DEFAULT '',
 		sn_pool          TEXT NOT NULL DEFAULT '',
-		sn_pool_at       BIGINT NOT NULL DEFAULT 0
+		sn_pool_at       BIGINT NOT NULL DEFAULT 0,
+		ext_token        TEXT NOT NULL DEFAULT '',
+		ext_token_exp    BIGINT NOT NULL DEFAULT 0,
+		ext_refresh_token TEXT NOT NULL DEFAULT '',
+		ext_refresh_exp  BIGINT NOT NULL DEFAULT 0,
+		ext_site         TEXT NOT NULL DEFAULT '',
+		ext_extra        TEXT NOT NULL DEFAULT '',
+		ext_rev          BIGINT NOT NULL DEFAULT 0
 	)`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_uid ON accounts(uid)`,
 

@@ -15,7 +15,9 @@ import (
 	_ "time/tzdata"
 
 	"github.com/3166790565/raccoon-relay/internal/admin"
+	"github.com/3166790565/raccoon-relay/internal/autoclaw"
 	"github.com/3166790565/raccoon-relay/internal/cache"
+	"github.com/3166790565/raccoon-relay/internal/codearts"
 	"github.com/3166790565/raccoon-relay/internal/config"
 	"github.com/3166790565/raccoon-relay/internal/creditsync"
 	"github.com/3166790565/raccoon-relay/internal/creds"
@@ -145,6 +147,39 @@ func main() {
 	// 日日新（商汤）是第二套上游：token-plan 的 OpenAI 兼容端点 + 控制台登录票。
 	snClient := sensenova.NewClient(time.Duration(cfg.UpstreamTimeoutSec) * time.Second)
 	snUpstream := sensenova.NewUpstream(snClient, st)
+	// 外部渠道：智谱 AutoClaw 与华为云码道。两家的协议差异很大（一个是
+	// access/refresh token，一个是临时 AK/SK 签名），所以各自独立成包，
+	// 只通过 relay 的 ExtUpstream 接口接入转发层。
+	acClient := autoclaw.NewClient(time.Duration(cfg.UpstreamTimeoutSec) * time.Second)
+	if cfg.AutoClawInternationalBase != "" {
+		acClient.GlobalHost = cfg.AutoClawInternationalBase
+	}
+	if cfg.AutoClawCNBase != "" {
+		acClient.CNHost = cfg.AutoClawCNBase
+	}
+	if cfg.AutoClawCNManagedBase != "" {
+		acClient.CNManagedHost = cfg.AutoClawCNManagedBase
+	}
+	acUpstream := autoclaw.NewUpstream(acClient, st)
+	caClient := codearts.NewClient(time.Duration(cfg.UpstreamTimeoutSec) * time.Second)
+	if cfg.CodeArtsMainlandBase != "" {
+		caClient.SnapMainland = cfg.CodeArtsMainlandBase
+	}
+	if cfg.CodeArtsInternationalBase != "" {
+		caClient.SnapIntl = cfg.CodeArtsInternationalBase
+	}
+	caUpstream := codearts.NewUpstream(caClient, st)
+	relay.RegisterExternal(store.ProviderAutoClaw, acUpstream)
+	relay.RegisterExternal(store.ProviderCodeArts, caUpstream)
+	relay.SetExternalModels(func(provider string) []raccoon.Model {
+		switch provider {
+		case store.ProviderAutoClaw:
+			return autoclaw.ToRaccoon(autoclaw.FallbackModels(store.StationGlobal))
+		case store.ProviderCodeArts:
+			return codearts.ToRaccoon(codearts.FallbackModels())
+		}
+		return nil
+	})
 	// 对话流不能套总时限：长回答会被硬掐在超时点。改用上游空闲超时。
 	client.IdleTimeout = cfg.StreamIdleTimeout
 	cool := pool.NewCooldownBookWithOptions(st, cfg.ModelCooldown, cfg.AccountAbnormalCool)
@@ -175,6 +210,7 @@ func main() {
 	catalog.SN = snUpstream // 日日新模型清单实时拉取，拉不到才用内置快照
 	engine := relay.BuildEngine(cfg, st, po, cool, client, refresher)
 	engine.SN = snUpstream
+	engine.Ext = relay.NewExternalRegistry()
 	engine.Event = func(ev store.RuntimeEvent) { events.Emit(ev) }
 	engine.SetRetryDelay(time.Duration(cfg.RetryDelayMS) * time.Millisecond)
 	engine.SetAffinityPolicy(cfg.AffinityEnabled, time.Duration(cfg.AffinityTTLSec)*time.Second)
@@ -189,11 +225,30 @@ func main() {
 	// 余额同步是三个位置共用的：新号初始化、自动签到、手动签到。
 	// 余额写入后立刻重算积分阈值状态：新签到补上的积分要能马上解除暂停，
 	// 否则要等到下一次巡检才恢复，用户会以为号还是坏的。
-	balancer := &creditsync.Balancer{ST: st, Client: client, Auth: refresher, SN: snUpstream, OnUpdated: po.ApplyCreditPolicy}
+	extBalance := func(provider string) creditsync.ExtBalance {
+		switch provider {
+		case store.ProviderAutoClaw:
+			return acUpstream
+		case store.ProviderCodeArts:
+			return caUpstream
+		}
+		return nil
+	}
+	balancer := &creditsync.Balancer{ST: st, Client: client, Auth: refresher, SN: snUpstream,
+		Ext: extBalance, OnUpdated: po.ApplyCreditPolicy}
 
 	// 调度器始终构造：自动循环由 CheckinEnable 决定是否跑，但手动「全部签到」任何时候都要能用。
 	sch := scheduler.New(cfg, st, client, refresher, balancer)
 	sch.SetEventHook(func(ev store.RuntimeEvent) { events.Emit(ev) })
+	sch.SetExternal(func(provider string) scheduler.ExtCheckin {
+		switch provider {
+		case store.ProviderAutoClaw:
+			return acUpstream
+		case store.ProviderCodeArts:
+			return caUpstream
+		}
+		return nil
+	})
 	sch.SetLocker(rds)
 	// 积分耗尽（402 / 1000007）的账号停到「下一次签到补分」，而不是写死次日 04:00。
 	// 调度器每次现读签到配置，面板里改签到时间后这里自动跟上。
@@ -241,6 +296,26 @@ func main() {
 
 	panel := admin.New(cfg, st, client, refresher, po, cool, engine, lm, sch, balancer, lmgr, renewer, srv, up, version, requestRestart, webFS)
 	panel.SetSenseNovaImporter(snImporter)
+	panel.SetAutoClawImporter(&admin.AutoClawImporter{C: acClient, ST: st})
+	panel.SetCodeArtsImporter(&admin.CodeArtsImporter{C: caClient, ST: st})
+	panel.SetExternalUpstream(func(provider string) admin.ExtUpstreamRef {
+		switch provider {
+		case store.ProviderAutoClaw:
+			return acUpstream
+		case store.ProviderCodeArts:
+			return caUpstream
+		}
+		return nil
+	})
+	panel.SetExternalModelSource(func(ctx context.Context, acc *store.Account) []raccoon.Model {
+		switch acc.Provider {
+		case store.ProviderAutoClaw:
+			return acUpstream.Models(ctx, acc)
+		case store.ProviderCodeArts:
+			return caUpstream.Models(ctx, acc)
+		}
+		return nil
+	})
 	// 模型管理：规则层同时喂给数据面（映射改写、/v1/models 过滤）与管理面。
 	modelMgr := modelrules.NewManager(context.Background(), st)
 	srv.SetModelRules(modelMgr.Rules)
