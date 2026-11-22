@@ -17,10 +17,23 @@ const (
 	StatusRelogin   = "relogin"
 )
 
-// 上游供应商。两种号的凭据、额度接口与模型清单都不同，号池按它分流。
+// 上游供应商。每种号的凭据、额度接口与模型清单都不同，号池按它分流。
+//
+// 站点（国内站 / 国际站）不是独立的供应商：同一家上游的国内、国际只是 host
+// 不同，账号行里用 meta["station"] 区分。这样选号、分组、模型路由都只需要认
+// 供应商这一层，面板上也不会把同一家的号拆成两栏。
 const (
 	ProviderRaccoon   = "raccoon"   // 商汤小浣熊（xiaohuanxiong.com）
 	ProviderSenseNova = "sensenova" // 商汤日日新 Token Plan（platform.sensenova.cn）
+	ProviderAutoClaw  = "autoclaw"  // 智谱 AutoClaw（autoglm-api.autoglm.ai / autoglm-api.zhipuai.cn）
+	ProviderCodeArts  = "codearts"  // 华为云码道 CodeArts Agent（snap-access.*.myhuaweicloud.com）
+)
+
+// Station 的取值。空值按国际站处理（autoclaw 国际站与 codearts 主流程默认都在
+// 海外/国内各自的主站；账号导入时必须显式写入，不会靠猜）。
+const (
+	StationGlobal = "global" // 国际站
+	StationCN     = "cn"     // 国内站
 )
 
 // Account 是对外的完整账号视图。Token 字段在 List/Get 时会解密好返回。
@@ -70,15 +83,58 @@ type Account struct {
 	// LeaseUntil 是该账号的在途租约到期时刻（毫秒）。> now 表示已被某个请求独占，
 	// 选号时跳过；0 表示无租约。仅在面板开启「单号串行」时写入。
 	LeaseUntil int64
+
+	// Ext* 是「外部渠道」（AutoClaw / CodeArts）的通用凭据槽。
+	//
+	// 这两家的凭据形态差别很大（AutoClaw 是 access/refresh 双 token + 站点，
+	// CodeArts 是一整段含 AK/SK/security-token/DPoP 私钥的 JSON），但都是
+	// 「一段会轮换、需要整体写回的不透明凭据」。共用一个列而不是每家再加两列，
+	// 以后接入新的同类渠道时不必再改表结构。
+	//
+	//   - ExtToken / ExtTokenExp：当前主凭据与到期时刻（CodeArts 的 AK/SK 三元组
+	//     整体 JSON 也放这里，到期时刻单独存字段便于选号与续期判断）；
+	//   - ExtRefreshToken：refresh_token（一次性的那种）；
+	//   - ExtRefreshExp：refresh_token 自己的到期时刻，0 = 不可知；
+	//   - ExtSite：站点（global / cn），见 Station* 常量；
+	//   - ExtExtra：其余渠道私有状态（CodeArts 的 DPoP 私钥、device_id、手机号等），JSON。
+	ExtToken        string
+	ExtTokenExp     int64
+	ExtRefreshToken string
+	ExtRefreshExp   int64
+	ExtSite         string
+	ExtExtra        string
+	// ExtRev 是凭据版本号。每次写回凭据 +1；写回时带上读到的版本做 CAS，
+	// 版本已被别的副本改动就放弃写入（对方已经续期成功，用它的即可）。
+	// 与在途租约、退避同一套思路：多副本下进程内锁不可靠，落到库上才算数。
+	ExtRev int64
 }
 
 // IsSenseNova 判断是否商汤日日新账号。空 provider 按小浣熊处理。
 func (a *Account) IsSenseNova() bool { return a.Provider == ProviderSenseNova }
 
+// IsExternal 判断是否外部渠道账号（AutoClaw / CodeArts）。这两家的凭据与
+// 转发路径都在各自包里，但号池调度、冷却、租约、流水与其它供应商共用。
+func (a *Account) IsExternal() bool {
+	return a.Provider == ProviderAutoClaw || a.Provider == ProviderCodeArts
+}
+
+// Station 返回账号所在站点，空值按国际站。仅外部渠道有意义。
+func (a *Account) Station() string {
+	if strings.TrimSpace(a.ExtSite) == "" {
+		return StationGlobal
+	}
+	return a.ExtSite
+}
+
 // ProviderName 返回展示用的供应商名。
 func (a *Account) ProviderName() string {
-	if a.IsSenseNova() {
+	switch a.Provider {
+	case ProviderSenseNova:
 		return "日日新"
+	case ProviderAutoClaw:
+		return "AutoClaw"
+	case ProviderCodeArts:
+		return "码道 CodeArts"
 	}
 	return "小浣熊"
 }
@@ -87,7 +143,8 @@ const accountCols = `id, uid, name, note, token, refresh_token, token_exp, credi
 	status, cool_until, cool_reason, expires_at, device_id, device_name, os_version,
 	office_identity, platform, client_channel, language, meta, priority, enabled,
 	last_checkin_day, created_at, updated_at, last_used, max_concurrent, lease_until,
-	provider, sn_username, sn_password, sn_token, sn_token_exp, sn_refresh_token, sn_pool, sn_pool_at`
+	provider, sn_username, sn_password, sn_token, sn_token_exp, sn_refresh_token, sn_pool, sn_pool_at,
+	ext_token, ext_token_exp, ext_refresh_token, ext_refresh_exp, ext_site, ext_extra, ext_rev`
 
 // 写入用的字段补丁：nil 表示不改。
 type AccountPatch struct {
@@ -127,19 +184,29 @@ type AccountPatch struct {
 	SNRefreshToken *string
 	SNPool         *string
 	SNPoolAt       *int64
+
+	// Ext* 见 Account 上的同名字段说明。
+	ExtToken        *string
+	ExtTokenExp     *int64
+	ExtRefreshToken *string
+	ExtRefreshExp   *int64
+	ExtSite         *string
+	ExtExtra        *string
 }
 
 func (s *Store) scanAccount(sc interface{ Scan(...any) error }) (*Account, error) {
 	var a Account
 	var tok, ref, meta string
 	var snUser, snPass, snTok, snRef, snPool string
+	var extTok, extRef, extSite, extExtra string
 	var enabled int64
 	err := sc.Scan(&a.ID, &a.UID, &a.Name, &a.Note, &tok, &ref, &a.TokenExp,
 		&a.Credits, &a.CreditsAt, &a.Status, &a.CoolUntil, &a.CoolReason, &a.ExpiresAt,
 		&a.DeviceID, &a.DeviceName, &a.OSVersion, &a.OfficeIdentity, &a.Platform,
 		&a.ClientChannel, &a.Language, &meta, &a.Priority, &enabled,
 		&a.LastCheckinDay, &a.CreatedAt, &a.UpdatedAt, &a.LastUsed, &a.MaxConcurrent, &a.LeaseUntil,
-		&a.Provider, &snUser, &snPass, &snTok, &a.SNTokenExp, &snRef, &snPool, &a.SNPoolAt)
+		&a.Provider, &snUser, &snPass, &snTok, &a.SNTokenExp, &snRef, &snPool, &a.SNPoolAt,
+		&extTok, &a.ExtTokenExp, &extRef, &a.ExtRefreshExp, &extSite, &extExtra, &a.ExtRev)
 	if err != nil {
 		return nil, err
 	}
@@ -168,6 +235,15 @@ func (s *Store) scanAccount(sc interface{ Scan(...any) error }) (*Account, error
 		return nil, err
 	}
 	a.SNPool, _ = s.cipher.Decrypt(snPool)
+	// 外部渠道凭据：主凭据与 refresh_token 连同一段私有 JSON 整体加密。
+	if a.ExtToken, err = s.cipher.Decrypt(extTok); err != nil {
+		return nil, err
+	}
+	if a.ExtRefreshToken, err = s.cipher.Decrypt(extRef); err != nil {
+		return nil, err
+	}
+	a.ExtSite = extSite
+	a.ExtExtra, _ = s.cipher.Decrypt(extExtra)
 	if meta != "" {
 		_ = json.Unmarshal([]byte(meta), &a.Meta)
 	}
@@ -248,7 +324,7 @@ func (s *Store) CreateAccount(ctx context.Context, a *Account) error {
 		enabled = 1
 	}
 	_, err := s.exec(ctx, `INSERT INTO accounts (`+accountCols+`)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		a.ID, a.UID, a.Name, a.Note, s.cipher.Encrypt(a.Token), s.cipher.Encrypt(a.RefreshToken),
 		a.TokenExp, a.Credits, a.CreditsAt, a.Status, a.CoolUntil, a.CoolReason, a.ExpiresAt,
 		a.DeviceID, a.DeviceName, a.OSVersion, a.OfficeIdentity, a.Platform, a.ClientChannel,
@@ -256,7 +332,9 @@ func (s *Store) CreateAccount(ctx context.Context, a *Account) error {
 		a.CreatedAt, a.UpdatedAt, a.LastUsed, a.MaxConcurrent, a.LeaseUntil,
 		a.Provider, s.cipher.Encrypt(a.SNUsername), s.cipher.Encrypt(a.SNPassword),
 		s.cipher.Encrypt(a.SNToken), a.SNTokenExp, s.cipher.Encrypt(a.SNRefreshToken),
-		s.cipher.Encrypt(a.SNPool), a.SNPoolAt)
+		s.cipher.Encrypt(a.SNPool), a.SNPoolAt,
+		s.cipher.Encrypt(a.ExtToken), a.ExtTokenExp, s.cipher.Encrypt(a.ExtRefreshToken),
+		a.ExtRefreshExp, a.ExtSite, s.cipher.Encrypt(a.ExtExtra), a.ExtRev)
 	if err == nil {
 		s.invalidateAccounts()
 	}
@@ -374,6 +452,24 @@ func (s *Store) UpdateAccount(ctx context.Context, id string, p AccountPatch) er
 	if p.SNPoolAt != nil {
 		add("sn_pool_at", *p.SNPoolAt)
 	}
+	if p.ExtToken != nil {
+		add("ext_token", s.cipher.Encrypt(*p.ExtToken))
+	}
+	if p.ExtTokenExp != nil {
+		add("ext_token_exp", *p.ExtTokenExp)
+	}
+	if p.ExtRefreshToken != nil {
+		add("ext_refresh_token", s.cipher.Encrypt(*p.ExtRefreshToken))
+	}
+	if p.ExtRefreshExp != nil {
+		add("ext_refresh_exp", *p.ExtRefreshExp)
+	}
+	if p.ExtSite != nil {
+		add("ext_site", *p.ExtSite)
+	}
+	if p.ExtExtra != nil {
+		add("ext_extra", s.cipher.Encrypt(*p.ExtExtra))
+	}
 	args = append(args, id)
 	_, err := s.exec(ctx, `UPDATE accounts SET `+joinComma(sets)+` WHERE id = ?`, args...)
 	if err == nil {
@@ -394,6 +490,44 @@ func (s *Store) GetByProviderUID(ctx context.Context, provider, uid string) (*Ac
 		return nil, nil
 	}
 	return a, err
+}
+
+// ExtCredential 是外部渠道（autoclaw / codearts）的凭据快照，用于 CAS 写回。
+type ExtCredential struct {
+	Token        string
+	TokenExp     int64
+	RefreshToken string
+	RefreshExp   int64
+	Site         string
+	Extra        string
+}
+
+// ReplaceExtCredential 以「读到的版本号」为条件整体写回外部渠道凭据。
+//
+// 续期是这类渠道最脆弱的一环：refresh_token 往往一次性、轮换后旧值即作废。
+// 多副本同时续期时，必须保证只有一个副本的结果被采纳，否则后写的那个会把
+// 已经轮换过的 refresh_token 覆盖成作废的旧值，账号直接掉登录。
+//
+// 所以采用 CAS：WHERE ext_rev = expected，写成功的同时把 rev +1。
+// 返回 updated=false 表示别的副本已经先写过，调用方应当重新读库、用对方的凭据。
+func (s *Store) ReplaceExtCredential(ctx context.Context, id string, expectedRev int64, c ExtCredential) (bool, error) {
+	res, err := s.exec(ctx,
+		`UPDATE accounts SET ext_token = ?, ext_token_exp = ?, ext_refresh_token = ?,
+			ext_refresh_exp = ?, ext_site = ?, ext_extra = ?, ext_rev = ext_rev + 1,
+			updated_at = ?
+		 WHERE id = ? AND ext_rev = ?`,
+		s.cipher.Encrypt(c.Token), c.TokenExp, s.cipher.Encrypt(c.RefreshToken),
+		c.RefreshExp, c.Site, s.cipher.Encrypt(c.Extra),
+		time.Now().UnixMilli(), id, expectedRev)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return false, nil
+	}
+	s.invalidateAccounts()
+	return true, nil
 }
 
 // AcquireLease 尝试独占账号，返回本次租约的到期时刻（0 = 已被别人占着）。

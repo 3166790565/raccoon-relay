@@ -19,11 +19,38 @@ import (
 //
 // 默认模型（raccoon-chat-ml-5-5）走小浣熊；只有明确属于日日新的模型才走日日新，
 // 其余（含未知/自定义模型名）一律按小浣熊处理，保持老客户端与测试兼容。
+//
+// 外部渠道（AutoClaw / CodeArts）的模型名与日日新有重叠（例如 glm-5.2、
+// deepseek-*），靠名字猜供应商必然出错。所以它们一律带前缀：`autoclaw/zai_auto`、
+// `codearts/GLM-5.2`。前缀只在这一层剥掉，发给上游的是真实模型名；对外
+// /v1/models 与流水里保留带前缀的名字，客户端看到的名字始终稳定。
 func providerForModel(model string) string {
+	switch {
+	case hasModelPrefix(model, store.ProviderAutoClaw):
+		return store.ProviderAutoClaw
+	case hasModelPrefix(model, store.ProviderCodeArts):
+		return store.ProviderCodeArts
+	}
 	if isSenseNovaModel(model) {
 		return store.ProviderSenseNova
 	}
 	return store.ProviderRaccoon
+}
+
+func hasModelPrefix(model, provider string) bool {
+	prefix := provider + "/"
+	return len(model) > len(prefix) && strings.EqualFold(model[:len(prefix)], prefix)
+}
+
+// stripProviderPrefix 去掉对外名前缀，得到上游真实模型名。
+func stripProviderPrefix(model string) string {
+	if i := strings.IndexByte(model, '/'); i > 0 {
+		switch strings.ToLower(model[:i]) {
+		case store.ProviderAutoClaw, store.ProviderCodeArts:
+			return model[i+1:]
+		}
+	}
+	return model
 }
 
 // SNModelSource 是日日新实时模型清单的来源，由装配层注入 sensenova.Upstream。

@@ -36,6 +36,29 @@ type SNCredential struct {
 	Username     string
 }
 
+// ExtUpstream 是外部渠道（AutoClaw / CodeArts）需要转发层具备的最小能力。
+//
+// 和 SNUpstream 一样用接口注入，relay 不 import 渠道包（那些包反过来要依赖
+// relay 定下的模型/错误类型，直接 import 会成环）。
+//
+// 与 SNUpstream 的最大区别是「按账号实例化」：每个渠道有自己的站点、签名与
+// 并发上限，所以由装配层按账号的 provider 选用对应实现，而不是在 Engine 上挂
+// 一个全局字段。
+type ExtUpstream interface {
+	// OpenChat 发起一次对话，返回与其它上游同形的流。
+	OpenChat(ctx context.Context, acc *store.Account, body map[string]any) (*raccoon.ChatStream, error)
+	// EnsureCredential 保证账号凭据可用（必要时续期），并写回库。
+	// 返回的 token 只用于日志/诊断，不参与转发（转发实现自己读账号）。
+	EnsureCredential(ctx context.Context, acc *store.Account) error
+	// Models 返回该账号的实时模型清单；拉不到返回 nil，调用方回落到内置快照。
+	Models(ctx context.Context, acc *store.Account) []raccoon.Model
+}
+
+// ExternalUpstream 是 Engine 上的外部渠道分发表。nil 表示未接入。
+type ExternalUpstream interface {
+	UpstreamFor(provider string) ExtUpstream
+}
+
 // Engine 把「选号 → 刷新 → 上游请求 → 失败换号」串起来，三条协议共用。
 type Engine struct {
 	ST           *store.Store
@@ -46,6 +69,8 @@ type Engine struct {
 	DefaultModel string
 	// SN 是日日新上游，nil 表示未接入（只跑小浣熊）。
 	SN SNUpstream
+	// Ext 是外部渠道（AutoClaw / CodeArts）的分发表，nil 表示未接入。
+	Ext ExternalUpstream
 
 	// Event 上报运行事件（换号、上游失败、空响应）。nil 时静默跳过。
 	// 由装配层注入，避免 relay 直接依赖 admin 的写入路径。
@@ -389,8 +414,11 @@ func (e *Engine) RunOpenAI(ctx context.Context, req *ChatContext, sink OpenAISin
 
 var errNoAccount = errors.New("号池没有可用账号（全部冷却、积分耗尽或凭证失效）")
 
-// runOne 是对单个账号的一次尝试。按账号来源分流到小浣熊或日日新上游。
+// runOne 是对单个账号的一次尝试。按账号来源分流到对应上游。
 func (e *Engine) runOne(ctx context.Context, at *Attempt, req *ChatContext, sink OpenAISink) error {
+	if at.Account.IsExternal() {
+		return e.runOneExternal(ctx, at, req, sink)
+	}
 	if at.Account.IsSenseNova() {
 		return e.runOneSenseNova(ctx, at, req, sink)
 	}
@@ -546,6 +574,66 @@ func (e *Engine) runOneSenseNova(ctx context.Context, at *Attempt, req *ChatCont
 	}
 	e.Cool.MarkOnline(ctx, acc.ID)
 	e.Cool.ClearModel(ctx, acc.ID, req.Model)
+	sink.Complete()
+	return nil
+}
+
+// runOneExternal 是外部渠道（AutoClaw / CodeArts）的转发路径。
+//
+// 与另外两条路径的结构完全一致：先确保凭据可用，再取流、写客户端、
+// 收尾（MarkOnline + 清模型级冷却）。渠道差异全部封在 ExtUpstream 里——
+// 包括站点选择、请求签名、请求体整形与错误归一。
+func (e *Engine) runOneExternal(ctx context.Context, at *Attempt, req *ChatContext, sink OpenAISink) error {
+	if e.Ext == nil {
+		return &raccoon.UpstreamError{Status: 500, Message: "外部渠道未配置"}
+	}
+	up := e.Ext.UpstreamFor(at.Account.Provider)
+	if up == nil {
+		return &raccoon.UpstreamError{Status: 500, Message: at.Account.ProviderName() + " 渠道未配置"}
+	}
+	if err := up.EnsureCredential(ctx, at.Account); err != nil {
+		return err
+	}
+
+	stream, err := up.OpenChat(ctx, at.Account, req.Body)
+	if err != nil {
+		return err
+	}
+	defer stream.Close()
+
+	if err := sink.Begin(); err != nil {
+		return err
+	}
+	if c, ok := sink.(committingSink); ok && c.Commitment() {
+		at.Started = true
+	}
+	for {
+		ev, err := stream.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		if ev.Delta != nil {
+			if err := sink.Delta(*ev.Delta); err != nil {
+				return err
+			}
+		}
+		if ev.Usage != nil {
+			sink.Usage(*ev.Usage)
+		}
+		if ev.FinishReason != "" {
+			sink.Finish(ev.FinishReason)
+		}
+	}
+	if !stream.Seen() {
+		e.report(store.LevelWarn, "上游返回空响应（502）",
+			"账号："+at.Account.Name+"\n模型："+req.Model+"\n上游已建连但没有任何数据块", at.Account.ID)
+		return &raccoon.UpstreamError{Status: 502, Message: at.Account.ProviderName() + " 上游返回空响应"}
+	}
+	e.Cool.MarkOnline(ctx, at.Account.ID)
+	e.Cool.ClearModel(ctx, at.Account.ID, req.Model)
 	sink.Complete()
 	return nil
 }

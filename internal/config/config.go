@@ -83,6 +83,17 @@ type Config struct {
 	OAuthRedirectBase string
 	Timezone          string
 	UpstreamBase      string
+
+	// 外部渠道的上游基址。留空 = 用各家默认地址（国内/国际站点）。
+	// 面板可改并持久化到 settings；这里只是首次启动的默认值。
+	//   - AutoClaw：国际站 autoglm-api.autoglm.ai，国内站 autoglm-api.zhipuai.cn，
+	//     国内对话走加速网关 autoglm-acceleration-api.zhipuai.cn；
+	//   - CodeArts：国内 snap-access.cn-north-4，国际站 snap-access.ap-southeast-1。
+	AutoClawInternationalBase string
+	AutoClawCNBase            string
+	AutoClawCNManagedBase     string
+	CodeArtsMainlandBase      string
+	CodeArtsInternationalBase string
 	// 上游客户端指纹：对话/管理面发的版本号与 User-Agent。
 	// 上游桌面客户端发版后会过期，面板里可随时修改并持久化到 settings。
 	ClientVersion    string
@@ -215,6 +226,13 @@ func Load() (*Config, error) {
 		OAuthRedirectBase:   strings.TrimRight(env("OAUTH_REDIRECT_BASE", ""), "/"),
 		Timezone:            env("TZ", "Asia/Shanghai"),
 		UpstreamBase:        strings.TrimRight(env("UPSTREAM_BASE", "https://xiaohuanxiong.com"), "/"),
+
+		// 外部渠道基址：留空用内置默认值（见 cmd/relay 的装配）。
+		AutoClawInternationalBase: strings.TrimRight(env("AUTOCLAW_INTL_BASE", ""), "/"),
+		AutoClawCNBase:            strings.TrimRight(env("AUTOCLAW_CN_BASE", ""), "/"),
+		AutoClawCNManagedBase:     strings.TrimRight(env("AUTOCLAW_CN_MANAGED_BASE", ""), "/"),
+		CodeArtsMainlandBase:      strings.TrimRight(env("CODEARTS_MAINLAND_BASE", ""), "/"),
+		CodeArtsInternationalBase: strings.TrimRight(env("CODEARTS_INTL_BASE", ""), "/"),
 
 		// 指纹默认值与 raccoon 包的出厂常量一致；面板保存后以库里为准。
 		ClientVersion:    env("CLIENT_VERSION", "1.0.35"),

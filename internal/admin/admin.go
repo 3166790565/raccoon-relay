@@ -45,6 +45,13 @@ type Panel struct {
 	loginMgr *login.Manager
 	// snImport 处理日日新账号密码导入；nil 表示未配置。
 	snImport *login.SenseNovaImporter
+	// autoClawLogin / codeArtsLogin 处理外部渠道的登录与导入；nil 表示未配置。
+	autoClaw *AutoClawImporter
+	codeArts *CodeArtsImporter
+	// relayExt 按供应商取外部渠道实现，用于「刷新凭据」。
+	relayExt func(provider string) relayExt
+	// extModels 按账号拉外部渠道的实时模型清单（连通性测试用）。
+	extModels func(ctx context.Context, acc *store.Account) []raccoon.Model
 	// 模型管理：snClient 用于连通性测试，catalog 提供实时清单，
 	// modelRules 是启停/映射/能力位的规则层。
 	snClient     *sensenova.Client
@@ -233,6 +240,14 @@ func (p *Panel) Route(w http.ResponseWriter, r *http.Request) {
 		p.handleManual(w, r)
 	case path == "/api/auth/sensenova" && r.Method == http.MethodPost:
 		p.handleSenseNovaImport(w, r)
+	case path == "/api/auth/autoclaw" && r.Method == http.MethodPost:
+		p.handleAutoClawImport(w, r)
+	case path == "/api/auth/autoclaw/send-code" && r.Method == http.MethodPost:
+		p.handleAutoClawSendCode(w, r)
+	case path == "/api/auth/autoclaw/login" && r.Method == http.MethodPost:
+		p.handleAutoClawLogin(w, r)
+	case path == "/api/auth/codearts" && r.Method == http.MethodPost:
+		p.handleCodeArtsImport(w, r)
 	case path == "/api/models/manage" && r.Method == http.MethodGet:
 		p.handleModelManage(w, r)
 	case path == "/api/models/state" && r.Method == http.MethodPost:
@@ -304,6 +319,15 @@ func (p *Panel) handleListAccounts(w http.ResponseWriter, r *http.Request) {
 			row["snPoolAt"] = a.SNPoolAt
 			row["snTokenValid"] = sensenova.TokenReusable(a.SNToken, time.Now())
 		}
+		if a.IsExternal() {
+			// 外部渠道的额度是「积分桶」或「余额」，字段形状与另外两家都不同。
+			// 这里只带出面板要显示的最少信息，明细留在 snPool 里由前端展开。
+			row["extSite"] = a.Station()
+			row["extTokenExp"] = a.ExtTokenExp
+			row["hasExtRefresh"] = a.ExtRefreshToken != ""
+			row["snPoolAt"] = a.SNPoolAt
+			row["extQuota"] = externalQuotaSummary(a)
+		}
 		out = append(out, row)
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "accounts": out})
@@ -315,6 +339,26 @@ func providerOf(a *store.Account) string {
 		return store.ProviderRaccoon
 	}
 	return a.Provider
+}
+
+// externalQuotaSummary 从 Ext 额度 JSON 里取出面板展示用的摘要。
+// 两家的 JSON 形状不同，但都以 total/remain 为主；解析不出来就返回空串，
+// 前端显示「未同步」而不是 0。
+func externalQuotaSummary(a *store.Account) map[string]any {
+	if a.SNPool == "" {
+		return nil
+	}
+	var m map[string]any
+	if json.Unmarshal([]byte(a.SNPool), &m) != nil {
+		return nil
+	}
+	out := map[string]any{}
+	for _, k := range []string{"total", "remain", "plan", "dailyLimit", "dailyUsed", "at"} {
+		if v, ok := m[k]; ok {
+			out[k] = v
+		}
+	}
+	return out
 }
 
 // flattenSN 把存储的额度 JSON 展开成面板窗口列表。
@@ -721,6 +765,28 @@ func (p *Panel) actionRefresh(w http.ResponseWriter, r *http.Request, acc *store
 		p.refreshSenseNova(w, r, acc)
 		return
 	}
+	// 外部渠道的「刷新」= 用各自的续期材料换一份新凭据（码道还有 DPoP 私钥）。
+	if acc.IsExternal() {
+		ext := p.extUpstream(acc.Provider)
+		if ext == nil {
+			writeJSON(w, 400, map[string]any{"ok": false, "message": acc.ProviderName() + " 渠道未配置"})
+			return
+		}
+		if err := ext.EnsureCredential(r.Context(), acc); err != nil {
+			writeJSON(w, 400, map[string]any{"ok": false, "message": "续期失败：" + err.Error()})
+			return
+		}
+		if acc.Status == store.StatusRelogin {
+			online := store.StatusOnline
+			zero := int64(0)
+			empty := ""
+			_ = p.st.UpdateAccount(r.Context(), acc.ID, store.AccountPatch{
+				Status: &online, CoolUntil: &zero, CoolReason: &empty,
+			})
+		}
+		writeJSON(w, 200, map[string]any{"ok": true, "message": acc.ProviderName() + " 凭据已续期"})
+		return
+	}
 	if _, err := p.refresh.RefreshNow(r.Context(), acc); err != nil {
 		writeJSON(w, 400, map[string]any{"ok": false, "message": err.Error()})
 		return
@@ -849,6 +915,12 @@ func (p *Panel) actionCheckin(w http.ResponseWriter, r *http.Request, acc *store
 			Source: store.CheckinSourceManual, OK: false, Message: msg,
 		})
 	}
+	// 日日新没有签到；外部渠道（AutoClaw / 码道）的签到在各自包里，
+	// 绝不能拿它们去调小浣熊的签到接口——那只会得到一句无意义的 401。
+	if acc.IsSenseNova() || acc.IsExternal() {
+		p.actionScheduledCheckin(w, r, acc, recordFail)
+		return
+	}
 	token, err := p.refresh.EnsureFresh(r.Context(), acc)
 	if err != nil {
 		recordFail(err.Error())
@@ -892,6 +964,40 @@ func (p *Panel) actionCheckin(w http.ResponseWriter, r *http.Request, acc *store
 	writeJSON(w, 200, map[string]any{
 		"ok": res.OK, "claimed": res.Claimed, "already": res.Already,
 		"message": res.Message, "credits": credits,
+	})
+}
+
+// actionScheduledCheckin 处理「没有小浣熊签到接口」的那类账号（日日新 / 外部渠道）。
+//
+// 复用调度器的 Onboard：它已经按供应商分流到各自的签到实现，并负责落库、
+// 同步额度与运行事件。管理面不再重复写一套渠道判断。
+func (p *Panel) actionScheduledCheckin(w http.ResponseWriter, r *http.Request, acc *store.Account,
+	recordFail func(string)) {
+	if p.sched == nil {
+		recordFail("签到调度器未启用")
+		writeJSON(w, 400, map[string]any{"ok": false, "message": "签到调度器未启用"})
+		return
+	}
+	res, err := p.sched.Onboard(r.Context(), acc.ID)
+	if err != nil {
+		recordFail(err.Error())
+		writeJSON(w, 400, map[string]any{"ok": false, "message": err.Error()})
+		return
+	}
+	// Onboard 对这类渠道返回 {checkinDay, credits}；签到结果已由调度器写入
+	// 签到记录，这里只把最新状态回给面板。
+	fresh, _ := p.st.GetAccount(r.Context(), acc.ID)
+	credits := acc.Credits
+	if fresh != nil {
+		credits = fresh.Credits
+	}
+	msg := acc.ProviderName() + " 已执行签到与额度同步"
+	if acc.IsSenseNova() {
+		msg = "日日新账号：已同步额度（无签到）"
+	}
+	writeJSON(w, 200, map[string]any{
+		"ok": true, "message": msg, "credits": credits,
+		"checkinDay": res["checkinDay"],
 	})
 }
 
@@ -1158,6 +1264,7 @@ func (p *Panel) ApplyStoredSettings(ctx context.Context) {
 	p.applyStoredConcurrencySettings(ctx)
 	p.applyStoredFingerprintSettings(ctx)
 	p.applyStoredDispatchSettings(ctx)
+	p.applyStoredExternalSettings(ctx)
 }
 
 // applyStoredCheckinSettings 恢复面板里改过的签到配置。
@@ -1287,6 +1394,9 @@ func (p *Panel) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		settings[k] = v
 	}
 	for k, v := range p.dispatchSettings() {
+		settings[k] = v
+	}
+	for k, v := range p.externalSettings() {
 		settings[k] = v
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "settings": settings})
@@ -1673,6 +1783,13 @@ type settingsBody struct {
 	BackoffMaxMS    *int  `json:"backoffMaxMS"`
 	AffinityEnabled *bool `json:"affinityEnabled"`
 	AffinityTTLSec  *int  `json:"affinityTTLSec"`
+
+	// 外部渠道（AutoClaw / CodeArts）的上游基址。空串 = 用内置默认地址。
+	AutoClawIntlBase      *string `json:"autoClawIntlBase"`
+	AutoClawCNBase        *string `json:"autoClawCNBase"`
+	AutoClawCNManagedBase *string `json:"autoClawCNManagedBase"`
+	CodeArtsMainlandBase  *string `json:"codeArtsMainlandBase"`
+	CodeArtsIntlBase      *string `json:"codeArtsIntlBase"`
 }
 
 func (p *Panel) handlePutSettings(w http.ResponseWriter, r *http.Request) {
@@ -1760,6 +1877,10 @@ func (p *Panel) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := p.applyDispatchSettings(r.Context(), body); err != nil {
+		writeJSON(w, 400, map[string]any{"ok": false, "message": err.Error()})
+		return
+	}
+	if err := p.applyExternalSettings(r.Context(), body); err != nil {
 		writeJSON(w, 400, map[string]any{"ok": false, "message": err.Error()})
 		return
 	}

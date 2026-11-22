@@ -233,6 +233,11 @@ type ChatStream struct {
 	timer *time.Timer
 	seen  bool
 	err   error
+
+	// OnEvent 是可选的事件改写钩子：在事件返回给调用方之前调用。
+	// 目前只有 CodeArts 用它把截断过的工具名还原成原名。
+	// 必须在第一次调用 Next 之前设置。
+	OnEvent func(*ChatEvent)
 }
 
 // Seen 表示已经产出过内容，此后失败不能换号重试。
@@ -306,6 +311,9 @@ func (s *ChatStream) Next() (*ChatEvent, error) {
 			got = true
 		}
 		if got {
+			if s.OnEvent != nil {
+				s.OnEvent(ev)
+			}
 			return ev, nil
 		}
 	}
