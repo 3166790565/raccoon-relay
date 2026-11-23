@@ -328,6 +328,50 @@ func TestReviveExpiredHandlesExhaustedWithDeadline(t *testing.T) {
 	}
 }
 
+// 到期核对：窗口过去了不等于额度回来了。余额仍为 0 时保持冷却，
+// 余额恢复到正数才放回在线；读不到余额（ok=false）时按到期时间放行，
+// 不能因为一次查询失败把号永久关着。
+func TestReviveExpiredChecksBalanceWhenCallbackSet(t *testing.T) {
+	st := newStore(t)
+	cool := NewCooldownBook(st, true)
+	ctx := context.Background()
+	a := addAcc(t, st, "windowed", 0)
+
+	past := time.Now().Add(-time.Minute).UnixMilli()
+	exhausted := store.StatusExhausted
+	_ = st.UpdateAccount(ctx, a.ID, store.AccountPatch{Status: &exhausted, CoolUntil: &past})
+
+	cool.SetCoolRefresh(func(_ context.Context, acc *store.Account) (int64, bool) {
+		return 0, true // 窗口已过，但额度还是 0
+	})
+	cool.ReviveExpired(ctx)
+	got, _ := st.GetAccount(ctx, a.ID)
+	if got.Status != store.StatusExhausted {
+		t.Fatalf("余额仍为 0 时应保持冷却，实际 %s", got.Status)
+	}
+
+	cool.SetCoolRefresh(func(_ context.Context, acc *store.Account) (int64, bool) {
+		return -1, false // 读不到：按到期时间放行
+	})
+	cool.ReviveExpired(ctx)
+	got, _ = st.GetAccount(ctx, a.ID)
+	if got.Status != store.StatusOnline {
+		t.Fatalf("读不到余额时不应卡住复活，实际 %s", got.Status)
+	}
+
+	// 余额恢复正数：正常复活
+	b := addAcc(t, st, "windowed2", 0)
+	_ = st.UpdateAccount(ctx, b.ID, store.AccountPatch{Status: &exhausted, CoolUntil: &past})
+	cool.SetCoolRefresh(func(_ context.Context, acc *store.Account) (int64, bool) {
+		return 4200, true
+	})
+	cool.ReviveExpired(ctx)
+	got, _ = st.GetAccount(ctx, b.ID)
+	if got.Status != store.StatusOnline {
+		t.Fatalf("余额恢复后应复活，实际 %s", got.Status)
+	}
+}
+
 // CoolQuota：恢复了签到计划就停到计划时刻；没有计划才回退到次日 04:00。
 func TestCoolQuotaUsesResumeFunc(t *testing.T) {
 	st := newStore(t)

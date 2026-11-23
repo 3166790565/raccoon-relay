@@ -1416,6 +1416,8 @@ async function loadSettings() {
     $('setCreditResumeAbove').value = s.creditResumeAbove ?? 0;
     $('setMaxConcurrent').value = s.maxConcurrent ?? 0;
     $('setQueueWaitSec').value = s.queueWaitSec ?? 600;
+    $('setBalanceSyncIntervalMin').value = s.balanceSyncIntervalMin ?? 10;
+    $('setBalanceSyncStaleMin').value = s.balanceSyncStaleMin ?? 30;
     $('setClientVersion').value = s.clientVersion || '';
     $('setWebClientVersion').value = s.webClientVersion || '';
     $('setClientOSVersion').value = s.clientOSVersion || '';
@@ -1568,6 +1570,37 @@ $('saveConcurrencyBtn').addEventListener('click', async () => {
     await loadSettings();
   } catch (e) {
     $('concurrencyMsg').textContent = e.message;
+  }
+});
+
+// 余额巡检单独保存：只提交本卡片字段。
+$('saveBalanceSyncBtn').addEventListener('click', async () => {
+  const interval = numOrNaN($('setBalanceSyncIntervalMin'));
+  const stale = numOrNaN($('setBalanceSyncStaleMin'));
+  if (!Number.isFinite(interval) || interval < 0 || interval > 1440) {
+    $('balanceSyncMsg').textContent = '巡检间隔请填写 0~1440 分钟（0 = 关闭）';
+    return;
+  }
+  if (!Number.isFinite(stale) || stale < 0 || stale > 10080) {
+    $('balanceSyncMsg').textContent = '陈旧窗口请填写 0~10080 分钟';
+    return;
+  }
+  if (interval > 0 && stale < interval) {
+    $('balanceSyncMsg').textContent = '陈旧窗口不能小于巡检间隔，否则每轮都会重查全部账号';
+    return;
+  }
+  try {
+    await api('/api/settings', {
+      method: 'PUT',
+      body: JSON.stringify({
+        balanceSyncIntervalMin: Math.round(interval),
+        balanceSyncStaleMin: Math.round(stale),
+      }),
+    });
+    $('balanceSyncMsg').textContent = interval === 0 ? '已保存，已关闭周期巡检' : '已保存，下一轮巡检生效';
+    await loadSettings();
+  } catch (e) {
+    $('balanceSyncMsg').textContent = e.message;
   }
 });
 

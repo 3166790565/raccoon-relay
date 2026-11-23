@@ -276,6 +276,59 @@ func (u *Usage) EarliestReset() int64 {
 	return best
 }
 
+// NextReset 返回「额度恢复」的时刻（毫秒，0 表示上游没给）。
+//
+// 日日新没有每日签到，额度按窗口滚动：5 小时池用尽等 5 小时窗口重置，
+// 本周池用尽等 7 日窗口重置。所以 402 之后不能用签到计划去估算恢复时刻，
+// 只能看上游给的 reset_at。
+//
+// 有多格同时用尽时必须取**最晚**的重置时刻：一次调用要同时穿过 5 小时与
+// 本周两个窗口，5 小时窗口先补满、7 日窗口还是 0 的话请求照样 402。
+// 取最早会提前把号放出来，白撞一次。
+//
+// 取值顺序：
+//  1. 已用尽窗口里最晚的重置时刻（真正决定「什么时候全家桶都能用」）；
+//  2. 没有窗口标记用尽（剩余读数有误差）时，取全部窗口里最早的重置时刻兜底；
+//  3. 都没有就返回 0，由调用方回退到默认恢复时刻。
+func (u *Usage) NextReset() int64 {
+	if u == nil {
+		return 0
+	}
+	var exhausted, any int64
+	for _, w := range u.Flatten() {
+		if w.ResetAt <= 0 {
+			continue
+		}
+		ms := w.ResetAt * 1000
+		if any == 0 || ms < any {
+			any = ms
+		}
+		if w.Remaining <= 0 && ms > exhausted {
+			exhausted = ms
+		}
+	}
+	if exhausted > 0 {
+		return exhausted
+	}
+	return any
+}
+
+// PoolsExhausted 判断所有声明了额度上限的窗口是否都已用尽。
+// 没有可读窗口（Limit 全为 0）时返回 false——「读不到」不等于「没钱了」。
+func (u *Usage) PoolsExhausted() bool {
+	if u == nil {
+		return false
+	}
+	seen := false
+	for _, w := range u.Flatten() {
+		seen = true
+		if w.Remaining > 0 {
+			return false
+		}
+	}
+	return seen
+}
+
 // ModelIDs 汇总所有池声明覆盖的模型，去重并排序。
 func (u *Usage) ModelIDs() []string {
 	if u == nil {

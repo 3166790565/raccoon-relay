@@ -48,6 +48,10 @@ type CooldownBook struct {
 	// quotaResume 由装配层注入（读签到计划），给出「积分耗尽」账号的恢复时刻。
 	// nil 时回退到次日 04:00。号池不直接依赖签到调度器，避免两个包互相引用。
 	quotaResume ResumeFunc
+	// coolRefresh 在「冷却到期」时核对余额，供有额度窗口的上游使用（日日新）。
+	// 返回 (credits, ok)：ok=false 或 credits<0 表示读不到，按到期时间放行；
+	// credits==0 表示额度仍未恢复，保持冷却。
+	coolRefresh func(ctx context.Context, acc *store.Account) (int64, bool)
 }
 
 // ResumeFunc 返回某账号可以恢复选号的绝对毫秒时刻；ok=false 表示没有可靠依据。
@@ -57,6 +61,17 @@ type ResumeFunc func(ctx context.Context, acc *store.Account) (until int64, ok b
 func (c *CooldownBook) SetQuotaResume(fn ResumeFunc) {
 	c.mu.Lock()
 	c.quotaResume = fn
+	c.mu.Unlock()
+}
+
+// SetCoolRefresh 注入「冷却到期时核对余额」的回调。
+//
+// 只有额度按窗口滚动、且没有签到补分这一步的上游需要它（目前是日日新）：
+// 到期时刻到点只说明窗口过去了，额度是否真的回到账号上还要看读数。
+// fn 为 nil 时 ReviveExpired 只看到期时刻（小浣熊/外部渠道的旧行为）。
+func (c *CooldownBook) SetCoolRefresh(fn func(ctx context.Context, acc *store.Account) (int64, bool)) {
+	c.mu.Lock()
+	c.coolRefresh = fn
 	c.mu.Unlock()
 }
 
@@ -491,6 +506,20 @@ func (c *CooldownBook) CoolQuota(ctx context.Context, acc *store.Account, detail
 	return until
 }
 
+// CoolQuotaUntil 与 CoolQuota 相同，但恢复时刻由调用方给定（日日新的额度窗口
+// reset_at）。回写状态与事件仍走同一套，保证面板文案一致。
+func (c *CooldownBook) CoolQuotaUntil(ctx context.Context, accID string, until int64, detail string) {
+	if accID == "" {
+		return
+	}
+	if until <= time.Now().UnixMilli() {
+		until = time.Now().UnixMilli() + 1000
+	}
+	msg := defaultStr(detail, "积分耗尽")
+	c.setAccount(ctx, accID, store.StatusExhausted, until, msg)
+	c.emitWhy(accID, store.LevelWarn, "停用账号 "+statusLabel(store.StatusExhausted), msg, until)
+}
+
 // NonCooling 判断这类失败是否不冷却账号、只换号重试。
 // 转发层用它决定「不写冷却事件」时，不会把未停号的账号误报成已冷却。
 func NonCooling(kind FailKind) bool {
@@ -556,10 +585,15 @@ func (c *CooldownBook) MarkOnline(ctx context.Context, accID string) {
 // 两种状态都会到期：
 //   - cooling：429/5xx/风控的临时冷却；
 //   - exhausted 且 CoolUntil > 0：积分耗尽，冷却到下一次签到补分
-//     （没有签到计划时回退到次日 04:00）。
+//     （没有签到计划时回退到次日 04:00）；日日新则是额度窗口重置时刻。
 //
 // CoolUntil 为 0 的 exhausted 是「等签到/余额回升」的阈值暂停，交给
 // ApplyCreditPolicy 处理，这里不碰，否则会绕过低积分规则把它放出来。
+//
+// 「到期时刻到了」不等于「额度真的回来了」：本轮（5 小时/周）额度耗尽的
+// 账号到期时如果余额仍是旧的 0，放出去会被选号层立刻挡住，面板上则表现为
+// 反复「恢复在线 → 又消失」。所以核对一次余额：>= 0 就用新读数决定去留，
+// 读不到（负值）才按到期时间放行，避免因为一次查询失败把号永久关着。
 func (c *CooldownBook) ReviveExpired(ctx context.Context) {
 	accounts, err := c.st.ListAccounts(ctx)
 	if err != nil {
@@ -575,6 +609,13 @@ func (c *CooldownBook) ReviveExpired(ctx context.Context) {
 			}
 		default:
 			continue
+		}
+		// 核对余额：coolRefresh 只针对「有额度窗口的上游」注入（日日新）。
+		// 小浣熊与外部渠道的恢复依赖签到/额度接口，这里不额外打上游。
+		if c.coolRefresh != nil {
+			if credits, ok := c.coolRefresh(ctx, a); ok && credits >= 0 && credits == 0 {
+				continue // 额度仍然为 0：保持冷却，下一轮再试
+			}
 		}
 		st := store.StatusOnline
 		zero := int64(0)

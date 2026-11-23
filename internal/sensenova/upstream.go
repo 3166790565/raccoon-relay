@@ -18,6 +18,10 @@ type Upstream struct {
 	ST *store.Store
 }
 
+// refreshTimeout 是转发热路径上读额度的自设上限：额度查询是控制面请求，
+// 不能因为上游控制台慢把一条对话请求卡在「冷却前」几十秒。
+const refreshTimeout = 8 * time.Second
+
 func NewUpstream(c *Client, st *store.Store) *Upstream { return &Upstream{C: c, ST: st} }
 
 // Upstream 必须满足 relay 的日日新接口，编译期校验。
@@ -155,4 +159,59 @@ func (u *Upstream) ModelsFor(ctx context.Context, acc *store.Account) []raccoon.
 // OpenChat 实现 relay.SNUpstream。
 func (u *Upstream) OpenChat(ctx context.Context, apiKey string, body map[string]any) (*raccoon.ChatStream, error) {
 	return u.C.OpenChat(ctx, apiKey, body)
+}
+
+// NextReset 实现 relay.SNQuotaSource：返回该账号额度恢复的绝对毫秒时刻。
+//
+// 日日新没有每日签到，额度按 5 小时 / 本周窗口滚动，所以「停到下一次签到补分」
+// 对它没有意义。这里直接问控制台要 reset_at，并顺手刷新一次积分：
+//
+//   - 短超时（refreshTimeout）：转发热路径上不能为了等一个额度查询把请求拖住；
+//   - 只有「确实读到了用尽窗口」才通过 staleCredits 回写余额，读不到不改旧值；
+//   - 返回 ok=false 时调用方回退到默认恢复时刻，而不是把号放出来。
+func (u *Upstream) NextReset(ctx context.Context, acc *store.Account) (int64, bool, int64, bool) {
+	if acc == nil || !acc.IsSenseNova() {
+		return 0, false, 0, false
+	}
+	qctx, cancel := context.WithTimeout(ctx, refreshTimeout)
+	defer cancel()
+	usage, err := u.FetchUsageForUsed(qctx, acc)
+	if err != nil || usage == nil {
+		return 0, false, 0, false
+	}
+	until := usage.NextReset()
+	if until <= time.Now().UnixMilli() {
+		// 上游给的重置时刻已经过去（或根本没给）：按窗口常识兜底会误导，
+		// 交给调用方回退默认时刻，由余额巡检决定何时真正放出来。
+		until = 0
+	}
+	remaining, _ := usage.Total()
+	credits := int64(remaining)
+	stale := usage.PoolsExhausted()
+	return until, until > 0, credits, stale
+}
+
+// FetchUsageForUsed 与 FetchUsageFor 相同，但额外返回归一化后的 Usage，
+// 供额度耗尽时判断「哪一格用尽、何时重置」。登录票续期与回写逻辑复用。
+func (u *Upstream) FetchUsageForUsed(ctx context.Context, acc *store.Account) (*Usage, error) {
+	if acc == nil || !acc.IsSenseNova() {
+		return nil, errors.New("不是日日新账号")
+	}
+	cred, err := u.EnsureToken(ctx, acc)
+	if err != nil {
+		return nil, err
+	}
+	if cred != nil && cred.ConsoleToken != "" && cred.ConsoleToken != acc.SNToken {
+		exp := cred.ExpiresAt
+		patch := store.AccountPatch{SNToken: &cred.ConsoleToken, SNTokenExp: &exp}
+		if cred.Username != "" {
+			patch.SNUsername = &cred.Username
+		}
+		if err := u.ST.UpdateAccount(ctx, acc.ID, patch); err != nil {
+			return nil, err
+		}
+		acc.SNToken, acc.SNTokenExp = cred.ConsoleToken, exp
+	}
+	info := ParseToken(acc.SNToken)
+	return u.C.FetchUsage(ctx, acc.SNToken, info.TenantID)
 }

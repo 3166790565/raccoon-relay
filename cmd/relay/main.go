@@ -210,6 +210,8 @@ func main() {
 	catalog.SN = snUpstream // 日日新模型清单实时拉取，拉不到才用内置快照
 	engine := relay.BuildEngine(cfg, st, po, cool, client, refresher)
 	engine.SN = snUpstream
+	// 额度窗口查询：日日新 402 后按上游 reset_at 恢复，而不是等签到补分。
+	engine.SNQuota = snUpstream
 	engine.Ext = relay.NewExternalRegistry()
 	engine.Event = func(ev store.RuntimeEvent) { events.Emit(ev) }
 	engine.SetRetryDelay(time.Duration(cfg.RetryDelayMS) * time.Millisecond)
@@ -236,6 +238,18 @@ func main() {
 	}
 	balancer := &creditsync.Balancer{ST: st, Client: client, Auth: refresher, SN: snUpstream,
 		Ext: extBalance, OnUpdated: po.ApplyCreditPolicy}
+	// 日日新没有签到这一环，余额只能靠巡检更新。冷却到期时也先核对一次读数：
+	// 窗口到期不等于额度回来，余额仍为 0 就不放出来（见 ReviveExpired）。
+	cool.SetCoolRefresh(func(ctx context.Context, acc *store.Account) (int64, bool) {
+		if !acc.IsSenseNova() {
+			return -1, false
+		}
+		c, err := balancer.Refresh(ctx, acc)
+		if err != nil {
+			return -1, false
+		}
+		return c, true
+	})
 
 	// 调度器始终构造：自动循环由 CheckinEnable 决定是否跑，但手动「全部签到」任何时候都要能用。
 	sch := scheduler.New(cfg, st, client, refresher, balancer)
@@ -347,6 +361,7 @@ func main() {
 	go func() {
 		ticker := time.NewTicker(time.Minute)
 		defer ticker.Stop()
+		var lastBalanceSync time.Time
 		for {
 			select {
 			case <-ctx.Done():
@@ -362,6 +377,15 @@ func main() {
 				// 积分阈值规则按余额巡检：余额是异步变化的（签到、手动查余额），
 				// 在选号时硬过滤之外再定期落一次状态，面板上才看得到谁被暂停了。
 				po.ApplyCreditPolicy(ctx)
+				// 余额巡检：签到/导入/手动查询之外的号（含没有签到的日日新）靠这里更新读数。
+				// 间隔与陈旧窗口每轮现读 cfg，面板改完下一轮就生效；间隔为 0 表示关闭。
+				if interval := time.Duration(cfg.BalanceSyncIntervalMin) * time.Minute; interval > 0 &&
+					time.Since(lastBalanceSync) >= interval {
+					lastBalanceSync = time.Now()
+					balancer.RefreshStale(ctx, time.Duration(cfg.BalanceSyncStaleMin)*time.Minute)
+					// 余额变了就立刻按阈值重算一次，省一轮等待。
+					po.ApplyCreditPolicy(ctx)
+				}
 				// 清理过期会话绑定与早已失效的退避记录，避免两张表无限增长。
 				now := time.Now().UnixMilli()
 				_, _ = st.PruneSessions(ctx, now)

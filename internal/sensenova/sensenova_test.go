@@ -2,6 +2,7 @@ package sensenova
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -74,6 +75,63 @@ func TestNormalizeUsageMapsWindows(t *testing.T) {
 	}
 	if ids := u.ModelIDs(); len(ids) != 1 || ids[0] != "sensenova-6.8-flash-lite" {
 		t.Fatalf("ModelIDs=%v", ids)
+	}
+}
+
+// 额度耗尽后的恢复时刻取「已用尽窗口里最晚的重置时刻」：一次调用要同时
+// 穿过 5 小时与本周两个窗口，只等先恢复的那一格会提前放号、再撞一次 402。
+func TestNextResetUsesLatestExhaustedWindow(t *testing.T) {
+	now := time.Now().Unix()
+	raw := fmt.Sprintf(`{"pools":[
+		{"id":"p1","name":"通用","pool_type":"default",
+		 "window_5h":{"limit":"60000","remaining":"0","reset_at":%d},
+		 "window_7d":{"limit":"600000","remaining":"0","reset_at":%d}},
+		{"id":"p2","name":"专属","pool_type":"dedicated",
+		 "window_5h":{"limit":"1000","remaining":"500","reset_at":%d}}
+	]}`, now+3600, now+7200, now+600)
+	var pu PoolUsage
+	if err := json.Unmarshal([]byte(raw), &pu); err != nil {
+		t.Fatal(err)
+	}
+	u := normalizeUsage(&pu)
+	want := (now + 7200) * 1000
+	if got := u.NextReset(); got != want {
+		t.Fatalf("应取两个用尽窗口里最晚的重置 %d，实际 %d", want, got)
+	}
+	if u.PoolsExhausted() {
+		// 还有一格剩余 500，不算全局耗尽
+		t.Fatal("有一个窗口还有剩余时不应判全部耗尽")
+	}
+}
+
+// 只有部分窗口用尽、其余还有余额时，仍然取用尽那一格的重置时刻，
+// 因为拦住调用的正是那一格。
+func TestNextResetIgnoresHealthyWindowsWhenOneIsExhausted(t *testing.T) {
+	now := time.Now().Unix()
+	raw := fmt.Sprintf(`{"pools":[
+		{"id":"p1","name":"通用","pool_type":"default",
+		 "window_5h":{"limit":"60000","remaining":"0","reset_at":%d},
+		 "window_7d":{"limit":"600000","remaining":"500000","reset_at":%d}}
+	]}`, now+3600, now+7200)
+	var pu PoolUsage
+	_ = json.Unmarshal([]byte(raw), &pu)
+	u := normalizeUsage(&pu)
+	if got, want := u.NextReset(), (now+3600)*1000; got != want {
+		t.Fatalf("应取用尽窗口的重置 %d，实际 %d", want, got)
+	}
+	if u.PoolsExhausted() {
+		t.Fatal("只有一格用尽时不应判全部耗尽")
+	}
+}
+
+// 上游没给 reset_at：不能瞎猜，返回 0 让调用方回退默认时刻。
+func TestNextResetWithoutResetAt(t *testing.T) {
+	raw := []byte(`{"pools":[{"id":"p1","pool_type":"default",
+		"window_5h":{"limit":"60000","remaining":"0"}}]}`)
+	var pu PoolUsage
+	_ = json.Unmarshal(raw, &pu)
+	if got := normalizeUsage(&pu).NextReset(); got != 0 {
+		t.Fatalf("没有 reset_at 应返回 0，实际 %d", got)
 	}
 }
 

@@ -80,9 +80,16 @@ type Config struct {
 	CreditStopEnable  bool
 	CreditStopBelow   int64
 	CreditResumeAbove int64
-	OAuthRedirectBase string
-	Timezone          string
-	UpstreamBase      string
+	// 余额巡检：每隔 BalanceSyncIntervalMin 分钟，把余额过旧的账号（超过
+	// BalanceSyncStaleMin 分钟没刷新、或从没读过）挨个查一遍。
+	// 0 = 关闭周期巡检，余额只在签到/手动「查余额」时更新。
+	// 签到本身会顺手刷一次余额，所以巡检主要补的是「没签到 / 签到没成功 /
+	// 日日新没有签到」这三种号。
+	BalanceSyncIntervalMin int
+	BalanceSyncStaleMin    int
+	OAuthRedirectBase      string
+	Timezone               string
+	UpstreamBase           string
 
 	// 外部渠道的上游基址。留空 = 用各家默认地址（国内/国际站点）。
 	// 面板可改并持久化到 settings；这里只是首次启动的默认值。
@@ -252,9 +259,13 @@ func Load() (*Config, error) {
 		CreditStopEnable:    envBool("CREDIT_STOP_ENABLE", false),
 		CreditStopBelow:     envInt64("CREDIT_STOP_BELOW", 0),
 		CreditResumeAbove:   envInt64("CREDIT_RESUME_ABOVE", 0),
-		OAuthRedirectBase:   strings.TrimRight(env("OAUTH_REDIRECT_BASE", ""), "/"),
-		Timezone:            env("TZ", "Asia/Shanghai"),
-		UpstreamBase:        strings.TrimRight(env("UPSTREAM_BASE", "https://xiaohuanxiong.com"), "/"),
+		// 每 10 分钟巡一轮，只查 30 分钟以上没刷新的号：面板上的余额不会长期停在旧值，
+		// 又不会让几十个号每分钟都去打上游。0 = 关闭巡检。
+		BalanceSyncIntervalMin: envInt("BALANCE_SYNC_INTERVAL_MIN", 10),
+		BalanceSyncStaleMin:    envInt("BALANCE_SYNC_STALE_MIN", 30),
+		OAuthRedirectBase:      strings.TrimRight(env("OAUTH_REDIRECT_BASE", ""), "/"),
+		Timezone:               env("TZ", "Asia/Shanghai"),
+		UpstreamBase:           strings.TrimRight(env("UPSTREAM_BASE", "https://xiaohuanxiong.com"), "/"),
 
 		// 外部渠道基址：留空用内置默认值（见 cmd/relay 的装配）。
 		AutoClawInternationalBase: strings.TrimRight(env("AUTOCLAW_INTL_BASE", ""), "/"),
@@ -331,6 +342,17 @@ func Load() (*Config, error) {
 	}
 	if c.CreditResumeAbove < c.CreditStopBelow {
 		c.CreditResumeAbove = c.CreditStopBelow
+	}
+	if c.BalanceSyncIntervalMin < 0 {
+		c.BalanceSyncIntervalMin = 0
+	}
+	if c.BalanceSyncStaleMin < 0 {
+		c.BalanceSyncStaleMin = 0
+	}
+	// 陈旧窗口必须覆盖住巡检间隔：否则每个号每轮都会被重查一遍，
+	// 用户把间隔调小反而制造了密集请求。
+	if c.BalanceSyncIntervalMin > 0 && c.BalanceSyncStaleMin < c.BalanceSyncIntervalMin {
+		c.BalanceSyncStaleMin = c.BalanceSyncIntervalMin
 	}
 	loc, err := time.LoadLocation(c.Timezone)
 	if err != nil {

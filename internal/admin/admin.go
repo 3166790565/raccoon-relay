@@ -1272,6 +1272,7 @@ func (p *Panel) ApplyStoredSettings(ctx context.Context) {
 	p.engine.SetRetryPolicy(untilExhausted, maxRetry)
 	p.applyStoredCheckinSettings(ctx)
 	p.applyStoredCooldownSettings(ctx)
+	p.applyStoredBalanceSyncSettings(ctx)
 	p.applyStoredLogSettings(ctx)
 	p.applyStoredRenewSettings(ctx)
 	p.applyStoredConcurrencySettings(ctx)
@@ -1402,6 +1403,9 @@ func (p *Panel) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		settings[k] = v
 	}
 	for k, v := range p.concurrencySettings() {
+		settings[k] = v
+	}
+	for k, v := range p.balanceSyncSettings() {
 		settings[k] = v
 	}
 	for k, v := range p.fingerprintSettings() {
@@ -1775,6 +1779,9 @@ type settingsBody struct {
 	CreditStopEnable    *bool  `json:"creditStopEnable"`
 	CreditStopBelow     *int64 `json:"creditStopBelow"`
 	CreditResumeAbove   *int64 `json:"creditResumeAbove"`
+	// 余额巡检：间隔为 0 = 关闭；陈旧窗口必须不小于间隔。
+	BalanceSyncIntervalMin *int `json:"balanceSyncIntervalMin"`
+	BalanceSyncStaleMin    *int `json:"balanceSyncStaleMin"`
 
 	LogFileEnable       *bool   `json:"logFileEnable"`
 	LogDir              *string `json:"logDir"`
@@ -1892,6 +1899,10 @@ func (p *Panel) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"ok": false, "message": err.Error()})
 		return
 	}
+	if err := p.applyBalanceSyncSettings(r.Context(), body); err != nil {
+		writeJSON(w, 400, map[string]any{"ok": false, "message": err.Error()})
+		return
+	}
 	if err := p.applyLogSettings(r.Context(), body); err != nil {
 		writeJSON(w, 400, map[string]any{"ok": false, "message": err.Error()})
 		return
@@ -1967,6 +1978,61 @@ func (p *Panel) applyCooldownSettings(ctx context.Context, body settingsBody) er
 	_ = p.st.SetSetting(ctx, "creditResumeAbove", strconv.FormatInt(pol.ResumeAbove, 10))
 	p.po.ApplyCreditPolicy(ctx)
 	return nil
+}
+
+// applyBalanceSyncSettings 校验并持久化余额巡检参数。
+//
+// 巡检循环每轮现读 cfg，所以保存后下一轮就生效，无需重启。两项互相约束：
+// 陈旧窗口不能小于巡检间隔，否则每轮都会把所有号重查一遍，间隔越小请求越密。
+func (p *Panel) applyBalanceSyncSettings(ctx context.Context, body settingsBody) error {
+	if body.BalanceSyncIntervalMin == nil && body.BalanceSyncStaleMin == nil {
+		return nil
+	}
+	interval, stale := p.cfg.BalanceSyncIntervalMin, p.cfg.BalanceSyncStaleMin
+	if body.BalanceSyncIntervalMin != nil {
+		if *body.BalanceSyncIntervalMin < 0 || *body.BalanceSyncIntervalMin > 1440 {
+			return fmt.Errorf("余额巡检间隔必须在 0~1440 分钟之间（0 = 关闭）")
+		}
+		interval = *body.BalanceSyncIntervalMin
+	}
+	if body.BalanceSyncStaleMin != nil {
+		if *body.BalanceSyncStaleMin < 0 || *body.BalanceSyncStaleMin > 10080 {
+			return fmt.Errorf("余额陈旧窗口必须在 0~10080 分钟之间")
+		}
+		stale = *body.BalanceSyncStaleMin
+	}
+	if interval > 0 && stale < interval {
+		return fmt.Errorf("陈旧窗口（%d 分钟）不能小于巡检间隔（%d 分钟），否则每轮都会重查全部账号",
+			stale, interval)
+	}
+	p.cfg.BalanceSyncIntervalMin, p.cfg.BalanceSyncStaleMin = interval, stale
+	_ = p.st.SetSetting(ctx, "balanceSyncIntervalMin", strconv.Itoa(interval))
+	_ = p.st.SetSetting(ctx, "balanceSyncStaleMin", strconv.Itoa(stale))
+	return nil
+}
+
+// applyStoredBalanceSyncSettings 把面板保存过的余额巡检参数盖回 cfg。
+func (p *Panel) applyStoredBalanceSyncSettings(ctx context.Context) {
+	getInt := func(key string, dst *int) {
+		if raw := p.st.GetSetting(ctx, key, ""); raw != "" {
+			if n, err := strconv.Atoi(raw); err == nil && n >= 0 {
+				*dst = n
+			}
+		}
+	}
+	getInt("balanceSyncIntervalMin", &p.cfg.BalanceSyncIntervalMin)
+	getInt("balanceSyncStaleMin", &p.cfg.BalanceSyncStaleMin)
+	if p.cfg.BalanceSyncIntervalMin > 0 && p.cfg.BalanceSyncStaleMin < p.cfg.BalanceSyncIntervalMin {
+		p.cfg.BalanceSyncStaleMin = p.cfg.BalanceSyncIntervalMin
+	}
+}
+
+// balanceSyncSettings 返回余额巡检当前生效值，供面板回填。
+func (p *Panel) balanceSyncSettings() map[string]any {
+	return map[string]any{
+		"balanceSyncIntervalMin": p.cfg.BalanceSyncIntervalMin,
+		"balanceSyncStaleMin":    p.cfg.BalanceSyncStaleMin,
+	}
 }
 
 // applyRenewSettings 校验并持久化主动续期配置，然后热更新到 Renewer：

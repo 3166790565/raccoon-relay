@@ -30,6 +30,20 @@ type SNUpstream interface {
 	ProvisionKey(ctx context.Context, acc *store.Account) (string, error)
 }
 
+// SNQuotaSource 是「日日新额度何时恢复」的查询能力，由 sensenova.Upstream 注入。
+//
+// 日日新的额度按 5 小时 / 本周窗口滚动，没有每日签到这一说，所以 402 之后
+// 不能用签到计划估算恢复时刻。这个接口返回上游窗口的重置时刻与当前读数：
+//
+//   - until：恢复时刻（毫秒，0 = 上游没给）；
+//   - ok：until 是否可用；
+//   - credits：这次读到的剩余量，供落库（stale=true 时才写）；
+//   - stale：额度确实已用尽。此时读数是「真实的 0」，可以覆盖旧余额；
+//     读不到或响应异常时为 false，不能拿它把面板上的余额刷成 0。
+type SNQuotaSource interface {
+	NextReset(ctx context.Context, acc *store.Account) (until int64, ok bool, credits int64, stale bool)
+}
+
 // SNCredential 是 EnsureToken 的回写结果：nil 表示凭据未变。
 type SNCredential struct {
 	ConsoleToken string
@@ -70,6 +84,9 @@ type Engine struct {
 	DefaultModel string
 	// SN 是日日新上游，nil 表示未接入（只跑小浣熊）。
 	SN SNUpstream
+	// SNQuota 是日日新额度窗口的查询入口，nil 时回退到签到计划/默认时刻。
+	// 与 SN 分开注入：额度查询走控制台、推理走 API Key，两者可以各自缺席。
+	SNQuota SNQuotaSource
 	// Ext 是外部渠道（AutoClaw / CodeArts）的分发表，nil 表示未接入。
 	Ext ExternalUpstream
 
@@ -335,16 +352,19 @@ func (e *Engine) RunOpenAI(ctx context.Context, req *ChatContext, sink OpenAISin
 			}
 			continue
 		}
-		// 积分耗尽（402 / 上游 1000007）：整号停到下一次签到补分，请求换号继续。
-		// 单独处理是为了让恢复时刻对齐该账号的签到计划，而不是写死次日 04:00。
+		// 积分耗尽（402 / 上游 1000007）：整号停到额度真正恢复，请求换号继续。
+		//
+		// 恢复时刻按供应商分开取：日日新按 5 小时/本周窗口滚动、没有签到，
+		// 只有上游窗口的 reset_at 说得准；小浣熊与外部渠道停到下一次签到补分。
+		// 单独处理是为了让恢复时刻对齐上游事实，而不是写死次日 04:00。
 		if kind == pool.FailQuota {
-			until := e.Cool.CoolQuota(ctx, acc, publicMsg)
+			until, basis := e.quotaResumeFor(ctx, acc, publicMsg)
 			resume := "未知"
 			if until > 0 {
 				resume = time.UnixMilli(until).Format("2006-01-02 15:04:05")
 			}
 			e.report(level, "积分耗尽："+publicMsg,
-				detail+"\n处置：冷却账号至下一次签到（"+resume+"），已换号重试", acc.ID)
+				detail+"\n处置：按"+basis+"冷却至 "+resume+"，已换号重试", acc.ID)
 			if at.Started {
 				return Result{AccountID: acc.ID, Model: req.PublicModel}, leaseErr
 			}
@@ -414,6 +434,32 @@ func (e *Engine) RunOpenAI(ctx context.Context, req *ChatContext, sink OpenAISin
 }
 
 var errNoAccount = errors.New("号池没有可用账号（全部冷却、积分耗尽或凭证失效）")
+
+// quotaResumeFor 决定一个「额度耗尽」账号的冷却时刻，并写回账号状态。
+//
+// 日日新走额度窗口：上游 reset_at 是唯一可信的恢复依据，同时把读到的
+// 剩余量落库——否则号到期放回在线后，选号层仍会拿旧的 0 把它挡在外面。
+// 取不到上游时刻时回退到通用路径，而不是把号永久停掉。
+func (e *Engine) quotaResumeFor(ctx context.Context, acc *store.Account, reason string) (int64, string) {
+	if acc.IsSenseNova() && e.SNQuota != nil {
+		until, ok, credits, stale := e.SNQuota.NextReset(ctx, acc)
+		if ok {
+			if stale {
+				// 额度确实用尽：把读到的 0 落库，让「0 分不出池」的过滤保持正确的语义。
+				// 读不到/异常时 stale=false，绝不覆盖面板上的旧余额。
+				nowMs := nowMillis()
+				_ = e.ST.UpdateAccount(ctx, acc.ID, store.AccountPatch{Credits: &credits, CreditsAt: &nowMs})
+				acc.Credits, acc.CreditsAt = credits, nowMs
+			}
+			e.Cool.CoolQuotaUntil(ctx, acc.ID, until, reason)
+			return until, "日日新额度窗口重置"
+		}
+		e.report(store.LevelWarn, "日日新额度耗尽，上游未给出窗口重置时刻",
+			"账号："+acc.Name+"\n处置：回退到默认恢复时刻", acc.ID)
+	}
+	until := e.Cool.CoolQuota(ctx, acc, reason)
+	return until, "下一次签到补分"
+}
 
 // runOne 是对单个账号的一次尝试。按账号来源分流到对应上游。
 //

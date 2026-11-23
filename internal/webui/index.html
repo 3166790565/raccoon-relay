@@ -1079,6 +1079,20 @@
       </section>
 
       <section class="card">
+        <h2>余额巡检</h2>
+        <div class="grid2">
+          <div class="field"><label>巡检间隔（分钟，0 = 关闭）</label><input type="number" id="setBalanceSyncIntervalMin" min="0" max="1440" step="1"></div>
+          <div class="field"><label>多少分钟没更新才算旧（分钟）</label><input type="number" id="setBalanceSyncStaleMin" min="0" max="10080" step="1"></div>
+        </div>
+        <p class="hint">余额平时只在<strong>签到、新号导入、手动「查余额」</strong>时更新；签到失败的号和没有签到的日日新会长期停在旧值。
+          开启后按上面的间隔巡检，只查「超过陈旧窗口没更新」的账号，读数写回后立即按积分阈值重算状态。<br>
+          日日新的额度耗尽冷却到期时也依赖这里的读数核对：窗口过去了但余额仍是 0 时不会提前放号。
+          <strong>陈旧窗口不能小于巡检间隔</strong>，否则每轮都会重查全部账号。停用号与「需重登」号不参与巡检。保存后下一轮生效。</p>
+        <button class="primary" id="saveBalanceSyncBtn">保存余额巡检</button>
+        <p class="msg" id="balanceSyncMsg"></p>
+      </section>
+
+      <section class="card">
         <h2>调度：单号串行、换号间隔与会话粘性</h2>
         <div class="grid2">
           <div class="field"><label>单号串行（在途租约）</label>

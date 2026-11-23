@@ -162,3 +162,64 @@ func TestRefreshOverwritesPreviousValue(t *testing.T) {
 		t.Fatalf("应更新为最新余额 1500，实际 %d", got.Credits)
 	}
 }
+
+// 余额巡检：过旧的号被刷新，新鲜的跳过；日日新看 SNPoolAt，
+// 小浣熊/外部渠道看 CreditsAt；停用号与「需重登」号不参与。
+func TestRefreshStaleOnlyTouchesStale(t *testing.T) {
+	st := newStore(t)
+	ctx := context.Background()
+	old := time.Now().Add(-2 * time.Hour).UnixMilli()
+	now := time.Now().UnixMilli()
+
+	snStale := &store.Account{UID: "sn-old", Provider: store.ProviderSenseNova, Token: "k",
+		Status: store.StatusOnline, Credits: 0, Enabled: true, SNPoolAt: 0, SNToken: "t"}
+	snFresh := &store.Account{UID: "sn-new", Provider: store.ProviderSenseNova, Token: "k",
+		Status: store.StatusOnline, Credits: 100, Enabled: true, SNPoolAt: now, SNToken: "t"}
+	rcStale := &store.Account{UID: "rc-old", Token: "tok", Status: store.StatusOnline,
+		Credits: 7, CreditsAt: old, Enabled: true}
+	rcFresh := &store.Account{UID: "rc-new", Token: "tok", Status: store.StatusOnline,
+		Credits: 9, CreditsAt: now, Enabled: true}
+	disabled := &store.Account{UID: "rc-off", Token: "tok", Status: store.StatusOnline,
+		Credits: 5, CreditsAt: old, Enabled: false}
+	relogin := &store.Account{UID: "rc-relogin", Token: "tok", Status: store.StatusRelogin,
+		Credits: 5, CreditsAt: old, Enabled: true}
+	for _, a := range []*store.Account{snStale, snFresh, rcStale, rcFresh, disabled, relogin} {
+		if err := st.CreateAccount(ctx, a); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	srv := balanceServer(t, `{"code":0,"data":{"available_points":4321}}`, 0)
+	b := &Balancer{
+		ST: st, Client: raccoon.NewClient(srv.URL, 5*time.Second), Auth: stubAuth{},
+		SN: fakeSNBalance{remaining: 8765},
+	}
+	n := b.RefreshStale(ctx, 30*time.Minute)
+	if n != 2 {
+		t.Fatalf("应刷新 2 个过旧账号（1 日日新 + 1 小浣熊），实际 %d", n)
+	}
+	if got, _ := st.GetAccount(ctx, snStale.ID); got.Credits != 8765 {
+		t.Fatalf("过旧日日新应刷新到 8765，实际 %d", got.Credits)
+	}
+	if got, _ := st.GetAccount(ctx, rcStale.ID); got.Credits != 4321 {
+		t.Fatalf("过旧小浣熊应刷新到 4321，实际 %d", got.Credits)
+	}
+	if got, _ := st.GetAccount(ctx, snFresh.ID); got.Credits != 100 {
+		t.Fatalf("新鲜日日新不应被刷新，实际 %d", got.Credits)
+	}
+	if got, _ := st.GetAccount(ctx, rcFresh.ID); got.Credits != 9 {
+		t.Fatalf("新鲜小浣熊不应被刷新，实际 %d", got.Credits)
+	}
+	for _, a := range []*store.Account{disabled, relogin} {
+		if got, _ := st.GetAccount(ctx, a.ID); got.Credits != 5 {
+			t.Fatalf("%s 不应参与巡检，实际 %d", a.UID, got.Credits)
+		}
+	}
+}
+
+// fakeSNBalance 是 SNBalance 的桩。
+type fakeSNBalance struct{ remaining float64 }
+
+func (f fakeSNBalance) FetchUsageFor(context.Context, *store.Account) (float64, string, error) {
+	return f.remaining, `{"pools":[]}`, nil
+}

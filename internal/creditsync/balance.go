@@ -120,3 +120,49 @@ func identityOf(acc *store.Account) raccoon.Identity {
 	return raccoon.IdentityFor(acc.UID, acc.DeviceID, acc.OSVersion, acc.Platform,
 		acc.ClientChannel, acc.OfficeIdentity, acc.Language)
 }
+
+// RefreshStale 刷新「余额过旧」的账号，返回刷新成功条数。
+//
+// 为什么需要它：余额只在三个时刻更新——签到、新号导入、手动点「查余额」。
+// 签到每天才一次、而且失败的号不会刷；日日新干脆没有签到。于是面板上的余额
+// 会长期停在旧值，额度耗尽后冷却到期也无法确认是否真的恢复。这条巡检把
+// 所有启用中、且读数超过 maxAge 没更新的号挨个查一遍。
+//
+//   - 按账号各自的余额时间戳判断新旧：小浣熊/外部渠道看 CreditsAt，
+//     日日新看 SNPoolAt（它才是池读数的来源）；
+//   - 停用号与 relogin 号跳过：前者不该产生上游请求，后者的凭据已经不能用；
+//   - 单个账号失败静默跳过：余额是辅助信息，一次上游抖动不该中断整轮巡检。
+//
+// 调用方负责用分布式锁保证多副本下只有一份在跑（见 cmd/relay 的 pool-tick）。
+func (b *Balancer) RefreshStale(ctx context.Context, maxAge time.Duration) int {
+	if b == nil || b.ST == nil {
+		return 0
+	}
+	accounts, err := b.ST.ListAccounts(ctx)
+	if err != nil {
+		return 0
+	}
+	now := time.Now().UnixMilli()
+	minGap := maxAge.Milliseconds()
+	n := 0
+	for _, a := range accounts {
+		if !a.Enabled || a.Status == store.StatusRelogin {
+			continue
+		}
+		if ctx.Err() != nil {
+			break
+		}
+		at := a.CreditsAt
+		if a.IsSenseNova() {
+			at = a.SNPoolAt
+		}
+		if at > 0 && now-at < minGap {
+			continue
+		}
+		// 没有对应渠道能力时 Refresh 会直接报错，跳过即可。
+		if _, err := b.Refresh(ctx, a); err == nil {
+			n++
+		}
+	}
+	return n
+}
