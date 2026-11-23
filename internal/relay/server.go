@@ -55,7 +55,10 @@ func (c *Catalog) List(ctx context.Context) []raccoon.Model {
 			return out
 		}
 		c.mu.Unlock()
-		return []raccoon.Model{{ID: c.Default, Name: c.Default, ContextLength: 180000, MaxOutputTokens: 80000}}
+		// 冷启动兜底只给模型名：上下文/输出上限上游没给就不编，
+		// 否则 /v1/models 会把编出来的数字当真话广告给客户端，
+		// 客户端据此切分上下文，超了再被上游 400。缺失的位由 models.dev 补。
+		return []raccoon.Model{{ID: c.Default, Name: c.Default}}
 	}
 	c.mu.Lock()
 	c.models, c.at = models, time.Now()

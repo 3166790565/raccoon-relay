@@ -385,6 +385,11 @@ func (s *Server) HandleModels(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().Unix()
 	for _, m := range models {
 		m := m
+		// 上游标成 visible:false 的模型（内部 Work 模型）仍保留在清单里供显式
+		// 映射使用，但不对外广告——官方客户端不列它们，我们也不该列。
+		if m.Hidden {
+			continue
+		}
 		// 模型管理里停用的模型不对外广告；启用时按 provider 判定。
 		if s.Rules != nil && s.Rules.Hidden(m.ID) {
 			continue
@@ -425,6 +430,11 @@ func (s *Server) modelEntry(m raccoon.Model, id string, now int64) map[string]an
 	}
 	if m.SupportsReason {
 		declared["supportsReasoning"] = true
+	}
+	// 计费倍率是上游目录的展示信息（实付优先），不参与预算计算；
+	// 上游没给（nil）时不写这个键，0 是合法的「限免」。
+	if m.PointsMultiplier != nil {
+		entry["pointsMultiplier"] = *m.PointsMultiplier
 	}
 	var rec *MetaRecord
 	if s.CapMeta != nil {

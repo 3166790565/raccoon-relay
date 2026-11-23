@@ -135,12 +135,16 @@ func titleTrim(s string) string {
 
 // ChatRequest 是转发所需的全部上下文。
 type ChatRequest struct {
-	Body    map[string]any
-	Token   string
-	IDN     Identity
-	UID     string
-	Title   string
+	Body  map[string]any
+	Token string
+	IDN   Identity
+	UID   string
+	Title string
+	// Session 是 X-RACCOON-Session-ID：同一段对话跨轮不变。
 	Session string
+	// TurnID 是 X-RACCOON-Turn-ID：工具续轮复用同一个值。
+	// 为空时（例如其它上游复用本结构）退化为每次请求随机生成。
+	TurnID string
 }
 
 // summary 是排障用的请求侧摘要：模型与客户端指纹，不含任何凭据。
@@ -170,7 +174,10 @@ func (c *Client) OpenChat(ctx context.Context, req ChatRequest) (*ChatStream, er
 	// 流式响应用「无数据空闲超时」管：每秒都可能来帧，但整条流可能跑几十分钟。
 	// 这里只负责在空闲超期时取消请求，计时由 ChatStream 在每次读到数据后重置。
 	streamCtx, cancel := context.WithCancel(ctx)
-	turnID := NewTurnID()
+	turnID := strings.TrimSpace(req.TurnID)
+	if turnID == "" {
+		turnID = NewTurnID()
+	}
 	h := chatHeaders(req.Token, req.IDN, req.Session, turnID, titleTrim(req.Title))
 	httpReq, err := http.NewRequestWithContext(streamCtx, http.MethodPost, c.url(PathChat), bytes.NewReader(raw))
 	if err != nil {
@@ -195,7 +202,8 @@ func (c *Client) OpenChat(ctx context.Context, req ChatRequest) (*ChatStream, er
 		cancel()
 		// 业务错误码必须带出来：200108（账号异常）、6004（模型限流）这些
 		// 都挂在响应体的 {code,message} 上，只看 HTTP 状态会全部退化成 429/4xx。
-		ue := &UpstreamError{Status: resp.StatusCode, Code: codeFromBody(body),
+		code, codeName := codeFromBodyEx(body)
+		ue := &UpstreamError{Status: resp.StatusCode, Code: code, CodeName: codeName,
 			Message:    upstreamErrText(resp.StatusCode, body),
 			RetryAfter: RetryAfter(resp.Header, body),
 			Endpoint:   PathChat, TurnID: turnID, RequestSummary: req.summary(turnID)}
@@ -357,11 +365,14 @@ func (s *ChatStream) Next() (*ChatEvent, error) {
 type streamFrame struct {
 	Type  string `json:"type"`
 	Error *struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
+		// Code 用 RawMessage：上游会把错误码发成字符串（`"insufficient_points"`），
+		// 直接解成 int 会让整帧解析失败，被误判成「坏帧」跳过，最后表现为
+		// 「上游返回空响应」——一条明确的限流/拒答就此变成网络问题。
+		Code    json.RawMessage `json:"code"`
+		Message string          `json:"message"`
 	} `json:"error"`
-	Code    int    `json:"code"`
-	Message string `json:"message"`
+	Code    json.RawMessage `json:"code"`
+	Message string          `json:"message"`
 
 	Choices []struct {
 		Delta        map[string]any `json:"delta"`
@@ -378,21 +389,57 @@ type streamFrame struct {
 }
 
 // errorOf 把一帧判成上游错误，返回 nil 表示这是正常数据帧。
+//
+// 状态码一律留 0 而不是 502：流内错误帧的 HTTP 本来就是 200，这个 502 是
+// 编出来的，而转发层看到 502 会按「上游波动」换号——限流、积分耗尽这类
+// 应当冷却账号的错误于是被当成偶发故障。留 0 让分类器按业务码与文案判，
+// 判不出来时才落到「上游波动」的兜底分支（与 HTTP 非 2xx 的处置一致）。
 func (f *streamFrame) errorOf() *UpstreamError {
 	if f.Type == "error" && f.Error != nil {
+		code, name := frameCode(f.Error.Code)
 		return &UpstreamError{
-			Status:  502,
-			Message: firstNonEmpty(f.Error.Message, "上游返回错误帧"),
-			Code:    f.Error.Code,
+			Status:   0,
+			Message:  firstNonEmpty(f.Error.Message, "上游返回错误帧"),
+			Code:     code,
+			CodeName: name,
 		}
 	}
-	if f.Error != nil && (f.Error.Code != 0 || f.Error.Message != "") {
-		return &UpstreamError{Status: 502, Code: f.Error.Code, Message: f.Error.Message}
+	if f.Error != nil {
+		if code, name := frameCode(f.Error.Code); code != 0 || name != "" || f.Error.Message != "" {
+			return &UpstreamError{Status: 0, Code: code, CodeName: name, Message: f.Error.Message}
+		}
 	}
-	if f.Code != 0 && f.Code != 200 && len(f.Choices) == 0 {
-		return &UpstreamError{Status: 502, Code: f.Code, Message: firstNonEmpty(f.Message, "上游返回错误帧")}
+	if code, name := frameCode(f.Code); (code != 0 && code != 200) || name != "" {
+		if len(f.Choices) == 0 {
+			return &UpstreamError{Status: 0, Code: code, CodeName: name,
+				Message: firstNonEmpty(f.Message, "上游返回错误帧")}
+		}
 	}
 	return nil
+}
+
+// frameCode 把一帧里的 code 解析成 (数字码, 文本码)。
+// 数字与数字字符串都归数字码；其它字符串（`insufficient_points`）归文本码。
+func frameCode(raw json.RawMessage) (int, string) {
+	if len(raw) == 0 {
+		return 0, ""
+	}
+	var n int
+	if err := json.Unmarshal(raw, &n); err == nil {
+		return n, ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return 0, ""
+		}
+		if v, err := strconv.Atoi(s); err == nil {
+			return v, ""
+		}
+		return 0, s
+	}
+	return 0, ""
 }
 
 func extractDelta(d map[string]any) *Delta {
@@ -505,6 +552,110 @@ func codeFromBody(body []byte) int {
 	return 0
 }
 
+// codeFromBodyEx 与 codeFromBody 相同，但把**文本码**也带出来。
+//
+// 上游有些错误把 code 发成字符串名字（`insufficient_points` / `rate_limit`）：
+// 数字解析会失败，只看数字码等于「没有错误码」。文本码交给分类器按名字判，
+// 不认识的也保留下来供文案与日志使用。
+func codeFromBodyEx(body []byte) (int, string) {
+	if len(body) == 0 {
+		return 0, ""
+	}
+	var outer map[string]json.RawMessage
+	if err := json.Unmarshal(body, &outer); err != nil {
+		return 0, ""
+	}
+	first := func(raw json.RawMessage) (int, string) {
+		if v := codeValue(raw); v != 0 {
+			return v, ""
+		}
+		return 0, codeNameValue(raw)
+	}
+	for _, key := range []string{"code", "error_code", "errorCode", "error_type"} {
+		if code, name := first(outer[key]); code != 0 || name != "" {
+			return code, name
+		}
+	}
+	for _, key := range []string{"error", "data"} {
+		raw, ok := outer[key]
+		if !ok {
+			continue
+		}
+		var nested map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &nested); err != nil {
+			continue
+		}
+		for _, k := range []string{"code", "error_code", "errorCode", "type"} {
+			if code, name := first(nested[k]); code != 0 || name != "" {
+				return code, name
+			}
+		}
+	}
+	if raw, ok := outer["ResponseMetadata"]; ok {
+		var meta map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &meta); err == nil {
+			var e map[string]json.RawMessage
+			if err := json.Unmarshal(meta["Error"], &e); err == nil {
+				for _, k := range []string{"Code", "code"} {
+					if code, name := first(e[k]); code != 0 || name != "" {
+						return code, name
+					}
+				}
+			}
+		}
+	}
+	return 0, ""
+}
+
+// codeNameValue 把一个非数字的 code 形态读成文本码；数字/布尔/对象一律返回空串。
+func codeNameValue(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return ""
+	}
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	// 纯数字串已在 codeValue 里处理过；能走到这里的都是名字形态。
+	if _, err := strconv.Atoi(s); err == nil {
+		return ""
+	}
+	return s
+}
+
+// quotaCodeNames 是上游用**名字**表达「余额/积分不足」的码。
+// 这些码有时挂在 HTTP 429 上——不认名字就会被当成限流，把一个再也调不通的号
+// 短暂放出来反复撞墙。
+var quotaCodeNames = map[string]bool{
+	"insufficient_points": true,
+	"insufficient_quota":  true,
+	"arrearage":           true,
+}
+
+// rateLimitCodeNames 是上游用名字表达「限流」的码。
+var rateLimitCodeNames = map[string]bool{
+	"rate_limit":              true,
+	"rate_limit_exceeded":     true,
+	"user_model_rate_limited": true,
+}
+
+// IsQuotaCode 判断业务码是不是「余额/积分不足」（数字码或名字码）。
+func IsQuotaCode(code int, codeName string) bool {
+	if code == 1000007 {
+		return true
+	}
+	return quotaCodeNames[strings.ToLower(strings.TrimSpace(codeName))]
+}
+
+// IsRateLimitCode 判断业务码是不是「限流」（名字码；数字码由 429 状态兜底）。
+func IsRateLimitCode(codeName string) bool {
+	return rateLimitCodeNames[strings.ToLower(strings.TrimSpace(codeName))]
+}
+
 // codeValue 把 JSON 数字或数字字符串转成 int；其它形态返回 0。
 func codeValue(raw json.RawMessage) int {
 	if len(raw) == 0 {
@@ -540,6 +691,9 @@ func normalizeBodyEncoding(body []byte) []byte {
 }
 
 // upstreamErrText 尽量从错误体里抠出可读文案。
+//
+// 嵌套形态（`{"error":{"message":...}}`）也要认：只读顶层 message/msg 时，
+// 这种响应会把整段 JSON 原样塞进面板，人读到的是一坨花括号而不是错误原因。
 func upstreamErrText(status int, body []byte) string {
 	body = normalizeBodyEncoding(body)
 	var env Envelope
@@ -547,6 +701,9 @@ func upstreamErrText(status int, body []byte) string {
 		if m := env.ErrMessage(); m != "" {
 			return m
 		}
+	}
+	if m := nestedErrMessage(body); m != "" {
+		return m
 	}
 	s := strings.TrimSpace(string(body))
 	// 按字符截断，不按字节：上游错误体常常是中文，按字节切会把汉字切成半个，
@@ -558,4 +715,33 @@ func upstreamErrText(status int, body []byte) string {
 		return fmt.Sprintf("HTTP %d", status)
 	}
 	return s
+}
+
+// nestedErrMessage 从 `{error:{message|msg}}` / `{error:"..."}` 这类嵌套形态里取文案。
+func nestedErrMessage(body []byte) string {
+	var outer map[string]json.RawMessage
+	if err := json.Unmarshal(body, &outer); err != nil {
+		return ""
+	}
+	raw, ok := outer["error"]
+	if !ok {
+		return ""
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		return strings.TrimSpace(text)
+	}
+	var nested map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &nested); err != nil {
+		return ""
+	}
+	for _, key := range []string{"message", "msg", "error_msg", "detail"} {
+		var value string
+		if err := json.Unmarshal(nested[key], &value); err == nil {
+			if value = strings.TrimSpace(value); value != "" {
+				return value
+			}
+		}
+	}
+	return ""
 }

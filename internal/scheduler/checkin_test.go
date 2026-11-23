@@ -199,7 +199,9 @@ func TestSweepIsIdempotentPerDay(t *testing.T) {
 func TestSweep401MarksRelogin(t *testing.T) {
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case raccoon.PathGrant, raccoon.PathRefresh:
+		// 签到的第一步是 setting_info（发放触发器），它也回 401：
+		// 凭证失效必须在第一跳就被认出，不能等到账单核对。
+		case raccoon.PathSetting, raccoon.PathGrant, raccoon.PathRefresh:
 			w.WriteHeader(401)
 			fmt.Fprint(w, `{"code":200003,"message":"authorization_verify_error"}`)
 		default:

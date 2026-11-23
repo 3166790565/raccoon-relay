@@ -9,6 +9,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -51,6 +53,15 @@ type Envelope struct {
 	Data    json.RawMessage `json:"data"`
 	// body 是原始响应体，供没有 data 字段的端点（模型目录历史版本）解析。
 	body []byte
+}
+
+// rawBody 返回原始响应体（未解析的字节）。错误体里可能带**文本**业务码
+// （`"insufficient_points"`），只靠 Envelope.Code 拿不到。
+func (e *Envelope) rawBody() []byte {
+	if e == nil {
+		return nil
+	}
+	return e.body
 }
 
 func (e *Envelope) ErrMessage() string {
@@ -119,10 +130,15 @@ const (
 	PathSettingOrg  = "/api/web/org/user/office/v1/setting_info"
 	PathGrant       = "/api/web/desktop/v1/login/points/grant"
 	PathMobileGrant = "/api/web/mobile/v1/login/points/grant"
-	PathRefresh     = "/api/web/auth/v1/refresh"
-	PathUserInfo    = "/api/web/auth/v1/user_info"
-	PathExchange    = "/api/web/auth/v1/login_with_authorization_code"
-	PathBindDevice  = "/api/web/auth/v1/devices_current_bind"
+	// PathBills 是积分账单，签到用它核对「今日到底有没有入账」：
+	// 发放接口回 200 不等于真发放了，账单才是权威结果。
+	PathBills = "/api/web/points/v2/bills"
+	// PathIamConfirm 是 IAM 首次迁移的一次性确认（业务码 200901 触发）。
+	PathIamConfirm = "/api/web/auth/v1/iam/confirm"
+	PathRefresh    = "/api/web/auth/v1/refresh"
+	PathUserInfo   = "/api/web/auth/v1/user_info"
+	PathExchange   = "/api/web/auth/v1/login_with_authorization_code"
+	PathBindDevice = "/api/web/auth/v1/devices_current_bind"
 )
 
 // ---- 结果类型 ----
@@ -135,6 +151,15 @@ type Model struct {
 	SupportsImages  bool   `json:"supportsImages"`
 	SupportsTools   bool   `json:"supportsTools"`
 	SupportsReason  bool   `json:"supportsReasoning"`
+	// Hidden 表示上游目录把这条标成 visible:false（官方客户端不列它）。
+	//
+	// 保留而不是丢弃：这些模型（实测是 raccoon-* 内部 Work 模型）仍需能被
+	// 模型管理里的显式映射指向——丢弃会让它们永远进不了清单，也就无法给它们
+	// 建别名。对外广告时由转发层按这个标记跳过。
+	Hidden bool `json:"hidden,omitempty"`
+	// PointsMultiplier 是上游目录的计费倍率（实付优先，缺失时回落基准）。
+	// 指针形态：nil = 上游没给，0 = 限免（真实存在的合法值）。
+	PointsMultiplier *float64 `json:"pointsMultiplier,omitempty"`
 }
 
 type RefreshResult struct {
@@ -234,12 +259,12 @@ func (c *Client) balanceFromSetting(ctx context.Context, token string, idn Ident
 	if status == http.StatusUnauthorized {
 		return 0, &UpstreamError{Status: status, Code: codeOf(env), Auth: true, Message: "凭证失效"}
 	}
-	code := codeOf(env)
-	if code == 200003 || strings.Contains(strings.ToLower(errText(env, 0)), "authorization_verify_error") {
-		return 0, &UpstreamError{Status: status, Code: code, Auth: true, Message: "凭证失效"}
+	code, codeName := codeFromBodyEx(env.rawBody())
+	if IsAuthCode(code, codeName) || LooksLikeAuthMessage(errText(env, 0)) {
+		return 0, &UpstreamError{Status: status, Code: code, CodeName: codeName, Auth: true, Message: "凭证失效"}
 	}
 	if status < 200 || status >= 300 || env == nil || !env.OK() {
-		return 0, &UpstreamError{Status: status, Code: code, Message: "额度查询失败：" + errText(env, status)}
+		return 0, &UpstreamError{Status: status, Code: code, CodeName: codeName, Message: "额度查询失败：" + errText(env, status)}
 	}
 	var d struct {
 		AvailablePoints  *int64 `json:"available_points"`
@@ -308,19 +333,25 @@ func parseCatalog(raw json.RawMessage) []Model {
 		return nil
 	}
 	type item struct {
-		Name           string `json:"name"`
-		ID             string `json:"id"`
-		Model          string `json:"model"`
-		ModelName      string `json:"model_name"`
-		DisplayName    string `json:"display_name"`
-		Description    string `json:"description"`
-		Visible        *bool  `json:"visible"`
-		ContextWindow  int    `json:"context_window"`
-		MaxTokens      int    `json:"max_tokens"`
-		SupportsImages *bool  `json:"supports_images"`
-		SupportImage   *bool  `json:"supportImage"`
-		SupportsReason *bool  `json:"supports_reasoning"`
-		Params         struct {
+		Name            string `json:"name"`
+		ID              string `json:"id"`
+		Model           string `json:"model"`
+		ModelName       string `json:"model_name"`
+		DisplayName     string `json:"display_name"`
+		Description     string `json:"description"`
+		Visible         *bool  `json:"visible"`
+		ContextWindow   int    `json:"context_window"`
+		MaxTokens       int    `json:"max_tokens"`
+		SupportsImages  *bool  `json:"supports_images"`
+		SupportImage    *bool  `json:"supportImage"`
+		SupportsReason  *bool  `json:"supports_reasoning"`
+		SupportThinking *bool  `json:"supportThinking"`
+		// 上游已把 points_multiplier 废弃，实际给的是 billing_multiplier；
+		// billing_effective_multiplier 是计入活动与限免后的实付倍率。
+		BillingBase      *float64 `json:"billing_multiplier"`
+		BillingEffective *float64 `json:"billing_effective_multiplier"`
+		PointsMultiplier *float64 `json:"points_multiplier"`
+		Params           struct {
 			ContextWindow int `json:"context_window"`
 			MaxTokens     int `json:"max_tokens"`
 		} `json:"params"`
@@ -337,9 +368,6 @@ func parseCatalog(raw json.RawMessage) []Model {
 		for _, it := range items {
 			id := firstNonEmpty(it.Name, it.ID, it.Model, it.ModelName)
 			if id == "" || seen[id] {
-				continue
-			}
-			if it.Visible != nil && !*it.Visible {
 				continue
 			}
 			seen[id] = true
@@ -359,8 +387,27 @@ func parseCatalog(raw json.RawMessage) []Model {
 					}
 				}
 			}
+			reasoning := false
+			if it.SupportsReason != nil {
+				reasoning = *it.SupportsReason
+			} else if it.SupportThinking != nil {
+				reasoning = *it.SupportThinking
+			} else {
+				// 目录没声明时按已确认的模型家族判断（与思考参数改写同一张表）
+				reasoning = reasoningSupported(id)
+			}
 			display := firstNonEmpty(it.DisplayName, shortDesc(it.Description), id)
-			out = append(out, Model{ID: id, Name: display, ContextLength: ctxLen, MaxOutputTokens: maxOut, SupportsImages: imgs})
+			hidden := it.Visible != nil && !*it.Visible
+			out = append(out, Model{
+				ID:               id,
+				Name:             display,
+				ContextLength:    ctxLen,
+				MaxOutputTokens:  maxOut,
+				SupportsImages:   imgs,
+				SupportsReason:   reasoning,
+				Hidden:           hidden,
+				PointsMultiplier: billedMultiplier(it.BillingEffective, it.BillingBase, it.PointsMultiplier),
+			})
 		}
 	}
 
@@ -386,41 +433,299 @@ func parseCatalog(raw json.RawMessage) []Model {
 	return out
 }
 
+// billedMultiplier 取目录里的计费倍率：实付优先，缺失回落基准。
+//
+// 不用 points_multiplier：上游已废弃该字段（实测当前目录里一个都没有），
+// 继续读它只会让倍率恒为「未声明」。0 是合法值（限免），只有 nil 才表示
+// 上游没给。
+func billedMultiplier(effective, base, legacy *float64) *float64 {
+	for _, v := range []*float64{effective, base, legacy} {
+		if v != nil && *v >= 0 {
+			value := *v
+			return &value
+		}
+	}
+	return nil
+}
+
+// reasoningSupported 按已确认的模型家族判断是否支持思考（与 reasoning.go 同一张表）。
+func reasoningSupported(model string) bool {
+	switch familyOf(model) {
+	case famThinking, famLowHigh, famEffort:
+		return true
+	}
+	return false
+}
+
 // CheckinResult 是签到两步的结论。Already=true 表示今日已领（幂等，不是失败）。
 type CheckinResult struct {
 	OK      bool
 	Claimed bool
 	Already bool
 	Message string
+	// Credit 是账单核对出的**今日实际入账**积分（核对不到为 0）。
+	// 发放接口回 200 不等于真发了，只有账单里看得到才算数。
+	Credit int64
+	// Verified 表示账单核对成功（无论入账是否为 0）。
+	// false = 账单接口失败，此时 Credit=0 不代表「没发」，面板不该据此断言。
+	Verified bool
 }
 
-// Checkin 严格两步：先 setting_info 激活当日 Web 会话（失败不阻断），再 grant 领取。
+// Checkin 是每日签到：先由 setting_info 触发发放，再查账单核对**是否真的入账**。
+//
+// ── 为什么以账单为准 ────────────────────────────────────────
+// setting_info 是每日积分的发放触发器（按天幂等），发放通知在
+// point_grant_popups / point_grant_toast 里。但它回 200 只代表请求成功，
+// 不代表今天真的发了——上游对已领过的号同样回 200。只有积分账单里能看到
+// 「今日入账 > 0」才算领到了。旧实现只看 grant 端点，把一次性首登奖的
+// granted 当成每日签到结果，账单入账则从未核对过。
+//
+// ── 失败口径 ────────────────────────────────────────────────
+// setting_info 失败即当日没有发放依据，直接如实报失败（旧实现静默吞掉
+// 这一步，面板显示「签到成功」但余额没动）。账单核对失败不算失败，但
+// Verified=false，调用方不该据 Credit=0 断言「没发」。
 func (c *Client) Checkin(ctx context.Context, token string, idn Identity) (*CheckinResult, error) {
-	settingPath := PathSetting
-	if isTeam(idn.OfficeIdentity) {
-		settingPath = PathSettingOrg
-	}
-	// 第 1 步失败不阻断，由 grant 自行暴露
-	_, _, _ = c.doJSON(ctx, http.MethodGet, settingPath, webHeaders(token, idn, "web"), nil)
-
-	status, env, err := c.doJSON(ctx, http.MethodPost, PathGrant, webHeaders(token, idn, ""), map[string]any{})
+	// 第 1 步：发放触发器。失败即当日没有发放依据，如实报失败。
+	//
+	// 通道顺序与余额查询一致（组织号 → v3 → v2）：v3 在一段时间里对所有凭证
+	// 回 403（见 Balance 的注释），而它正是每日发放的触发器——只写死 v3
+	// 会让签到每天都在第一步静默失败，账单核对也拿不到入账。
+	status, env, err := c.settingInfo(ctx, token, idn)
 	if err != nil {
 		return nil, err
 	}
-	if status == http.StatusUnauthorized {
-		return nil, &UpstreamError{Status: status, Code: codeOf(env), Auth: true, Message: "凭证失效，请重新登录"}
+	// 凭证失效不只看 401：上游也会把 200003/200009（或文本码
+	// authorization_verify_error）挂在 4xx/200 的信封里，只认状态码会把它
+	// 当成「发放失败」，于是这个号既不冷却也不提示重登。
+	code, codeName := codeFromBodyEx(env.rawBody())
+	if status == http.StatusUnauthorized || IsAuthCode(code, codeName) || LooksLikeAuthMessage(errText(env, 0)) {
+		return nil, &UpstreamError{Status: status, Code: code, CodeName: codeName, Auth: true, Message: "凭证失效，请重新登录"}
 	}
 	if status < 200 || status >= 300 || env == nil || !env.OK() {
-		return &CheckinResult{OK: false, Message: errText(env, status)}, nil
+		return &CheckinResult{OK: false, Message: "每日积分发放失败：" + errText(env, status)}, nil
 	}
-	var d struct {
-		Granted bool `json:"granted"`
+
+	// 第 2 步：账单核对今日入账（权威结果）。核对失败不阻断签到本身。
+	today := beijingToday()
+	grants, verifyErr := c.dailyGrants(ctx, token, idn, today)
+	credit := int64(0)
+	for _, g := range grants {
+		credit += g.Points
 	}
-	_ = json.Unmarshal(rawData(env), &d)
-	if d.Granted {
-		return &CheckinResult{OK: true, Claimed: true, Message: "已领取每日积分"}, nil
+	verified := verifyErr == nil
+
+	res := &CheckinResult{OK: true, Verified: verified, Credit: credit}
+	switch {
+	case credit > 0:
+		res.Claimed = true
+		res.Message = fmt.Sprintf("今日积分 +%d", credit)
+	case !verified:
+		res.Message = "已触发发放，但账单核对失败：" + verifyErr.Error()
+	default:
+		res.Already = true
+		res.Message = "今日未见积分入账（可能此前已领取）"
 	}
-	return &CheckinResult{OK: true, Already: true, Message: "今日已领取过"}, nil
+	return res, nil
+}
+
+// settingInfo 按「组织路径 → v3 → v2」依次尝试发放触发器，返回第一个成功的结果。
+//
+// 与 Balance 的通道顺序同一取向：v3 在上游被网关拦截过一段时间（对任何凭证
+// 都回 403），v2 一直是可用的那条。凭证失效（401/Auth 码）时不换路径——
+// 换一条也是同样的 401，只会让日志更难读。
+//
+// 全部失败时返回最后一次的响应，由调用方按状态码与错误码决定对外文案。
+func (c *Client) settingInfo(ctx context.Context, token string, idn Identity) (int, *Envelope, error) {
+	paths := []string{PathSetting, PathSettingV2}
+	if isTeam(idn.OfficeIdentity) {
+		paths = append([]string{PathSettingOrg}, paths...)
+	}
+	var (
+		lastStatus int
+		lastEnv    *Envelope
+	)
+	for _, path := range paths {
+		headers := webHeaders(token, idn, "web")
+		// 组织路径之后的个人路径要摘掉 X-Org-Code，否则读到的仍是组织口径。
+		if path != PathSettingOrg || !isTeam(idn.OfficeIdentity) {
+			delete(headers, "X-Org-Code")
+		}
+		status, env, err := c.doJSON(ctx, http.MethodGet, path, headers, nil)
+		if err != nil {
+			return 0, nil, err
+		}
+		code, codeName := codeFromBodyEx(env.rawBody())
+		if status == http.StatusUnauthorized || IsAuthCode(code, codeName) || LooksLikeAuthMessage(errText(env, 0)) {
+			// 凭证问题：换路径没用，直接把这一跳的结果交给调用方。
+			return status, env, nil
+		}
+		if status >= 200 && status < 300 && env != nil && env.OK() {
+			return status, env, nil
+		}
+		lastStatus, lastEnv = status, env
+	}
+	return lastStatus, lastEnv, nil
+}
+
+// 账单核对参数：拉取条数与超时。
+//
+// 账单接口很慢（实测 limit=20 约 9 秒），用独立更宽的超时兜底，避免它
+// 把签到整体拖过上游超时；翻页最多 5 页，遇到昨天的账单就停。
+const (
+	checkBillLimit   = 20
+	checkBillPages   = 5
+	checkBillTimeout = 25 * time.Second
+)
+
+// DailyGrant 是账单里的一条今日入账。
+type DailyGrant struct {
+	Name   string
+	Points int64
+	At     string
+}
+
+// dailyGrants 拉今日的积分入账（北京时间自然日）。
+//
+// 返回的 error 只表示「核对失败」（网络/非 2xx/结构异常），与「今日没有入账」
+// 区分开：前者 Verified=false，后者 Verified=true 且列表为空。
+func (c *Client) dailyGrants(ctx context.Context, token string, idn Identity, today string) ([]DailyGrant, error) {
+	headers := webHeaders(token, idn, "")
+	headers["accept"] = "application/json"
+	var out []DailyGrant
+	cursor := ""
+	seen := map[string]bool{}
+	deadline := time.Now().Add(checkBillTimeout)
+	for pageNo := 0; pageNo < checkBillPages; pageNo++ {
+		if time.Now().After(deadline) {
+			break
+		}
+		query := fmt.Sprintf("?paging.limit=%d&type=all", checkBillLimit)
+		if cursor != "" {
+			query += "&cursor=" + urlQueryEscape(cursor)
+		}
+		status, env, err := c.doJSON(ctx, http.MethodGet, PathBills+query, headers, nil)
+		if err != nil {
+			return out, err
+		}
+		code, codeName := codeFromBodyEx(env.rawBody())
+		if status == http.StatusUnauthorized || IsAuthCode(code, codeName) {
+			return out, &UpstreamError{Status: status, Code: code, CodeName: codeName, Auth: true, Message: "凭证失效"}
+		}
+		if status < 200 || status >= 300 || env == nil || !env.OK() {
+			return out, fmt.Errorf("账单接口返回 HTTP %d：%s", status, errText(env, status))
+		}
+		var data struct {
+			Items   []map[string]any `json:"items"`
+			Cursor  string           `json:"next_cursor"`
+			Cursor2 string           `json:"cursor"`
+			HasMore *bool            `json:"has_more"`
+			Paging  map[string]any   `json:"paging"`
+		}
+		raw := rawData(env)
+		if len(raw) == 0 {
+			return out, errors.New("账单响应缺少 data")
+		}
+		if err := json.Unmarshal(raw, &data); err != nil {
+			return out, fmt.Errorf("账单响应结构异常：%v", err)
+		}
+		if data.Items == nil {
+			return out, errors.New("账单响应缺少 items")
+		}
+		reachedYesterday := false
+		for _, item := range data.Items {
+			day := billDay(item)
+			if day != "" && day < today {
+				reachedYesterday = true
+			}
+			if g, ok := dailyGrant(item, today); ok {
+				out = append(out, g)
+			}
+		}
+		if reachedYesterday || len(data.Items) == 0 {
+			break
+		}
+		next := firstNonEmpty(data.Cursor, data.Cursor2, anyStr(data.Paging["next_cursor"]), anyStr(data.Paging["cursor"]))
+		hasMore := true
+		if data.HasMore != nil {
+			hasMore = *data.HasMore
+		}
+		if !hasMore || next == "" || seen[next] {
+			break
+		}
+		seen[next] = true
+		cursor = next
+	}
+	return out, nil
+}
+
+// billDay 取一条账单的日期键（YYYY-MM-DD，按北京时间）。
+func billDay(item map[string]any) string {
+	at := firstNonEmpty(anyStr(item["grant_at"]), anyStr(item["created_at"]))
+	if at == "" {
+		return ""
+	}
+	if t, err := time.Parse(time.RFC3339, at); err == nil {
+		return t.In(chinaZone()).Format("2006-01-02")
+	}
+	if len(at) >= 10 {
+		return at[:10]
+	}
+	return ""
+}
+
+// dailyGrant 判断一条账单是否是「今日的每日积分发放」，是则取出金额。
+//
+// 判定与后台链路一致：biz_type == "daily_grant"，或没有 biz_type 时按
+// event_name == "每日积分发放" 兜底。points <= 0 与「不是今天」都不算。
+func dailyGrant(item map[string]any, today string) (DailyGrant, bool) {
+	kind := anyStr(item["biz_type"])
+	name := anyStr(item["event_name"])
+	isDaily := kind == "daily_grant" || (kind == "" && name == "每日积分发放")
+	points := toInt64(item["points"])
+	if !isDaily || points <= 0 || billDay(item) != today {
+		return DailyGrant{}, false
+	}
+	at := anyStr(item["created_at"])
+	if len(at) >= 19 {
+		at = at[11:19]
+	}
+	return DailyGrant{Name: name, Points: points, At: at}, true
+}
+
+// chinaZone 是上游自然日的时区（北京时间 UTC+8）。
+//
+// 用固定偏移而不是 time.LoadLocation("Asia/Shanghai")：容器镜像里未必带
+// tzdata，加载失败会静默回落 UTC，把 16 小时的账单认成昨天。
+func chinaZone() *time.Location {
+	return time.FixedZone("CST", 8*3600)
+}
+
+// beijingToday 返回今天的北京时间日期键（YYYY-MM-DD）。
+func beijingToday() string {
+	return time.Now().In(chinaZone()).Format("2006-01-02")
+}
+
+// urlQueryEscape 对查询参数做最小转义（账单 cursor 是 base64 形态，含 + / =）。
+func urlQueryEscape(s string) string { return url.QueryEscape(s) }
+
+// toInt64 把数值或数字字符串取整；其它形态给 0。
+func toInt64(v any) int64 {
+	switch t := v.(type) {
+	case float64:
+		return int64(t)
+	case int64:
+		return t
+	case int:
+		return int64(t)
+	case json.Number:
+		n, _ := t.Int64()
+		return n
+	case string:
+		if f, err := strconv.ParseFloat(strings.TrimSpace(t), 64); err == nil {
+			return int64(f)
+		}
+	}
+	return 0
 }
 
 // ClaimOnboarding 领一次性首登奖。ledger 是账号 meta 里的已结算台账，键为任务名。
@@ -474,9 +779,27 @@ func (c *Client) ClaimOnboarding(ctx context.Context, token string, idn Identity
 }
 
 // UserInfo 查账号信息，接口不可用时由调用方退回本地解 JWT。
+//
+// IAM 首次迁移要先过一次性确认：业务码 200901 出现时打一次 iam/confirm，
+// 再重新拉 user_info。少了这一步，IAM 号的资料查询会一直停在 200901，
+// 表现为「导入成功但账号资料是空的」。
 func (c *Client) UserInfo(ctx context.Context, token string, idn Identity) (uid, name string) {
-	status, env, err := c.doJSON(ctx, http.MethodGet, PathUserInfo, webHeaders(token, idn, ""), nil)
-	if err != nil || status < 200 || status >= 300 || env == nil {
+	headers := webHeaders(token, idn, "")
+	status, env, err := c.doJSON(ctx, http.MethodGet, PathUserInfo, headers, nil)
+	if err != nil {
+		return TokenUID(token), ""
+	}
+	if code, _ := codeFromBodyEx(env.rawBody()); code == CodeIamConfirmRequired {
+		// 一次性确认：失败不阻断，下一次查询会再走一遍；成功后再拉一次资料。
+		if cst, cenv, cerr := c.doJSON(ctx, http.MethodPost, PathIamConfirm, headers, map[string]any{}); cerr == nil &&
+			cst >= 200 && cst < 300 && cenv != nil && cenv.OK() {
+			status, env, err = c.doJSON(ctx, http.MethodGet, PathUserInfo, headers, nil)
+			if err != nil {
+				return TokenUID(token), ""
+			}
+		}
+	}
+	if status < 200 || status >= 300 || env == nil {
 		return TokenUID(token), ""
 	}
 	var d struct {
@@ -554,10 +877,14 @@ func (c *Client) BindDevice(ctx context.Context, token, deviceID string) error {
 // ---- 错误与工具 ----
 
 type UpstreamError struct {
-	Status  int
-	Code    int
-	Auth    bool
-	Message string
+	Status int
+	// Code 是上游的业务错误码。非数字码（例如 `"insufficient_points"`）保留在
+	// CodeName 里：上游按数字码分类，不认识的字符串码至少要让「这是什么错」
+	// 还能被文案与日志看见，而不是退化成 0 被当成「没有错误码」。
+	Code     int
+	CodeName string
+	Auth     bool
+	Message  string
 
 	// Cause 是底层错误（网络、context 等），只用于错误链判断，不参与对外文案。
 	//

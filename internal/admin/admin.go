@@ -966,7 +966,7 @@ func (p *Panel) actionCheckin(w http.ResponseWriter, r *http.Request, acc *store
 	}
 	_ = p.st.AddCheckin(r.Context(), store.CheckinRecord{
 		AccountID: acc.ID, Day: today, Action: "checkin", Source: store.CheckinSourceManual,
-		OK: res.OK, Already: res.Already, Message: res.Message,
+		OK: res.OK, Already: res.Already, Credit: res.Credit, Message: res.Message,
 	})
 	// 签到完顺手同步余额：领到的积分要立刻反映到面板上。
 	// 失败不影响签到结果，只把当前已知余额带回去。
@@ -976,6 +976,7 @@ func (p *Panel) actionCheckin(w http.ResponseWriter, r *http.Request, acc *store
 	}
 	writeJSON(w, 200, map[string]any{
 		"ok": res.OK, "claimed": res.Claimed, "already": res.Already,
+		"credit": res.Credit, "verified": res.Verified,
 		"message": res.Message, "credits": credits,
 	})
 }

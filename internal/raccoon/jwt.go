@@ -41,9 +41,18 @@ func DecodeJWT(token string) (*Claims, error) {
 // 一份多供应商导出里哪些账号的 token 真属于小浣熊。
 const Issuer = "xiaohuanxiong.com/iam"
 
-// AccountUID 按 sub → uid → id → iss 的顺序取，与桌面版口径一致。
+// IsIam 表示这枚 token 由 IAM 签发（没有旧版 refresh grant）。
+func (c *Claims) IsIam() bool {
+	return strings.HasSuffix(strings.TrimSpace(c.ISS), "/iam")
+}
+
+// AccountUID 按 sub → uid → id 的顺序取账号 ID。
+//
+// **绝不能回落到 iss**：iss 是签发方，IAM 下是常量 `xiaohuanxiong.com/iam`。
+// 一旦拿它当 ID，所有 iss 相同（sub 缺失）的号会共用同一个 UID，导入时
+// 相互覆盖。解不出就返回空串，让调用方报「需要重新登录」，而不是造一个假号。
 func (c *Claims) AccountUID() string {
-	for _, v := range []string{c.Sub, c.UID, c.ID, c.ISS} {
+	for _, v := range []string{c.Sub, c.UID, c.ID} {
 		if s := strings.TrimSpace(v); s != "" {
 			return s
 		}
