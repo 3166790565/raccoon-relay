@@ -1,7 +1,7 @@
 'use strict';
 
 const $ = (id) => document.getElementById(id);
-const STATE = { accounts: [], loggedIn: false, page: '', loaded: new Set(), today: '' };
+const STATE = { accounts: [], loggedIn: false, page: '', loaded: new Set(), today: '', version: '' };
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -148,6 +148,10 @@ function switchPage(page, { force = false } = {}) {
 document.querySelectorAll('.navtab').forEach((btn) => {
   btn.addEventListener('click', () => switchPage(btn.dataset.page));
 });
+// 侧栏底部的版本号：点一下直接去「版本更新」页（进去总是重新拉一次状态）。
+$('sideVersion')?.addEventListener('click', () => {
+  switchPage('update', { force: true });
+});
 window.addEventListener('hashchange', () => switchPage(location.hash.slice(1)));
 
 // ---------- 侧栏抽屉（窄屏） ----------
@@ -187,6 +191,22 @@ window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () 
 });
 
 // ---------- 概览 ----------
+// 侧栏底部的版本号入口。只在值变化时写 DOM，loadStatus 每次切页都会跑，
+// 没必要每次都重排版。
+function renderSideVersion(v) {
+  const btn = $('sideVersion');
+  const txt = $('sideVersionText');
+  if (!btn || !txt) return;
+  const ver = (v || '').trim();
+  const label = !ver ? '版本未知'
+    : /^dev$/i.test(ver) ? '开发版'
+    : `v${ver.replace(/^[vV]/, '')}`;
+  if (STATE.version === label) return;
+  STATE.version = label;
+  txt.textContent = label;
+  btn.title = ver ? `当前版本 ${ver}，点击查看更新` : '当前版本未知，点击查看更新';
+}
+
 async function loadStatus() {
   try {
     const s = await api('/api/status');
@@ -200,17 +220,9 @@ async function loadStatus() {
       `<span class="chip bad">需重登 ${a.relogin || 0}</span>`,
     ];
     $('chips').innerHTML = chips.join('');
-    // 侧栏底部的运行状态：只要连得上管理面就算「运行中」，
-    // 颜色的意义交给需重登 / 冷却的数量（有异常才变黄/红）。
-    const dot = $('sideDot');
-    const txt = $('sideStatusText');
-    if (dot && txt) {
-      const badN = (a.relogin || 0) + (a.exhausted || 0);
-      const warnN = a.cooling || 0;
-      dot.className = 'status-dot ' + (badN ? 'bad' : warnN ? 'warn' : 'online');
-      txt.textContent = badN ? `${badN} 个账号异常` : warnN ? `${warnN} 个账号冷却中` : '网关运行中';
-      txt.title = `共 ${a.total || 0} 个账号 · 在线 ${a.online || 0} · 冷却 ${warnN} · 异常 ${badN}`;
-    }
+    // 侧栏底部是版本号入口：点一下跳到「版本更新」页。账号的异常/冷却数量
+    // 已经由顶栏的状态胶囊显示，底栏再放一份会一直挂在那里，反而像故障提示。
+    renderSideVersion(s.version);
     const navCnt = $('navAccountsCount');
     if (navCnt) navCnt.textContent = a.total ? String(a.total) : '';
     // 服务端时区的「今天」，号池的「今日签到」用它判断，不用浏览器时区
@@ -2133,6 +2145,9 @@ function fmtTokens(l) {
 
 function logStatusCell(l) {
   const code = Number(l.status) || 0;
+  // 499 单列：请求方在完成前断开（App 里点了停止 / 关掉页面 / 客户端超时）。
+  // 它既不是上游失败，也不是账号问题，用红色 5xx 样式会误导排障。
+  if (code === 499) return `<span class="lpill" title="客户端已断开（用户取消或客户端超时），与上游无关">499 取消</span>`;
   if (code >= 500) return `<span class="lpill bad">${code || 'ERR'}</span>`;
   if (code >= 400) return `<span class="lpill warn">${code}</span>`;
   if (code >= 200) return `<span class="lpill ok">${code}</span>`;
@@ -2172,7 +2187,10 @@ function renderLogRows(rows) {
   if (!rows.length) { tbody.innerHTML = ''; return; }
   tbody.innerHTML = rows.map((l) => {
     const err = l.error || '';
-    return `<tr data-id="${esc(l.id)}" class="${l.status >= 400 ? 'is-fail' : ''}">
+    // 499（客户端取消）不染失败底色：失败色是给「需要人看一眼」的行用的。
+    const code = Number(l.status) || 0;
+    const isFail = code >= 400 && code !== 499;
+    return `<tr data-id="${esc(l.id)}" class="${isFail ? 'is-fail' : ''}">
       <td class="lc-time"><div class="log-time">${esc(fmtClock(l.ts))}</div></td>
       <td class="lc-account">${logAccountCell(l)}</td>
       <td class="lc-status">${logStatusCell(l)}</td>

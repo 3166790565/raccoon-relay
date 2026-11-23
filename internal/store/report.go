@@ -322,13 +322,16 @@ func (s *Store) LoadHeatmap(ctx context.Context, since string) ([]DailyStat, err
 // LoadAccountUsage 按账号汇总区间内的流水。账号名从 accounts 表补，
 // 账号已删除时回落为空，面板显示 UID。
 func (s *Store) LoadAccountUsage(ctx context.Context, sinceMS, untilMS int64) ([]AccountUsage, error) {
+	// 客户端取消（499）不计入请求数：它不是这个号处理过的任务，
+	// 留在分母里会把这个号的成功率压低，而号本身完全健康。
 	q := `SELECT u.account_id, COALESCE(a.uid, ''), COALESCE(a.name, ''),
-			COUNT(*), ` + s.dialect.sumInt("CASE WHEN u.status >= 200 AND u.status < 400 THEN 1 ELSE 0 END") + `,
+			` + s.dialect.sumInt(canceledExcludeCond) + `,
+			` + s.dialect.sumInt("CASE WHEN u.status >= 200 AND u.status < 400 THEN 1 ELSE 0 END") + `,
 			` + s.dialect.sumInt("u.total_tokens") + `,
 			` + s.dialect.sumInt("u.prompt_tokens") + `,
 			` + s.dialect.sumInt("u.completion_tokens") + `
 		FROM usage_logs u LEFT JOIN accounts a ON a.id = u.account_id
-		WHERE u.ts >= ? AND u.ts < ?
+		WHERE u.ts >= ? AND u.ts < ? AND ` + canceledWhere + `
 		GROUP BY u.account_id, a.uid, a.name`
 	rows, err := s.query(ctx, q, sinceMS, untilMS)
 	if err != nil {
@@ -376,7 +379,7 @@ func (s *Store) LoadDailyAccounts(ctx context.Context, sinceMS, untilMS int64) (
 	// SQL 里按「天」分组要依赖方言各自的日期函数，直接用 Go 归并更稳妥。
 	rows, err := s.query(ctx,
 		`SELECT u.account_id, u.ts, u.total_tokens FROM usage_logs u
-		 WHERE u.ts >= ? AND u.ts < ?`, sinceMS, untilMS)
+		 WHERE u.ts >= ? AND u.ts < ? AND `+canceledWhere, sinceMS, untilMS)
 	if err != nil {
 		return nil, err
 	}
@@ -418,13 +421,13 @@ func (s *Store) LoadDailyAccounts(ctx context.Context, sinceMS, untilMS int64) (
 
 // LoadAPIUsage 按出站协议汇总区间内的流水。
 func (s *Store) LoadAPIUsage(ctx context.Context, sinceMS, untilMS int64) ([]APIUsage, error) {
-	q := `SELECT u.api, COUNT(*),
+	q := `SELECT u.api, ` + s.dialect.sumInt(canceledExcludeCond) + `,
 			` + s.dialect.sumInt("CASE WHEN u.status >= 200 AND u.status < 400 THEN 1 ELSE 0 END") + `,
 			` + s.dialect.sumInt("u.total_tokens") + `,
 			` + s.dialect.sumInt("u.prompt_tokens") + `,
 			` + s.dialect.sumInt("u.completion_tokens") + `
 		FROM usage_logs u
-		WHERE u.ts >= ? AND u.ts < ?
+		WHERE u.ts >= ? AND u.ts < ? AND ` + canceledWhere + `
 		GROUP BY u.api`
 	rows, err := s.query(ctx, q, sinceMS, untilMS)
 	if err != nil {
@@ -470,8 +473,10 @@ func (s *Store) LoadAPIUsage(ctx context.Context, sinceMS, untilMS int64) ([]API
 // 主键索引 (account_id,id) 与 ts 索引都能先用，实际取回的行有限。
 func (s *Store) LoadLatency(ctx context.Context, sinceMS, untilMS int64, sampleCap int) (LatencyStat, error) {
 	var out LatencyStat
+	// 499 是中途被取消的请求，耗时只覆盖到断开为止，混进耗时分会把 P50/P95 拉低。
+	// 这里用裸列名（没有 u 别名），所以不能复用 canceledWhere。
 	q := `SELECT ms, total_tokens FROM usage_logs
-		WHERE ts >= ? AND ts < ? AND status >= 200 AND ms > 0 ORDER BY ts DESC LIMIT ?`
+		WHERE ts >= ? AND ts < ? AND status >= 200 AND status <> 499 AND ms > 0 ORDER BY ts DESC LIMIT ?`
 	if sampleCap <= 0 {
 		sampleCap = 20000
 	}

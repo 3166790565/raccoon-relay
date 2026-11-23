@@ -210,7 +210,7 @@ func (c *Client) OpenChat(ctx context.Context, acc *store.Account, body map[stri
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}).Do(req)
 	if err != nil {
 		cancel()
-		return nil, &raccoon.UpstreamError{Status: 0, Message: "CodeArts 上游连接失败: " + err.Error(), Endpoint: url}
+		return nil, &raccoon.UpstreamError{Status: 0, Message: "CodeArts 上游连接失败: " + err.Error(), Endpoint: url, Cause: err}
 	}
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		rawBody, _ := io.ReadAll(io.LimitReader(res.Body, 64<<10))

@@ -1233,7 +1233,8 @@ func (p *Panel) handleStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	resp := map[string]any{
-		"ok": true,
+		"ok":      true,
+		"version": p.version,
 		"accounts": map[string]any{
 			"total": len(accounts), "online": online, "cooling": cooling,
 			"relogin": relogin, "exhausted": exhausted,

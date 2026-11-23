@@ -65,6 +65,13 @@ type UsageLog struct {
 	Error            string
 }
 
+// UsageStatusCanceled 是「客户端在请求完成前断开」的流水状态码。
+//
+// 沿用 nginx 的 499 语义：请求方已经走了，失败与上游无关。它既不算成功，
+// 也不能算进「失败」——用户在 App 里点停止是常态，混进失败数会同时污染
+// 面板的成功率和排障视野。
+const UsageStatusCanceled = 499
+
 // UsageRow 是调用日志列表的一行，带上账号名方便面板直接展示。
 // 账号可能已被删除，此时 Name/UID 为空，前端回落到 AccountID。
 type UsageRow struct {
@@ -87,7 +94,7 @@ type UsageRow struct {
 type UsageFilter struct {
 	SinceMS   int64
 	UntilMS   int64
-	Status    string // ok / fail / 4xx / 5xx
+	Status    string // ok / fail / 4xx / 5xx / canceled
 	AccountID string
 	Model     string
 	API       string
@@ -95,6 +102,22 @@ type UsageFilter struct {
 	Page      int
 	PageSize  int
 }
+
+// failCond 是「真正失败」的判据：排除客户端主动取消（499）。
+//
+// 499 是请求方自己走了，既不是上游的问题，也不代表网关服务质量；
+// 把它算进失败会让面板的成功率长期偏低，且和用户真实感受对不上。
+const failCond = `u.status >= 400 AND u.status <> 499`
+
+// canceledWhere 是「排除客户端取消」的 WHERE 片段，别名固定为 u。
+// canceledExcludeCond 是同一判据的聚合表达式（用于 COUNT / SUM 里）。
+//
+// 报表的多处汇总都按这个口径统计，抽成常量是为了让「499 不算请求数」
+// 这条规则只有一个出处，改的时候不会漏掉某一处。
+const (
+	canceledWhere       = `u.status <> 499`
+	canceledExcludeCond = `CASE WHEN u.status <> 499 THEN 1 ELSE 0 END`
+)
 
 func (f UsageFilter) conditions(d dialect) (string, []any) {
 	var conds []string
@@ -111,11 +134,14 @@ func (f UsageFilter) conditions(d dialect) (string, []any) {
 	case "ok":
 		conds = append(conds, "u.status < 400")
 	case "fail":
-		conds = append(conds, "u.status >= 400")
+		conds = append(conds, failCond)
 	case "4xx":
-		conds = append(conds, "u.status >= 400 AND u.status < 500")
+		// 499 单列成「客户端取消」筛选，不混进 4xx：它是请求方行为，不是错误。
+		conds = append(conds, "u.status >= 400 AND u.status < 500 AND u.status <> 499")
 	case "5xx":
 		conds = append(conds, "u.status >= 500")
+	case "canceled":
+		conds = append(conds, "u.status = 499")
 	}
 	if f.AccountID != "" {
 		conds = append(conds, "u.account_id = ?")
@@ -159,7 +185,7 @@ func (s *Store) QueryUsage(ctx context.Context, f UsageFilter) ([]UsageRow, int6
 
 	var total, failed int64
 	if err := s.queryRow(ctx,
-		`SELECT COUNT(*), `+s.dialect.sumInt("CASE WHEN u.status >= 400 THEN 1 ELSE 0 END")+from+where,
+		`SELECT COUNT(*), `+s.dialect.sumInt("CASE WHEN "+failCond+" THEN 1 ELSE 0 END")+from+where,
 		args...).Scan(&total, &failed); err != nil {
 		return nil, 0, 0, err
 	}

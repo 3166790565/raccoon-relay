@@ -149,6 +149,70 @@ func TestQueryUsageFailedCount(t *testing.T) {
 	}
 }
 
+// 客户端取消（499）既不算成功也不算失败：它单列一档，不能污染失败数，
+// 也不能落进 4xx 筛选——499 是请求方行为，不是错误。
+func TestQueryUsageCanceledExcludedFromFailed(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	now := time.Now().UnixMilli()
+	for _, st := range []int{200, 502, UsageStatusCanceled} {
+		_ = s.AddUsage(ctx, UsageLog{TS: now, Status: st, Error: "context canceled"})
+	}
+
+	_, total, failed, err := s.QueryUsage(ctx, UsageFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 3 {
+		t.Fatalf("全部状态应 3 条，实际 %d", total)
+	}
+	if failed != 1 {
+		t.Fatalf("失败只该数 502，实际 %d（499 不能算失败）", failed)
+	}
+
+	cases := []struct {
+		name   string
+		filter string
+		want   int64
+	}{
+		{"失败筛选不含 499", "fail", 1},
+		{"4xx 筛选不含 499", "4xx", 0},
+		{"499 单列一档", "canceled", 1},
+		{"成功筛选只有 200", "ok", 1},
+	}
+	for _, c := range cases {
+		_, n, _, err := s.QueryUsage(ctx, UsageFilter{Status: c.filter})
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if n != c.want {
+			t.Fatalf("%s: 应 %d 条，实际 %d", c.name, c.want, n)
+		}
+	}
+}
+
+// 日聚合必须跳过 499：它不进请求数，否则报表成功率会被客户端取消长期压低。
+func TestFoldDailySkipsCanceled(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	SetDailyLocation(time.UTC)
+	ts := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC).UnixMilli()
+	st.foldDaily(ctx, []UsageLog{
+		{TS: ts, Model: "m", API: "openai", Status: 200, TotalTokens: 10},
+		{TS: ts + 1, Model: "m", API: "openai", Status: UsageStatusCanceled, TotalTokens: 0},
+	})
+	daily, err := st.LoadDaily(ctx, "2026-05-01", "2026-05-01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(daily) != 1 {
+		t.Fatalf("应有 1 天，实际 %d", len(daily))
+	}
+	if daily[0].Requests != 1 || daily[0].Successful != 1 || daily[0].Tokens != 10 {
+		t.Fatalf("499 不应进日聚合，实际 %+v", daily[0])
+	}
+}
+
 // 空表统计不能报错，earliest 应为 0。
 func TestStatsOnEmptyTables(t *testing.T) {
 	ctx := context.Background()
