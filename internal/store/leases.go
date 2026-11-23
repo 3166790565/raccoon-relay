@@ -103,6 +103,31 @@ func (s *Store) LeaseSlotStats(ctx context.Context, id string, now int64) (count
 	return
 }
 
+// LeaseCounts 一次读出所有账号当前被占的槽位数。
+//
+// 选号层用它判断「这个号的并发槽位满了没有」。必须是库里的事实而不是
+// 本进程的计数：槽位可能被别的副本占着，进程内 map 看不见。
+// 一条聚合查询代替逐号 COUNT，换号重试时也不会变成 N 次往返。
+func (s *Store) LeaseCounts(ctx context.Context, now int64) (map[string]int, error) {
+	rows, err := s.query(ctx,
+		`SELECT account_id, COUNT(*) FROM account_lease_slots
+		 WHERE slot_until > ? GROUP BY account_id`, now)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var id string
+		var n int
+		if err := rows.Scan(&id, &n); err != nil {
+			return nil, err
+		}
+		out[id] = n
+	}
+	return out, rows.Err()
+}
+
 // HydrateLeaseSlots 在进程启动时把库里的占用汇总回 accounts.lease_until。
 // 老库升级到多槽位后，这一列要能和槽位表对上，否则选号层会以为号是空的。
 func (s *Store) HydrateLeaseSlots(ctx context.Context) error {

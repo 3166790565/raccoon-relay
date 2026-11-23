@@ -207,7 +207,7 @@ type committingSink interface {
 // 客户端自己的超时通常远短于它，再等只会让一次失败拖成两次。
 const (
 	leaseWaitCap  = 20 * time.Second
-	leaseWaitStep = 2 * time.Second
+	leaseWaitStep = time.Second
 )
 
 // RunOpenAI 执行 OpenAI 协议的一次完整转发（含换号重试）。
@@ -269,34 +269,21 @@ func (e *Engine) RunOpenAI(ctx context.Context, req *ChatContext, sink OpenAISin
 			//     把上一个号的上游错误原样丢给调用方——面板上就是「明明别的号
 			//     都正常，这个请求却一直不换号」。
 			//  2. 号都不在线（冷却/耗尽/需重登）。等也没用，按老逻辑兜底探测。
-			if drainedWait < leaseWaitCap {
-				if wait, ok := e.Pool.NextAvailableIn(ctx, req.Model, provider, excluded); ok {
-					// 只短睡：租约/退避的到期时刻是「最早可能空出来」的估计，
-					// 到期后选号仍被并发抢走时要继续等下一轮，而不是闷头睡到上限。
-					if wait <= 0 || wait > leaseWaitStep {
-						wait = leaseWaitStep
-					}
-					if remain := leaseWaitCap - drainedWait; wait > remain {
-						wait = remain
-					}
-					select {
-					case <-ctx.Done():
-						return Result{AccountID: lastAcc, Model: req.PublicModel}, errClientGone
-					case <-time.After(wait):
-					}
-					drainedWait += wait
-					// 这一轮没有真正打上游，不该占掉「最多换号次数」。
-					// attemptNo 同时是日志里的尝试序号，退回去才能和实际调用对上。
-					if attemptNo > 0 {
-						attemptNo--
-					}
-					continue
+			waited, werr := e.waitPoolBusy(ctx, req, provider, excluded, &drainedWait)
+			if werr != nil {
+				return Result{AccountID: lastAcc, Model: req.PublicModel}, werr
+			}
+			if waited {
+				// 这一轮没有真正打上游，不该占掉「最多换号次数」。
+				// attemptNo 同时是日志里的尝试序号，退回去才能和实际调用对上。
+				if attemptNo > 0 {
+					attemptNo--
 				}
+				continue
 			}
 			// 号池真的抽干（全在冷却里）时，别直接回一句「没有可用账号」：
 			// 那是我们自己的推断，可能已经过时。挑一个最早恢复的号真打一次，
 			// 让调用方拿到上游的真实错误（含 429 的重置时间），而不是通用的 502/503。
-			// 只探一次，且只在还没向客户端写出任何内容时做——写过了就没法重来。
 			// 探针只能在「还没打过任何上游」时做：写过了就没法重来。
 			if lastAcc == "" && !probed {
 				probed = true
@@ -309,19 +296,28 @@ func (e *Engine) RunOpenAI(ctx context.Context, req *ChatContext, sink OpenAISin
 			}
 		}
 		acc := lease.Account
-		excluded[acc.ID] = true
 		lastAcc = acc.ID
 
 		// 在途租约：同一账号最多 N 个并发槽位（N = 面板的租约并发数）。
-		// 抢不到说明这个号的槽位都满了，跳过它去选下一个号，而不是排队等——
-		// 换号比等待更符合网关的定位。
+		//
+		// 抢不到说明槽位在这一刻满了。注意它**不是**「这个号坏了」：
+		//   · 先换下一个号试——换号比等待更符合网关的定位；
+		//   · 但不要把它写进 excluded。excluded 表示「本轮别再选它」，
+		//     而槽位满只是暂时的。写进去会导致单号池立刻判空（502），
+		//     多号池也会在这一个号上少一条可用路径。所以只在等待判定里
+		//     让它参与「等一会儿会空出来」的计算。
 		grant, ok := e.Pool.AcquireLease(ctx, acc)
 		if !ok {
 			e.Pool.ReleaseLease(lease)
 			e.report(store.LevelInfo, "账号并发槽位已满，换号",
 				"账号："+acc.Name+"\n模型："+req.Model, acc.ID)
+			// 没抢到槽位不等于这个号坏了，但它此刻确实不能接活。
+			// 先换下一个号；如果整个号池都满了，就在下一轮选不到号时等它空出来。
 			continue
 		}
+		// 真正拿到槽位之后才把它记进「本轮试过」：允许失败的号被换掉，
+		// 但没抢到槽位的号下一轮还要能再选。
+		excluded[acc.ID] = true
 
 		at := &Attempt{Account: acc, Lease: lease, IDN: identityOf(acc)}
 		leaseErr := e.runOne(ctx, at, req, sink)
@@ -481,6 +477,39 @@ func (e *Engine) RunOpenAI(ctx context.Context, req *ChatContext, sink OpenAISin
 }
 
 var errNoAccount = errors.New("号池没有可用账号（全部冷却、积分耗尽或凭证失效）")
+
+// waitPoolBusy 在「选不到号」时判断该不该等一会儿再选。
+//
+// 只有号仍在线、只是暂时不可选（在途租约被占、退避窗口）时才等；
+// 号都不在线（冷却/耗尽/需重登）则返回 false，让调用方走兜底探测/放弃。
+//
+// 返回 waited=true 表示已经睡过一轮、应当重新选号（且不消耗重试次数）；
+// 返回 err 表示客户端在这一轮等待中断开。
+func (e *Engine) waitPoolBusy(ctx context.Context, req *ChatContext, provider string,
+	excluded map[string]bool, drainedWait *time.Duration) (bool, error) {
+	if *drainedWait >= leaseWaitCap {
+		return false, nil
+	}
+	wait, ok := e.Pool.NextAvailableIn(ctx, req.Model, provider, excluded)
+	if !ok {
+		return false, nil
+	}
+	// 只短睡：租约/退避的到期时刻是「最早可能空出来」的估计，
+	// 到期后选号仍被并发抢走时要继续等下一轮，而不是闷头睡到上限。
+	if wait <= 0 || wait > leaseWaitStep {
+		wait = leaseWaitStep
+	}
+	if remain := leaseWaitCap - *drainedWait; wait > remain {
+		wait = remain
+	}
+	select {
+	case <-ctx.Done():
+		return false, errClientGone
+	case <-time.After(wait):
+	}
+	*drainedWait += wait
+	return true, nil
+}
 
 // quotaResumeFor 决定一个「额度耗尽」账号的冷却时刻，并写回账号状态。
 //

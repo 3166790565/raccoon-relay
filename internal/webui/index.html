@@ -1073,7 +1073,10 @@
         <p class="hint">超过上限的请求<strong>不会直接返回 429</strong>，而是排队等待前面的请求结束；
           排队超过「最长排队时间」才返回 503。配置了 <code>REDIS_URL</code> 时计数跨实例共享，
           多副本合计也不超过这个上限；未配置 Redis 时只在单进程内计数。
-          客户端在排队期间断开连接会立刻放弃，不会打到上游。保存后立即生效。</p>
+          客户端在排队期间断开连接会立刻放弃，不会打到上游。保存后立即生效。<br>
+          这一项限的是<strong>整个网关</strong>同时在跑的请求数；
+          <strong>单个账号</strong>能接几路由「调度 → 单号租约并发数」决定，
+          真正打到上游的上限约等于两者中更小的那个（再乘号池规模）。</p>
         <button class="primary" id="saveConcurrencyBtn">保存并发设置</button>
         <p class="msg" id="concurrencyMsg"></p>
       </section>

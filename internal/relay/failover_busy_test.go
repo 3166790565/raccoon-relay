@@ -54,6 +54,61 @@ func TestFailoverWaitsForBusyAccount(t *testing.T) {
 	}
 }
 
+// 单号池、并发数 2：两个请求同时进来，第二个必须等到槽位空出来，而不是
+// 直接 502。曾经的 bug 是「抢槽失败就把号写进 excluded」，导致号池被误判为空。
+func TestSecondRequestWaitsForLeaseSlot(t *testing.T) {
+	h := newHarness(t, []chatResult{
+		{status: 200, frames: sseFrames("first"), usage: usageFrame},
+		{status: 200, frames: sseFrames("second"), usage: usageFrame},
+	})
+	h.engine.Pool.SetLeaseConfig(pool.LeaseConfig{Enabled: true, Concurrency: 2, TTL: 5 * time.Minute})
+	h.engine.SetRetryPolicy(false, 3)
+	acc := h.addAccount(t, "pu-only", 9000)
+
+	// 占掉两个槽位中的一个：另一个请求还在跑长回答。
+	grant, ok := h.engine.Pool.AcquireLease(context.Background(), acc)
+	if !ok {
+		t.Fatal("占租约失败")
+	}
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		h.engine.Pool.ReleaseAccountLease(context.Background(), acc, grant)
+	}()
+
+	// 只有一个空槽位可用；请求应当成功（拿不到时等槽位，而不是判池空）。
+	w := h.do(t, "POST", "/v1/chat/completions",
+		`{"model":"sn-test-model","messages":[{"role":"user","content":"hi"}]}`)
+	if w.Code != 200 {
+		t.Fatalf("单号池有空槽时应成功，实际 %d：%s", w.Code, w.Body.String())
+	}
+}
+
+// 单号池并发数为 1、槽位被占满时，第二个请求要等它空出来再打，
+// 而不是立刻回 502「号池没有可用账号」。
+func TestPoolFullWaitsInsteadOf502(t *testing.T) {
+	h := newHarness(t, []chatResult{
+		{status: 200, frames: sseFrames("waited"), usage: usageFrame},
+	})
+	h.engine.Pool.SetLeaseConfig(pool.LeaseConfig{Enabled: true, Concurrency: 1, TTL: 5 * time.Minute})
+	h.engine.SetRetryPolicy(false, 3)
+	acc := h.addAccount(t, "pu-only", 9000)
+
+	grant, ok := h.engine.Pool.AcquireLease(context.Background(), acc)
+	if !ok {
+		t.Fatal("占租约失败")
+	}
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		h.engine.Pool.ReleaseAccountLease(context.Background(), acc, grant)
+	}()
+
+	w := h.do(t, "POST", "/v1/chat/completions",
+		`{"model":"sn-test-model","messages":[{"role":"user","content":"hi"}]}`)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "waited") {
+		t.Fatalf("槽位空出后应成功，实际 %d：%s", w.Code, w.Body.String())
+	}
+}
+
 // 健康号只会在号池真的还有在线号时才等：全部号都已冷却/耗尽时不能白等，
 // 要尽快把错误交给调用方。
 func TestFailoverDoesNotWaitWhenPoolDrained(t *testing.T) {

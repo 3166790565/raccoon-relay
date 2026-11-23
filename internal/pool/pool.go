@@ -214,10 +214,6 @@ func (p *Pool) pick(ctx context.Context, model, wantProvider string, excluded ma
 	creditPol := p.credit
 	prefer := p.preferID
 	leases := p.lease
-	heldSlots := make(map[string]int, len(p.held))
-	for id, slots := range p.held {
-		heldSlots[id] = len(slots)
-	}
 	loads := make(map[string]int, len(accounts))
 	for id, n := range p.inFlight {
 		loads[id] = n
@@ -230,6 +226,12 @@ func (p *Pool) pick(ctx context.Context, model, wantProvider string, excluded ma
 
 	// 退避门闸一次读出：逐个查会变成 N 次往返。
 	backoffs, _ := p.st.ListBackoffs(ctx)
+	// 租约占用同理，一次聚合查询读出全部账号的已占槽位数。
+	// 必须看库里的事实：槽位可能被别的副本占着，进程内计数看不见。
+	var leaseUsed map[string]int
+	if leases.Enabled {
+		leaseUsed, _ = p.st.LeaseCounts(ctx, now)
+	}
 
 	type cand struct {
 		acc    *store.Account
@@ -278,11 +280,11 @@ func (p *Pool) pick(ctx context.Context, model, wantProvider string, excluded ma
 		// 1 即整号串行）。任一槽位被占时 lease_until > now。到期后自动失效，
 		// 进程崩溃留下的残租约会回收。
 		//
-		// 有租约时，本进程已占的槽位数与库里的 lease_until 共同决定还能不能再选：
-		// 库里 lease_until 只说明「本进程或别的副本有槽位被占」，本进程再占一个
-		// 是允许的，直到凑满 Concurrency。别的副本占满的情况由 AcquireLeaseSlot
-		// 的 CAS 兜底：抢不到就换下一个号。
-		if leases.Enabled && heldSlots[a.ID] >= leases.Concurrency {
+		// 用**库里**的已占槽位数判断满没满：它同时包含本进程与别的副本的占用。
+		// 不能用进程内计数器（多副本看不见别人），也不能把本进程的占用再加一遍
+		// （那样并发数 2 实际只放出 1 路）。选号与真正抢槽之间仍有窗口，
+		// 抢不到时由 AcquireLeaseSlot 的 CAS 兜底，调用方换号即可。
+		if leases.Enabled && leaseUsed[a.ID] >= leases.Concurrency {
 			continue
 		}
 		// 退避门闸：刚失败过的号在窗口内不接新请求。
@@ -374,16 +376,16 @@ func (p *Pool) NextAvailableIn(ctx context.Context, model, wantProvider string, 
 	p.mu.Lock()
 	creditPol := p.credit
 	leases := p.lease
-	heldSlots := make(map[string]int, len(p.held))
-	for id, slots := range p.held {
-		heldSlots[id] = len(slots)
-	}
 	loads := make(map[string]int, len(p.inFlight))
 	for id, n := range p.inFlight {
 		loads[id] = n
 	}
 	p.mu.Unlock()
 	backoffs, _ := p.st.ListBackoffs(ctx)
+	var leaseUsed map[string]int
+	if leases.Enabled {
+		leaseUsed, _ = p.st.LeaseCounts(ctx, now)
+	}
 
 	waiting := false   // 存在「其余条件都满足」的号，只是并发上限暂时打满
 	var bestWait int64 // 号池里最早空出来的时刻（相对 now 的毫秒）
@@ -416,7 +418,7 @@ func (p *Pool) NextAvailableIn(ctx context.Context, model, wantProvider string, 
 			continue
 		}
 		// 租约：只有槽位占满才算「等一会儿就会空出来」；没占满的号此刻就能多接一路。
-		if leases.Enabled && a.LeaseUntil > now && heldSlots[a.ID] >= leases.Concurrency {
+		if leases.Enabled && leaseUsed[a.ID] >= leases.Concurrency {
 			if d := a.LeaseUntil - now; bestWait == 0 || d < bestWait {
 				bestWait = d
 			}

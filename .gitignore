@@ -22,3 +22,6 @@ dist/
 
 # 子代理临时工作树
 .claude/worktrees/
+
+# 本地联调用的临时脚本与容器数据（mock 上游、并发探针）
+.testdata/

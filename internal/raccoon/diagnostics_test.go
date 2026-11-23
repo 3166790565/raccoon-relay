@@ -2,6 +2,7 @@ package raccoon
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -128,6 +129,34 @@ func TestUpstreamErrTextKeepsUTF8(t *testing.T) {
 	body := []byte(`{"code":200108,"message":"账号异常"}`)
 	if got := upstreamErrText(429, body); got != "账号异常" {
 		t.Fatalf("UTF-8 文案应原样返回，实际 %q", got)
+	}
+}
+
+// OpenAI 形态的嵌套错误体（400/402 业务错误常见）必须抠出可读文案，
+// 而不是把整段原始 JSON 当作错误消息丢给面板和流水。
+func TestUpstreamErrTextNestedError(t *testing.T) {
+	body := []byte(`{"error":{"code":1000007,"message":"积分余额不足，请充值后重试",` +
+		`"param":null,"type":"invalid_request_error"}}`)
+	if got := upstreamErrText(402, body); got != "积分余额不足，请充值后重试" {
+		t.Fatalf("嵌套 error 应取 message 字段，实际 %q", got)
+	}
+	// 流水仍保留完整原文，这个函数只负责「对外可读」。
+	if !strings.Contains(string(body), "invalid_request_error") {
+		t.Fatal("测试数据应保持嵌套结构")
+	}
+}
+
+// codeOf 也要能从嵌套 error 里取业务码（非 chat 端点走 Envelope 路径）。
+func TestCodeOfNestedError(t *testing.T) {
+	var env Envelope
+	if err := json.Unmarshal([]byte(`{"error":{"code":1000007,"message":"x"}}`), &env); err != nil {
+		t.Fatal(err)
+	}
+	if got := codeOf(&env); got != 1000007 {
+		t.Fatalf("嵌套 error.code 应取到 1000007，实际 %d", got)
+	}
+	if env.ErrMessage() != "x" {
+		t.Fatalf("嵌套 error.message 应可读，实际 %q", env.ErrMessage())
 	}
 }
 

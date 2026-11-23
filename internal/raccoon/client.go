@@ -44,13 +44,28 @@ func NewClient(base string, timeout time.Duration) *Client {
 }
 
 // Envelope 是小浣熊统一的 {code, message, data} 信封。
+//
+// 错误体有两种下发形态，必须都认：
+//   - 顶层 {"code":1000007,"message":"积分余额不足…"}
+//   - OpenAI 形态的嵌套 {"error":{"code":1000007,"message":"…","type":…}}
+//
+// 后者在 400/402 的业务错误里非常常见。只解析顶层字段时 ErrMessage 返回空，
+// 调用方会退化成「把整段原始 JSON 当文案」，面板与流水里就是一大坨转义 JSON。
 type Envelope struct {
 	Code    int             `json:"code"`
 	Message string          `json:"message"`
 	Msg     string          `json:"msg"`
 	Data    json.RawMessage `json:"data"`
+	Error   *EnvelopeError  `json:"error"`
 	// body 是原始响应体，供没有 data 字段的端点（模型目录历史版本）解析。
 	body []byte
+}
+
+// EnvelopeError 是嵌套 error 对象的字段子集。
+type EnvelopeError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	Type    string `json:"type"`
 }
 
 func (e *Envelope) ErrMessage() string {
@@ -60,7 +75,13 @@ func (e *Envelope) ErrMessage() string {
 	if e.Message != "" {
 		return e.Message
 	}
-	return e.Msg
+	if e.Msg != "" {
+		return e.Msg
+	}
+	if e.Error != nil {
+		return e.Error.Message
+	}
+	return ""
 }
 
 func (e *Envelope) OK() bool { return e.Code == 0 || e.Code == 200 }
@@ -645,7 +666,13 @@ func codeOf(env *Envelope) int {
 	if env == nil {
 		return 0
 	}
-	return env.Code
+	if env.Code != 0 {
+		return env.Code
+	}
+	if env.Error != nil {
+		return env.Error.Code
+	}
+	return 0
 }
 
 func errText(env *Envelope, status int) string {
