@@ -1093,14 +1093,15 @@
       </section>
 
       <section class="card">
-        <h2>调度：单号串行、换号间隔与会话粘性</h2>
+        <h2>调度：单号并发、换号间隔与会话粘性</h2>
         <div class="grid2">
-          <div class="field"><label>单号串行（在途租约）</label>
+          <div class="field"><label>在途租约</label>
             <select id="setLeaseEnabled">
-              <option value="true">开启 · 同一账号同时只跑一个请求</option>
-              <option value="false">关闭 · 允许同号并发</option>
+              <option value="true">开启 · 按下面的并发数限制单号并发</option>
+              <option value="false">关闭 · 允许同号并发（不限制数量）</option>
             </select>
           </div>
+          <div class="field"><label>单号租约并发数</label><input type="number" id="setLeaseConcurrency" min="1" max="64"></div>
           <div class="field"><label>租约时长（秒）</label><input type="number" id="setLeaseTTLSec" min="30" max="3600"></div>
           <div class="field"><label>换号间隔（毫秒）</label><input type="number" id="setRetryDelayMS" min="0" max="60000"></div>
           <div class="field"><label>失败后退避</label>
@@ -1121,9 +1122,10 @@
         </div>
         <p class="hint">这三项都在回答同一个问题：<strong>「一次请求在外部看起来是什么形态」</strong>。
           上游风控看的不是单个请求，而是同一账号一段时间内接了多少互不相干的请求。<br>
-          <strong>单号串行</strong>：开启后同一账号同时只处理一个请求，其余请求自动换号；
-          代价是单号并发能力下降，好处是不会出现「一台设备同时跑多段对话」。租约到期自动失效，
-          进程崩溃留下的残租约也能回收；长回答会按租约时长的 1/3 滚动续期。<br>
+          <strong>在途租约</strong>：开启后同一账号最多同时处理「单号租约并发数」个请求，其余请求自动换号。
+          并发数填 1 就是整号串行，填 2 则同一账号可以同时跑两路，等于把单号并发上限做成可配；
+          关闭租约则完全不限制同号并发（升级前的行为）。租约到期自动失效，进程崩溃留下的残租约也能回收；
+          长回答会按租约时长的 1/3 滚动续期。<br>
           <strong>换号间隔</strong>：失败后等一小会儿再换号，避免同一秒内横扫整个号池。<br>
           <strong>失败后退避</strong>：403 / 5xx / 网络抖动这类上游波动会让该号在窗口内暂不被选中，
           时长从起点开始逐次翻倍、封顶上限。它<strong>不改变账号状态</strong>（面板上不会显示成停用），

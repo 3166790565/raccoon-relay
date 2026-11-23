@@ -44,10 +44,13 @@ type Config struct {
 	RetryUntilExhausted bool
 	// RetryDelayMS 是两次换号之间的等待毫秒数。0 = 不等待。
 	RetryDelayMS int
-	// 单号串行：开启后同一账号同时只处理一个请求，其余请求换号。
-	// 关掉则同号并发（升级前的行为）。
+	// 在途租约：开启后同一账号最多同时处理 LeaseConcurrency 个请求，
+	// 其余请求换号。关掉则同号并发不限（升级前的行为）。
 	LeaseEnabled bool
-	LeaseTTLSec  int
+	// LeaseConcurrency 是单号最多同时持有的租约数，即单号并发上限。
+	// 1 = 整号串行（旧行为）；2 = 允许两路并发，以此类推。
+	LeaseConcurrency int
+	LeaseTTLSec      int
 	// 换号退避：失败后在窗口内不再选中该号，时长从 BaseMS 起逐次翻倍、封顶 MaxMS。
 	BackoffEnabled bool
 	BackoffBaseMS  int
@@ -230,9 +233,11 @@ func Load() (*Config, error) {
 		MaxRetries:          envInt("MAX_RETRIES", 3),
 		RetryUntilExhausted: envBool("RETRY_UNTIL_EXHAUSTED", false),
 		RetryDelayMS:        envInt("RETRY_DELAY_MS", 800),
-		// 默认开启单号串行：同号并发是最容易被上游判成第三方客户端的特征。
-		LeaseEnabled: envBool("LEASE_ENABLE", true),
-		LeaseTTLSec:  envInt("LEASE_TTL_SEC", 300),
+		// 默认开启租约：同号并发是最容易被上游判成第三方客户端的特征。
+		// 默认单号 2 路并发：比整号串行多一倍吞吐，又不至于像完全不限那样明显。
+		LeaseEnabled:     envBool("LEASE_ENABLE", true),
+		LeaseConcurrency: envInt("LEASE_CONCURRENCY", 2),
+		LeaseTTLSec:      envInt("LEASE_TTL_SEC", 300),
 		// 退避默认开启、起点很短：只用来错开同一瞬间的密集重试，不是惩罚账号。
 		BackoffEnabled:   envBool("BACKOFF_ENABLE", true),
 		BackoffBaseMS:    envInt("BACKOFF_BASE_MS", 2000),

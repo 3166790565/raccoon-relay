@@ -11,7 +11,7 @@ import (
 func TestPutDispatchSettingsHotUpdates(t *testing.T) {
 	p, srv := newConcurrencyPanel(t)
 	_ = srv
-	w := putSettings(t, p, `{"leaseEnabled":true,"leaseTTLSec":120,"retryDelayMS":300,`+
+	w := putSettings(t, p, `{"leaseEnabled":true,"leaseConcurrency":3,"leaseTTLSec":120,"retryDelayMS":300,`+
 		`"backoffEnabled":true,"backoffBaseMS":1500,"backoffMaxMS":20000,`+
 		`"affinityEnabled":true,"affinityTTLSec":3600}`)
 	if w.Code != 200 {
@@ -19,7 +19,7 @@ func TestPutDispatchSettingsHotUpdates(t *testing.T) {
 	}
 
 	lease := p.po.LeaseConfig()
-	if !lease.Enabled || lease.TTL != 120*time.Second {
+	if !lease.Enabled || lease.TTL != 120*time.Second || lease.Concurrency != 3 {
 		t.Fatalf("租约未热更新: %+v", lease)
 	}
 	bo := p.po.BackoffPolicy()
@@ -35,6 +35,9 @@ func TestPutDispatchSettingsHotUpdates(t *testing.T) {
 	}
 	if raw := p.st.GetSetting(t.Context(), "leaseTTLSec", ""); raw != "120" {
 		t.Fatalf("leaseTTLSec 未持久化，实际 %q", raw)
+	}
+	if raw := p.st.GetSetting(t.Context(), "leaseConcurrency", ""); raw != "3" {
+		t.Fatalf("leaseConcurrency 未持久化，实际 %q", raw)
 	}
 }
 
@@ -64,6 +67,8 @@ func TestPutDispatchSettingsRejectsInvalid(t *testing.T) {
 	_ = putSettings(t, p, `{"leaseEnabled":true,"leaseTTLSec":120,"retryDelayMS":300}`)
 
 	cases := []string{
+		`{"leaseConcurrency":0}`,                     // 并发数至少为 1
+		`{"leaseConcurrency":65}`,                    // 超过上限
 		`{"leaseTTLSec":10}`,                         // 低于下限
 		`{"retryDelayMS":-1}`,                        // 负数
 		`{"retryDelayMS":99999}`,                     // 超过上限
@@ -89,6 +94,7 @@ func TestApplyStoredDispatchSettings(t *testing.T) {
 	p, _ := newConcurrencyPanel(t)
 	ctx := t.Context()
 	_ = p.st.SetSetting(ctx, "leaseEnabled", "true")
+	_ = p.st.SetSetting(ctx, "leaseConcurrency", "5")
 	_ = p.st.SetSetting(ctx, "leaseTTLSec", "240")
 	_ = p.st.SetSetting(ctx, "retryDelayMS", "750")
 	_ = p.st.SetSetting(ctx, "backoffEnabled", "false")
@@ -98,7 +104,7 @@ func TestApplyStoredDispatchSettings(t *testing.T) {
 
 	p.applyStoredDispatchSettings(ctx)
 
-	if l := p.po.LeaseConfig(); !l.Enabled || l.TTL != 240*time.Second {
+	if l := p.po.LeaseConfig(); !l.Enabled || l.TTL != 240*time.Second || l.Concurrency != 5 {
 		t.Fatalf("租约未恢复: %+v", l)
 	}
 	if p.engine.RetryDelay() != 750*time.Millisecond {
@@ -115,12 +121,13 @@ func TestApplyStoredDispatchSettings(t *testing.T) {
 // GET 返回当前生效值，前端据此回填。
 func TestGetDispatchSettings(t *testing.T) {
 	p, _ := newConcurrencyPanel(t)
-	p.po.SetLeaseConfig(pool.LeaseConfig{Enabled: true, TTL: 90 * time.Second})
+	p.po.SetLeaseConfig(pool.LeaseConfig{Enabled: true, Concurrency: 4, TTL: 90 * time.Second})
 	p.engine.SetRetryDelay(1200 * time.Millisecond)
 	p.engine.SetAffinityPolicy(true, time.Hour)
 
 	got := getSettings(t, p)
-	if got["leaseEnabled"] != true || got["leaseTTLSec"] != float64(90) {
+	if got["leaseEnabled"] != true || got["leaseTTLSec"] != float64(90) ||
+		got["leaseConcurrency"] != float64(4) {
 		t.Fatalf("GET 租约字段不对: %v", got)
 	}
 	if got["retryDelayMS"] != float64(1200) {

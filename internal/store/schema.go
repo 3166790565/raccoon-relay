@@ -188,6 +188,18 @@ var sqliteSchema = []string{
 		hits       INTEGER NOT NULL DEFAULT 0
 	)`,
 
+	// 在途租约槽位：一个账号可以有 N 个并发槽位（N = 租约并发数）。
+	// 过去是 accounts.lease_until 单个时刻，只能表示「整号串行」；改成一张
+	// 按 (账号, 槽位) 建行的表后，单号最多同时持有 N 个租约，等价于把该号的
+	// 并发上限做成可配。多副本下靠主键唯一约束抢占，不依赖进程内计数。
+	// slot_until 过期即视为空槽，进程崩溃留下的残租约自动失效。
+	`CREATE TABLE IF NOT EXISTS account_lease_slots (
+		account_id TEXT NOT NULL,
+		slot       INTEGER NOT NULL,
+		slot_until INTEGER NOT NULL DEFAULT 0,
+		PRIMARY KEY (account_id, slot)
+	)`,
+
 	`CREATE TABLE IF NOT EXISTS settings (
 		key   TEXT PRIMARY KEY,
 		value TEXT NOT NULL DEFAULT ''
@@ -378,6 +390,13 @@ var pgSchema = []string{
 		"until"    BIGINT NOT NULL DEFAULT 0,
 		reason     TEXT NOT NULL DEFAULT '',
 		hits       BIGINT NOT NULL DEFAULT 0
+	)`,
+
+	`CREATE TABLE IF NOT EXISTS account_lease_slots (
+		account_id TEXT NOT NULL,
+		slot       BIGINT NOT NULL,
+		slot_until BIGINT NOT NULL DEFAULT 0,
+		PRIMARY KEY (account_id, slot)
 	)`,
 
 	`CREATE TABLE IF NOT EXISTS settings (

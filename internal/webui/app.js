@@ -1429,6 +1429,7 @@ async function loadSettings() {
     $('setWebUserAgent').placeholder = '留空 = ' + (s.effectiveWebUserAgent || '按版本号派生');
     // 调度设置
     $('setLeaseEnabled').value = String(s.leaseEnabled !== false);
+    $('setLeaseConcurrency').value = s.leaseConcurrency ?? 2;
     $('setLeaseTTLSec').value = s.leaseTTLSec ?? 300;
     $('setRetryDelayMS').value = s.retryDelayMS ?? 800;
     $('setBackoffEnabled').value = String(s.backoffEnabled !== false);
@@ -1471,6 +1472,7 @@ $('saveExternalBtn').addEventListener('click', async () => {
 // 调度设置单独保存：只提交本卡片字段。
 $('saveDispatchBtn').addEventListener('click', async () => {
   const nums = {
+    setLeaseConcurrency: ['租约并发数', 1, 64],
     setLeaseTTLSec: ['租约时长', 30, 3600],
     setRetryDelayMS: ['换号间隔', 0, 60000],
     setBackoffBaseMS: ['退避起点', 100, 600000],
@@ -1495,6 +1497,7 @@ $('saveDispatchBtn').addEventListener('click', async () => {
       method: 'PUT',
       body: JSON.stringify({
         leaseEnabled: $('setLeaseEnabled').value === 'true',
+        leaseConcurrency: vals.setLeaseConcurrency,
         leaseTTLSec: vals.setLeaseTTLSec,
         retryDelayMS: vals.setRetryDelayMS,
         backoffEnabled: $('setBackoffEnabled').value === 'true',

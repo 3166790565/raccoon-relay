@@ -1617,14 +1617,15 @@ func (p *Panel) dispatchSettings() map[string]any {
 	bo := p.po.BackoffPolicy()
 	affinity, ttl := p.engine.AffinityPolicy()
 	return map[string]any{
-		"retryDelayMS":    int(p.engine.RetryDelay().Milliseconds()),
-		"leaseEnabled":    lease.Enabled,
-		"leaseTTLSec":     int(lease.TTL.Seconds()),
-		"backoffEnabled":  bo.Enabled,
-		"backoffBaseMS":   int(bo.Base.Milliseconds()),
-		"backoffMaxMS":    int(bo.Max.Milliseconds()),
-		"affinityEnabled": affinity,
-		"affinityTTLSec":  int(ttl.Seconds()),
+		"retryDelayMS":     int(p.engine.RetryDelay().Milliseconds()),
+		"leaseEnabled":     lease.Enabled,
+		"leaseConcurrency": lease.Concurrency,
+		"leaseTTLSec":      int(lease.TTL.Seconds()),
+		"backoffEnabled":   bo.Enabled,
+		"backoffBaseMS":    int(bo.Base.Milliseconds()),
+		"backoffMaxMS":     int(bo.Max.Milliseconds()),
+		"affinityEnabled":  affinity,
+		"affinityTTLSec":   int(ttl.Seconds()),
 	}
 }
 
@@ -1652,6 +1653,9 @@ func (p *Panel) applyStoredDispatchSettings(ctx context.Context) {
 	lease := p.po.LeaseConfig()
 	if b, ok := getBool("leaseEnabled"); ok {
 		lease.Enabled = b
+	}
+	if n, ok := getInt("leaseConcurrency"); ok && n > 0 {
+		lease.Concurrency = n
 	}
 	if n, ok := getInt("leaseTTLSec"); ok && n > 0 {
 		lease.TTL = time.Duration(n) * time.Second
@@ -1685,9 +1689,9 @@ func (p *Panel) applyStoredDispatchSettings(ctx context.Context) {
 // 一次保存涉及号池与引擎两处状态，所以先整体校验、再一起应用，
 // 避免出现「号池改了、引擎没改」的半套配置。
 func (p *Panel) applyDispatchSettings(ctx context.Context, body settingsBody) error {
-	if body.RetryDelayMS == nil && body.LeaseEnabled == nil && body.LeaseTTLSec == nil &&
-		body.BackoffEnabled == nil && body.BackoffBaseMS == nil && body.BackoffMaxMS == nil &&
-		body.AffinityEnabled == nil && body.AffinityTTLSec == nil {
+	if body.RetryDelayMS == nil && body.LeaseEnabled == nil && body.LeaseConcurrency == nil &&
+		body.LeaseTTLSec == nil && body.BackoffEnabled == nil && body.BackoffBaseMS == nil &&
+		body.BackoffMaxMS == nil && body.AffinityEnabled == nil && body.AffinityTTLSec == nil {
 		return nil
 	}
 
@@ -1714,6 +1718,14 @@ func (p *Panel) applyDispatchSettings(ctx context.Context, body settingsBody) er
 	}
 	if body.LeaseEnabled != nil {
 		lease.Enabled = *body.LeaseEnabled
+	}
+	if body.LeaseConcurrency != nil {
+		n := *body.LeaseConcurrency
+		// 上限 64：再大就等于不限，反而失去这个开关的意义（真要放开请直接关租约）。
+		if n < 1 || n > 64 {
+			return fmt.Errorf("租约并发数必须在 1~64 之间")
+		}
+		lease.Concurrency = n
 	}
 	if body.BackoffBaseMS != nil {
 		n := *body.BackoffBaseMS
@@ -1754,6 +1766,7 @@ func (p *Panel) applyDispatchSettings(ctx context.Context, body settingsBody) er
 
 	_ = p.st.SetSetting(ctx, "retryDelayMS", strconv.Itoa(retryDelay))
 	_ = p.st.SetSetting(ctx, "leaseEnabled", strconv.FormatBool(lease.Enabled))
+	_ = p.st.SetSetting(ctx, "leaseConcurrency", strconv.Itoa(lease.Concurrency))
 	_ = p.st.SetSetting(ctx, "leaseTTLSec", strconv.Itoa(int(lease.TTL.Seconds())))
 	_ = p.st.SetSetting(ctx, "backoffEnabled", strconv.FormatBool(bo.Enabled))
 	_ = p.st.SetSetting(ctx, "backoffBaseMS", strconv.Itoa(int(bo.Base.Milliseconds())))
@@ -1806,14 +1819,15 @@ type settingsBody struct {
 	ClientUserAgent  *string `json:"clientUserAgent"`
 	WebUserAgent     *string `json:"webUserAgent"`
 
-	RetryDelayMS    *int  `json:"retryDelayMS"`
-	LeaseEnabled    *bool `json:"leaseEnabled"`
-	LeaseTTLSec     *int  `json:"leaseTTLSec"`
-	BackoffEnabled  *bool `json:"backoffEnabled"`
-	BackoffBaseMS   *int  `json:"backoffBaseMS"`
-	BackoffMaxMS    *int  `json:"backoffMaxMS"`
-	AffinityEnabled *bool `json:"affinityEnabled"`
-	AffinityTTLSec  *int  `json:"affinityTTLSec"`
+	RetryDelayMS     *int  `json:"retryDelayMS"`
+	LeaseEnabled     *bool `json:"leaseEnabled"`
+	LeaseConcurrency *int  `json:"leaseConcurrency"`
+	LeaseTTLSec      *int  `json:"leaseTTLSec"`
+	BackoffEnabled   *bool `json:"backoffEnabled"`
+	BackoffBaseMS    *int  `json:"backoffBaseMS"`
+	BackoffMaxMS     *int  `json:"backoffMaxMS"`
+	AffinityEnabled  *bool `json:"affinityEnabled"`
+	AffinityTTLSec   *int  `json:"affinityTTLSec"`
 
 	// 出站策略：指纹脱敏、开发者角色兼容、models.dev 元数据。
 	// sanitizeRules 三态：未给 = 不动；[] = 恢复内置词表；数组 = 自定义词表。

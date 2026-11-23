@@ -73,9 +73,9 @@ type Pool struct {
 	// preferID 是本轮请求「最好用这个号」的提示（会话粘性绑定 / 客户端指定）。
 	// 传入时它排到候选队首，失败换号时由引擎清空，避免一直撞同一个号。
 	preferID string
-	// lease 是单号串行（在途租约）配置；held 是本进程当前持有的租约。
+	// lease 是单号在途租约配置；held 是本进程当前持有的租约槽位。
 	lease LeaseConfig
-	held  map[string]*leaseState
+	held  map[string]map[int]*leaseState
 	// backoff 是失败后的换号退避参数。
 	backoff BackoffPolicy
 	// now 供测试注入时钟。nil 用 time.Now。
@@ -122,7 +122,7 @@ func New(st *store.Store, strategy string, cooldown *CooldownBook) *Pool {
 	return &Pool{
 		st: st, strategy: strategy, cooldown: cooldown,
 		inFlight: map[string]int{}, pickSeq: map[string]uint64{},
-		lease: DefaultLeaseConfig(), held: map[string]*leaseState{},
+		lease: DefaultLeaseConfig(), held: map[string]map[int]*leaseState{},
 		backoff: DefaultBackoffPolicy(),
 	}
 }
@@ -213,6 +213,11 @@ func (p *Pool) pick(ctx context.Context, model, wantProvider string, excluded ma
 	strategy := p.strategy
 	creditPol := p.credit
 	prefer := p.preferID
+	leases := p.lease
+	heldSlots := make(map[string]int, len(p.held))
+	for id, slots := range p.held {
+		heldSlots[id] = len(slots)
+	}
 	loads := make(map[string]int, len(accounts))
 	for id, n := range p.inFlight {
 		loads[id] = n
@@ -269,9 +274,15 @@ func (p *Pool) pick(ctx context.Context, model, wantProvider string, excluded ma
 		if a.MaxConcurrent > 0 && int64(loads[a.ID]) >= a.MaxConcurrent {
 			continue
 		}
-		// 在途租约：同号请求串行。租约到期后自动失效，进程崩溃留下的残租约
-		// 也不会永远占着号（TTL 由面板配置）。
-		if a.LeaseUntil > now {
+		// 在途租约：同一个号最多 N 个并发槽位（N = 面板配置的租约并发数，
+		// 1 即整号串行）。任一槽位被占时 lease_until > now。到期后自动失效，
+		// 进程崩溃留下的残租约会回收。
+		//
+		// 有租约时，本进程已占的槽位数与库里的 lease_until 共同决定还能不能再选：
+		// 库里 lease_until 只说明「本进程或别的副本有槽位被占」，本进程再占一个
+		// 是允许的，直到凑满 Concurrency。别的副本占满的情况由 AcquireLeaseSlot
+		// 的 CAS 兜底：抢不到就换下一个号。
+		if leases.Enabled && heldSlots[a.ID] >= leases.Concurrency {
 			continue
 		}
 		// 退避门闸：刚失败过的号在窗口内不接新请求。
@@ -344,6 +355,96 @@ func (p *Pool) pick(ctx context.Context, model, wantProvider string, excluded ma
 }
 
 func (l *Lease) Release() {}
+
+// NextAvailableIn 返回「下一次可能有号可选」还要等多久，供换号时决定要不要等。
+//
+// Pick 选不到号不代表号池真的空了：号可能只是正被别的请求占着（在途租约）、
+// 刚失败还在退避窗口里，或者并发上限暂时打满。这些情况下几百毫秒后就能空出来，
+// 立刻放弃会把上一次的上游错误直接丢给调用方。反过来，号都不在线
+// （cooling / exhausted / relogin）或都在模型级冷却里时，等也没用。
+//
+// 返回值 d 为 0 表示「现在就该有号」（调用方得到 nil 说明是别的原因）；
+// ok=false 表示没有任何在线的号值得等。
+func (p *Pool) NextAvailableIn(ctx context.Context, model, wantProvider string, excluded map[string]bool) (time.Duration, bool) {
+	accounts, err := p.st.ListAccounts(ctx)
+	if err != nil {
+		return 0, false
+	}
+	now := p.clock().UnixMilli()
+	p.mu.Lock()
+	creditPol := p.credit
+	leases := p.lease
+	heldSlots := make(map[string]int, len(p.held))
+	for id, slots := range p.held {
+		heldSlots[id] = len(slots)
+	}
+	loads := make(map[string]int, len(p.inFlight))
+	for id, n := range p.inFlight {
+		loads[id] = n
+	}
+	p.mu.Unlock()
+	backoffs, _ := p.st.ListBackoffs(ctx)
+
+	waiting := false   // 存在「其余条件都满足」的号，只是并发上限暂时打满
+	var bestWait int64 // 号池里最早空出来的时刻（相对 now 的毫秒）
+	for _, a := range accounts {
+		if !a.Enabled || excluded[a.ID] {
+			continue
+		}
+		if wantProvider != "" && aProvider(a) != wantProvider {
+			continue
+		}
+		if a.Status != store.StatusOnline {
+			continue
+		}
+		if strings.TrimSpace(a.Token) == "" && !hasSenseNovaCreds(a) && !hasExternalCreds(a) {
+			continue
+		}
+		// 与 Pick 的过滤保持一致：余额为 0、订阅过期、积分低于阈值不是
+		// 「等一会儿就会空出来」，它们要等签到/续费等别的流程处理。
+		if a.Credits == 0 && a.CreditsAt > 0 {
+			continue
+		}
+		if a.ExpiresAt > 0 && a.ExpiresAt <= now {
+			continue
+		}
+		if creditPol.Pauses(a.Credits) {
+			continue
+		}
+		// 模型级冷却按分钟计，等它不划算。
+		if model != "" && p.cooldown.IsModelCooled(a.ID, model) {
+			continue
+		}
+		// 租约：只有槽位占满才算「等一会儿就会空出来」；没占满的号此刻就能多接一路。
+		if leases.Enabled && a.LeaseUntil > now && heldSlots[a.ID] >= leases.Concurrency {
+			if d := a.LeaseUntil - now; bestWait == 0 || d < bestWait {
+				bestWait = d
+			}
+			continue
+		}
+		if b, ok := backoffs[a.ID]; ok && b.Until > now {
+			if d := b.Until - now; bestWait == 0 || d < bestWait {
+				bestWait = d
+			}
+			continue
+		}
+		// 其余条件都满足：这个号要么现在就能选，要么只是并发上限暂时打满。
+		// 打满时算不出结束时刻，按轮询重试（返回 0）。
+		if a.MaxConcurrent > 0 && int64(loads[a.ID]) >= a.MaxConcurrent {
+			waiting = true
+			continue
+		}
+		return 0, true
+	}
+	if waiting {
+		// 有号条件都满足、只是被并发上限打满：几百毫秒后轮询即可。
+		return 0, true
+	}
+	if bestWait > 0 {
+		return time.Duration(bestWait) * time.Millisecond, true
+	}
+	return 0, false
+}
 
 // PickProbe 是「号池抽干」时的兜底探测：在所有账号都因冷却/积分/凭证不可用时，
 // 挑一个最早恢复的号强制试一次，让调用方拿到上游的真实错误（例如 429 的重置时间），

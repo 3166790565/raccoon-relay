@@ -190,10 +190,11 @@ func main() {
 		})
 	})
 	po := pool.New(st, cfg.PoolStrategy, cool)
-	// 单号串行与换号退避的初始值来自环境变量，面板保存后会热更新。
+	// 在途租约与换号退避的初始值来自环境变量，面板保存后会热更新。
 	po.SetLeaseConfig(pool.LeaseConfig{
-		Enabled: cfg.LeaseEnabled,
-		TTL:     time.Duration(cfg.LeaseTTLSec) * time.Second,
+		Enabled:     cfg.LeaseEnabled,
+		Concurrency: cfg.LeaseConcurrency,
+		TTL:         time.Duration(cfg.LeaseTTLSec) * time.Second,
 	})
 	po.SetBackoffPolicy(pool.BackoffPolicy{
 		Enabled: cfg.BackoffEnabled,
@@ -338,6 +339,12 @@ func main() {
 	// 同时装载出站策略（脱敏 / 开发者角色兼容 / models.dev），并把元数据
 	// 查询入口推给数据面 —— 必须在 srv.SetModelRules 之后调用。
 	panel.ApplyStoredSettings(context.Background())
+
+	// 在途租约改成多槽位表后，启动时把库里仍在占用的槽位汇总回 accounts.lease_until，
+	// 否则重启后的前几秒选号层会以为这些号是空的。
+	if err := st.HydrateLeaseSlots(context.Background()); err != nil {
+		log.Printf("[号池] 恢复在途租约失败（不影响启动）：%v", err)
+	}
 
 	// 首次启动自动生成一把 API Key，避免开机后无从调用
 	bootstrapKeys(context.Background(), st)

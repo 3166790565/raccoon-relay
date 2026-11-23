@@ -91,12 +91,13 @@ func TestBackoffDisabledKeepsAccountSelectable(t *testing.T) {
 func TestLeaseBlocksOtherRequests(t *testing.T) {
 	st := newStore(t)
 	p := New(st, StrategyLoadBalance, NewCooldownBook(st, true))
-	p.SetLeaseConfig(LeaseConfig{Enabled: true, TTL: time.Minute})
+	p.SetLeaseConfig(LeaseConfig{Enabled: true, Concurrency: 1, TTL: time.Minute})
 	a := addAcc(t, st, "a", 100)
 	b := addAcc(t, st, "b", 100)
 
 	ctx := context.Background()
-	if _, ok := p.AcquireLease(ctx, a); !ok {
+	grant, ok := p.AcquireLease(ctx, a)
+	if !ok {
 		t.Fatal("空租约应能抢到")
 	}
 
@@ -111,7 +112,7 @@ func TestLeaseBlocksOtherRequests(t *testing.T) {
 		p.ReleaseLease(lease)
 	}
 
-	p.ReleaseAccountLease(ctx, a)
+	p.ReleaseAccountLease(ctx, a, grant)
 	lease, err := p.Pick(ctx, "", map[string]bool{})
 	if err != nil || lease == nil {
 		t.Fatal(err)
@@ -121,11 +122,11 @@ func TestLeaseBlocksOtherRequests(t *testing.T) {
 	}
 }
 
-// 同一账号只能被一个请求抢到租约。
+// 同一账号在并发数为 1 时只能被一个请求抢到租约。
 func TestLeaseIsExclusive(t *testing.T) {
 	st := newStore(t)
 	p := New(st, StrategyLoadBalance, NewCooldownBook(st, true))
-	p.SetLeaseConfig(LeaseConfig{Enabled: true, TTL: time.Minute})
+	p.SetLeaseConfig(LeaseConfig{Enabled: true, Concurrency: 1, TTL: time.Minute})
 	a := addAcc(t, st, "a", 100)
 
 	ctx := context.Background()
@@ -133,7 +134,31 @@ func TestLeaseIsExclusive(t *testing.T) {
 		t.Fatal("首次抢租约应成功")
 	}
 	if _, ok := p.AcquireLease(ctx, a); ok {
-		t.Fatal("同一账号的第二次抢租约应失败")
+		t.Fatal("并发数为 1 时第二次抢租约应失败")
+	}
+}
+
+// 并发数设为 N 时，同一账号最多同时持有 N 个租约，第 N+1 个被拒。
+func TestLeaseConcurrencyN(t *testing.T) {
+	st := newStore(t)
+	p := New(st, StrategyLoadBalance, NewCooldownBook(st, true))
+	p.SetLeaseConfig(LeaseConfig{Enabled: true, Concurrency: 3, TTL: time.Minute})
+	a := addAcc(t, st, "a", 100)
+
+	ctx := context.Background()
+	slots := map[int]bool{}
+	for i := 0; i < 3; i++ {
+		g, ok := p.AcquireLease(ctx, a)
+		if !ok {
+			t.Fatalf("第 %d 个租约应成功", i+1)
+		}
+		if slots[g.Slot] {
+			t.Fatalf("槽号 %d 被重复发放", g.Slot)
+		}
+		slots[g.Slot] = true
+	}
+	if _, ok := p.AcquireLease(ctx, a); ok {
+		t.Fatal("第 4 个租约应被拒绝")
 	}
 }
 
@@ -157,15 +182,18 @@ func TestLeaseDisabledAllowsConcurrency(t *testing.T) {
 func TestLeaseExpiresAutomatically(t *testing.T) {
 	st := newStore(t)
 	p := New(st, StrategyLoadBalance, NewCooldownBook(st, true))
-	p.SetLeaseConfig(LeaseConfig{Enabled: true, TTL: time.Second})
+	p.SetLeaseConfig(LeaseConfig{Enabled: true, Concurrency: 1, TTL: time.Second})
 	a := addAcc(t, st, "a", 100)
 
 	ctx := context.Background()
 	if _, ok := p.AcquireLease(ctx, a); !ok {
 		t.Fatal("应能抢到租约")
 	}
-	// 直接把库里的租约推到过去，模拟「进程崩溃没释放、TTL 已过」。
-	_ = st.UpdateAccount(ctx, a.ID, store.AccountPatch{LeaseUntil: ptrInt64(time.Now().UnixMilli() - 1)})
+	// 直接把库里的槽位推到过去，模拟「进程崩溃没释放、TTL 已过」。
+	_ = st.ReleaseLeaseSlot(ctx, a.ID, 0, 0)
+	p.mu.Lock()
+	delete(p.held, a.ID) // 本进程也忘掉，模拟重启后的新进程
+	p.mu.Unlock()
 
 	lease, err := p.Pick(ctx, "", map[string]bool{})
 	if err != nil || lease == nil {

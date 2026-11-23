@@ -618,6 +618,7 @@ func (s *Store) deleteAccountRows(ctx context.Context, tx *sql.Tx, id string) er
 		`DELETE FROM model_cooldowns WHERE account_id = ?`,
 		`DELETE FROM account_cooldowns WHERE account_id = ?`,
 		`DELETE FROM account_backoffs WHERE account_id = ?`,
+		`DELETE FROM account_lease_slots WHERE account_id = ?`,
 		`DELETE FROM session_affinity WHERE account_id = ?`,
 		`DELETE FROM checkin_history WHERE account_id = ?`,
 		`DELETE FROM accounts WHERE id = ?`,
