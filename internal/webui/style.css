@@ -392,28 +392,41 @@ code, kbd { font-family: var(--font-mono); font-size: .92em; background: var(--s
   padding-top: 10px;
   border-top: 1px solid var(--line);
 }
-.sidebar-status {
+/* 底栏版本号：一行安静的文字按钮，点击跳「版本更新」。 */
+.sidebar-version {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 7px 9px;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  min-height: 30px;
+  padding: 6px 9px;
   border: 1px solid var(--line);
   border-radius: var(--r-sm);
   background: var(--card);
-  color: var(--sidebar-fg);
+  color: var(--sidebar-muted);
   font-size: 11.5px;
+  line-height: 1.3;
+  text-align: left;
+  white-space: nowrap;
 }
-.status-line { display: flex; align-items: center; gap: 7px; min-width: 0; }
-.sidebar-status .txt { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
-.status-dot {
+.sidebar-version svg {
   flex: none;
-  width: 7px; height: 7px; border-radius: 50%;
-  background: var(--dim);
-  box-shadow: 0 0 0 3px transparent;
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: .8;
 }
-.status-dot.online { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }
-.status-dot.warn { background: var(--warn); box-shadow: 0 0 0 3px var(--warn-soft); }
-.status-dot.bad { background: var(--bad); box-shadow: 0 0 0 3px var(--bad-soft); }
+.sidebar-version span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums;
+}
+.sidebar-version:hover { background: var(--nav-hover); color: var(--sidebar-fg); }
 
 /* 主题三档：跟随 / 浅色 / 深色（与 Agent2API 底栏同款分段控件） */
 .theme-switch {
@@ -1696,9 +1709,14 @@ body.logged-out .content { padding: 0; align-items: center; justify-content: cen
   .navtab { justify-content: center; padding: 8px 0; min-height: 38px; }
   .navtab svg { width: 18px; height: 18px; opacity: .85; }
   .sidebar { padding: 12px 8px 10px; gap: 8px; }
-  .sidebar-status .txt { display: none; }
-  .sidebar-status { align-items: center; padding: 7px; }
-  .status-line { justify-content: center; }
+  /* 折叠态只剩 68px：图标在上、版本号缩到一行小字，仍然看得见当前版本。 */
+  .sidebar-version {
+    flex-direction: column;
+    gap: 2px;
+    padding: 5px 0;
+    font-size: 9.5px;
+    text-align: center;
+  }
   .theme-switch button { font-size: 0; padding: 5px 0; }
   .theme-switch button::after { content: '·'; font-size: 14px; line-height: 1; }
   .theme-switch button.on::after { content: '●'; font-size: 10px; }
@@ -1733,10 +1751,8 @@ body.logged-out .content { padding: 0; align-items: center; justify-content: cen
   .brand-text { display: flex; }
   .navtab { justify-content: flex-start; padding: 8px 10px; min-height: 40px; }
   /* 抽屉是完整侧栏（文字都在），把 1080px 折叠态留下的样式撤掉：
-     状态文案回来，主题按钮回到文字档，否则只剩三个圆点。 */
-  .sidebar-status { align-items: stretch; padding: 7px 9px; }
-  .sidebar-status .txt { display: block; }
-  .status-line { justify-content: flex-start; }
+     版本号文字回来，主题按钮回到文字档，否则只剩三个圆点。 */
+  .sidebar-version { flex-direction: row; justify-content: flex-start; padding: 6px 9px; font-size: 11.5px; text-align: left; }
   .theme-switch button { font-size: 11px; padding: 3px 4px; }
   .theme-switch button::after,
   .theme-switch button.on::after { content: none; }

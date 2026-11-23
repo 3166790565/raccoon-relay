@@ -56,9 +56,11 @@
     </nav>
 
     <div class="sidebar-foot">
-      <div class="sidebar-status" id="sidebarStatus">
-        <span class="status-line"><i class="status-dot" id="sideDot"></i><span class="txt" id="sideStatusText">尚未连接</span></span>
-      </div>
+      <!-- 底栏显示当前版本号，点一下直达「版本更新」页 -->
+      <button class="sidebar-version" id="sideVersion" type="button" title="查看版本更新">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13.4 8a5.4 5.4 0 1 1-1.6-3.8"/><path d="M13.4 2.6v3h-3"/></svg>
+        <span id="sideVersionText">版本 -</span>
+      </button>
       <div class="theme-switch" id="themeSwitch" role="group" aria-label="主题">
         <button data-theme-val="system" title="跟随系统">跟随</button>
         <button data-theme-val="light" title="浅色">浅色</button>
