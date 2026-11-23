@@ -31,7 +31,8 @@ func familyOf(model string) string {
 	// 客户端常写别名 glm-5.3 / kimi-k3，点上横杠差异不应让它漏判
 	name := strings.ReplaceAll(raw, ".", "-")
 	switch {
-	case strings.HasPrefix(name, "sn-deepseek-"), strings.HasPrefix(name, "deepseek-"):
+	case strings.HasPrefix(name, "sn-deepseek-"), strings.HasPrefix(name, "deepseek-"),
+		strings.HasPrefix(name, "sn-doubao-"), strings.HasPrefix(name, "doubao-"):
 		return famThinking
 	case strings.HasPrefix(name, "sn-glm-5-3"), strings.HasPrefix(name, "glm-5-3"),
 		strings.HasPrefix(name, "sn-kimi-k3"), strings.HasPrefix(name, "kimi-k3"):

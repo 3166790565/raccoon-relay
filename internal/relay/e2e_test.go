@@ -23,7 +23,8 @@ import (
 type fakeUpstream struct {
 	mu          sync.Mutex
 	calls       []string
-	bodies      []string // 上游收到的原始请求体
+	bodies      []string      // 上游收到的原始请求体
+	chatHeaders []http.Header // 对话请求的头（验证会话/轮次标识用）
 	chatHits    int
 	refreshes   int          // 刷新端点被调用次数
 	refreshDead bool         // 刷新端点是否回 401（refresh_token 已失效）
@@ -54,6 +55,7 @@ func (f *fakeUpstream) handler() http.Handler {
 		f.mu.Lock()
 		f.calls = append(f.calls, "chat")
 		f.bodies = append(f.bodies, string(raw))
+		f.chatHeaders = append(f.chatHeaders, r.Header.Clone())
 		idx := f.chatHits
 		f.chatHits++
 		var res chatResult
@@ -251,6 +253,18 @@ func (h *harness) do(t *testing.T, method, path, body string) *httptest.Response
 	req := httptest.NewRequest(method, path, strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+h.apiKey)
 	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.srv.Route(w, req)
+	return w
+}
+
+// doHeader 与 do 相同，但额外带一个请求头（验证会话标识等依赖头的路径）。
+func (h *harness) doHeader(t *testing.T, name, value, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+h.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(name, value)
 	w := httptest.NewRecorder()
 	h.srv.Route(w, req)
 	return w

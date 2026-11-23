@@ -43,16 +43,23 @@ func classify(err error) (pool.FailKind, bool, int, string) {
 		return pool.FailOther, false, http.StatusRequestEntityTooLarge, msg
 	case isInvalidRequestCode(ue.Code):
 		return pool.FailOther, false, http.StatusBadRequest, msg
-	case isContentRejectedCode(ue.Code):
+	case isContentRejectedCode(ue.Code) || raccoon.IsContentPolicy(ue.Message):
 		// 100041 / 100042 是上游对内容本身的拒答（命中敏感词），跟账号无关：
 		// 换号重试只会拿另一个号再问一遍同样的话，必然还是拒答。
 		// 不冷却、不换号，直接把错误交给调用方。
+		//
+		// 三条逐字文案（blocked by security policy / unapproved channel /
+		// illegal api invocation）走同一支：那是上游对**客户端模板句**的拦截，
+		// 账号本身健康，换号等于白扔另一个号的额度。
 		return pool.FailRejected, false, http.StatusBadRequest, msg
-	case ue.Code == codePointsInsufficient:
+	case raccoon.IsQuotaCode(ue.Code, ue.CodeName):
 		// 1000007「积分余额不足，请充值后重试」通常挂在 HTTP 400 的
 		// {error:{code,message}} 体里，只看状态码会落到「不值得换号」的兜底分支，
 		// 让一个已经没钱的号反复接单、每次都把错误原样丢给调用方。
 		// 语义与 402 相同：整号冷却到下一次签到补分，换号继续消化请求。
+		//
+		// 名字码（insufficient_points / insufficient_quota / arrearage）走同一支：
+		// 上游有时把它们挂在 429 上，不按名字识别就会被当成限流短暂放行。
 		return pool.FailQuota, true, http.StatusPaymentRequired, msg
 	case ue.Code == codeAccountAbnormal:
 		// 200108「系统检测到当前账号存在异常调用」：上游罚的是整个账号，
@@ -71,6 +78,12 @@ func classify(err error) (pool.FailKind, bool, int, string) {
 	case ue.Status == http.StatusPaymentRequired:
 		return pool.FailQuota, true, http.StatusPaymentRequired, msg
 	case ue.Status == http.StatusTooManyRequests:
+		// 429 不等于限流：上游也会用它表达「余额/积分耗尽」，而那不是限流。
+		// 按限流处理会把一个再也调不通的号在 3 分钟后放回池子反复撞墙；
+		// 文案明确指向余额时改判积分耗尽（停到下一次签到补分）。
+		if isQuotaMessage(ue.Message) {
+			return pool.FailQuota, true, http.StatusPaymentRequired, msg
+		}
 		return pool.FailRate, true, http.StatusTooManyRequests, msg
 	case ue.Code == codeRefreshConflict:
 		// 并发刷新冲突：不是凭证失效，换号重试即可，别把账号打成 relogin。
@@ -150,9 +163,6 @@ const (
 	// codeSensitiveContent = 100042：上游另一条「请求内容包含敏感内容」的拒答码，
 	// 与 100041 同义（下游请求里的内容被判敏感），走同一套处理：不重试、回 400。
 	codeSensitiveContent = 100042
-	// codePointsInsufficient = 1000007：上游「积分余额不足，请充值后重试」。
-	// 这条错误经常以 HTTP 400 返回，必须按业务码识别，否则会被当成请求本身有问题。
-	codePointsInsufficient = 1000007
 	// codeContextTooLong = 11115：上下文/提示词超过模型上限。
 	// 换号无意义（是请求内容的问题），直接回 400 让调用方精简。
 	codeContextTooLong = 11115
@@ -288,6 +298,31 @@ var authHintWords = []string{
 	"未登录",
 	"请登录",
 	"重新登录",
+}
+
+// quotaMessageWords 是「余额/积分耗尽」在文案里的特征词。
+// 只用于 429 的分流：状态码相同、处置完全不同，必须靠文案区分。
+var quotaMessageWords = []string{
+	"insufficient_points",
+	"insufficient quota",
+	"积分不足",
+	"余额不足",
+	"欠费",
+	"arrearage",
+}
+
+// isQuotaMessage 判断错误文案是否在说「余额/积分耗尽」。
+func isQuotaMessage(msg string) bool {
+	low := strings.ToLower(strings.TrimSpace(msg))
+	if low == "" {
+		return false
+	}
+	for _, w := range quotaMessageWords {
+		if strings.Contains(low, strings.ToLower(w)) {
+			return true
+		}
+	}
+	return false
 }
 
 // looksLikeAuthFailure 判断 403 的文案是否真的在说「凭证不能用」。

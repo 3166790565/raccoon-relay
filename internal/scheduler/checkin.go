@@ -413,10 +413,11 @@ func (s *Scheduler) checkinOne(ctx context.Context, a *store.Account, today stri
 	_ = s.st.UpdateAccount(ctx, a.ID, store.AccountPatch{
 		LastCheckinDay: &day, Status: &online, CoolUntil: &zero, CoolReason: &empty,
 	})
-	credit := int64(0)
+	// 积分用账单核对出的**真实入账**，不再是写死的 0：
+	// 发放接口回 200 不代表今天真的发了，账单里看得到才算数。
 	_ = s.st.AddCheckin(ctx, store.CheckinRecord{
 		AccountID: a.ID, Day: today, Action: "checkin", Source: source, OK: true,
-		Already: res.Already, Credit: credit, Message: res.Message,
+		Already: res.Already, Credit: res.Credit, Message: res.Message,
 	})
 
 	// 顺带刷一次余额

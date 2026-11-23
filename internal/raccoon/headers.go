@@ -152,9 +152,3 @@ func NewTurnID() string {
 	}
 	return string(out)
 }
-
-// SessionID 由 uid + 首条消息稳定派生，让上游把同一会话归到一起。
-func SessionID(uid string, seedText string) string {
-	s := hashHex("raccoon:" + defaultStr(uid, "anon") + ":" + seedText)
-	return s[0:8] + "-" + s[8:12] + "-4" + s[13:16] + "-a" + s[17:20] + "-" + s[20:32]
-}

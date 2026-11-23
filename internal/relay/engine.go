@@ -2,7 +2,6 @@ package relay
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -624,13 +623,18 @@ func (e *Engine) runOneRaccoon(ctx context.Context, at *Attempt, req *ChatContex
 
 	body := req.Body
 	idn := at.IDN
+	// 上游的会话标识必须跨轮稳定：同一段对话用同一个 X-RACCOON-Session-ID，
+	// 工具续轮复用同一个 Turn。种子优先取调用方给的会话键（SessionKey），
+	// 没有才退到内容哈希；详见 raccoon/session.go。
+	sessionID := raccoon.SessionID(at.Account.UID, req.SessionSeed)
 	chatReq := raccoon.ChatRequest{
 		Body:    body,
 		Token:   token,
 		IDN:     idn,
 		UID:     at.Account.UID,
 		Title:   req.Title,
-		Session: raccoon.SessionID(at.Account.UID, req.SessionSeed),
+		Session: sessionID,
+		TurnID:  raccoon.TurnIDFor(sessionID, req.TurnSeed),
 	}
 	stream, err := e.Client.OpenChat(ctx, chatReq)
 	if err != nil && shouldRefreshRetry(err, at.Account.TokenExp) {
@@ -871,6 +875,9 @@ type ChatContext struct {
 	// 与 SessionSeed 不同：后者是「内容哈希」（每轮都变），
 	// 前者是「这段对话是谁」，多轮之间不变。
 	SessionKey string
+	// TurnSeed 是「这一轮」的内容种子：只到**最后一条 user 消息**为止，
+	// 其后的工具结果不参与。工具续轮因此复用同一个 Turn。
+	TurnSeed string
 }
 
 // ModelRules 是模型管理规则的只读视图，由装配层注入（避免 relay 依赖具体实现）。
@@ -933,7 +940,7 @@ func BuildChatContextWithRules(rules ModelRules, model string, body map[string]a
 	if len(messages) > 0 {
 		title = firstUserText(messages)
 	}
-	seed, _ := json.Marshal(messages)
+	seed := raccoon.SessionSeedOf(sessionKey, messages)
 	return &ChatContext{
 		Model: resolved,
 		Body:  prepared,
@@ -942,8 +949,9 @@ func BuildChatContextWithRules(rules ModelRules, model string, body map[string]a
 		// 只在发往上游的请求体里出现，不回给客户端。
 		PublicModel: public,
 		Title:       title,
-		SessionSeed: string(seed),
+		SessionSeed: seed,
 		SessionKey:  sessionKey,
+		TurnSeed:    raccoon.TurnSeedOf(messages),
 	}
 }
 
