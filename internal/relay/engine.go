@@ -294,8 +294,12 @@ func (e *Engine) RunOpenAI(ctx context.Context, req *ChatContext, sink OpenAISin
 
 		// 客户端已经断开：不罚号、不换号。继续重试只会拿别的号再打一次上游，
 		// 结果仍然写不出去，还会在号池里制造假故障。
+		//
+		// 记账按 info 而不是 warn：App 里点「停止」、关掉页面、客户端自身超时
+		// 都会走到这里，这是常态操作，不是故障。流水由 logUsage 记为 499，
+		// 面板也不把它算进失败数（见 store.failCond）。
 		if isClientGone(leaseErr) {
-			e.report(store.LevelWarn, "客户端已断开，本次请求终止",
+			e.report(store.LevelInfo, "客户端已断开，本次请求终止",
 				fmt.Sprintf("模型：%s\n账号：%s\n尝试序号：%d\n原因：%s",
 					req.Model, acc.Name, attemptNo+1, strings.TrimSpace(leaseErr.Error())), acc.ID)
 			return Result{AccountID: acc.ID, Model: req.PublicModel}, errClientGone

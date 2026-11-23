@@ -2130,6 +2130,9 @@ function fmtTokens(l) {
 
 function logStatusCell(l) {
   const code = Number(l.status) || 0;
+  // 499 单列：请求方在完成前断开（App 里点了停止 / 关掉页面 / 客户端超时）。
+  // 它既不是上游失败，也不是账号问题，用红色 5xx 样式会误导排障。
+  if (code === 499) return `<span class="lpill" title="客户端已断开（用户取消或客户端超时），与上游无关">499 取消</span>`;
   if (code >= 500) return `<span class="lpill bad">${code || 'ERR'}</span>`;
   if (code >= 400) return `<span class="lpill warn">${code}</span>`;
   if (code >= 200) return `<span class="lpill ok">${code}</span>`;
@@ -2169,7 +2172,10 @@ function renderLogRows(rows) {
   if (!rows.length) { tbody.innerHTML = ''; return; }
   tbody.innerHTML = rows.map((l) => {
     const err = l.error || '';
-    return `<tr data-id="${esc(l.id)}" class="${l.status >= 400 ? 'is-fail' : ''}">
+    // 499（客户端取消）不染失败底色：失败色是给「需要人看一眼」的行用的。
+    const code = Number(l.status) || 0;
+    const isFail = code >= 400 && code !== 499;
+    return `<tr data-id="${esc(l.id)}" class="${isFail ? 'is-fail' : ''}">
       <td class="lc-time"><div class="log-time">${esc(fmtClock(l.ts))}</div></td>
       <td class="lc-account">${logAccountCell(l)}</td>
       <td class="lc-status">${logStatusCell(l)}</td>

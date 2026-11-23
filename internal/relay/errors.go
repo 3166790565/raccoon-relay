@@ -229,6 +229,9 @@ func isClientGone(err error) bool {
 	if err == nil {
 		return false
 	}
+	// errors.Is 会顺着 Unwrap 走完整条错误链：raccoon.ChatStream 把
+	// context.Canceled 保留在 UpstreamError.Cause 里，这里才能认出来。
+	// 没有这一步，一次用户取消会被判成上游波动，健康号白吃一次退避。
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return true
 	}
@@ -236,7 +239,12 @@ func isClientGone(err error) bool {
 		return true
 	}
 	s := strings.ToLower(err.Error())
-	for _, w := range []string{"broken pipe", "client disconnected", "connection reset by peer", "use of closed network connection"} {
+	for _, w := range []string{
+		"broken pipe", "client disconnected", "connection reset by peer",
+		"use of closed network connection",
+		// net/http 在客户端断开后读响应体会报这个；上游正常断连不会出现该文案。
+		"http2: client connection lost",
+	} {
 		if strings.Contains(s, w) {
 			return true
 		}

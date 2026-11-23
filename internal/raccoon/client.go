@@ -559,6 +559,13 @@ type UpstreamError struct {
 	Auth    bool
 	Message string
 
+	// Cause 是底层错误（网络、context 等），只用于错误链判断，不参与对外文案。
+	//
+	// 必须保留：上游流读到一半被打断时，只有 context.Canceled 这个 sentinel
+	// 能区分「请求方已经走了」与「上游真的出错」。丢掉它，转发层就会把一次
+	// 用户取消当成上游故障——给健康号记退避、在面板上记成 502。
+	Cause error
+
 	// RetryAfter 是上游建议的重试等待时长。来源按优先级：
 	// Retry-After 头（秒数或 HTTP 日期）、x-ratelimit-reset 头、
 	// 响应体里的 reset_time / retry_after 字段（秒数、秒级或毫秒级时间戳）。
@@ -640,6 +647,10 @@ func (e *UpstreamError) Error() string {
 	}
 	return fmt.Sprintf("上游错误 HTTP %d", e.Status)
 }
+
+// Unwrap 暴露底层错误，让 errors.Is(err, context.Canceled) 这类判断能穿过
+// 包装层。只用于分类，对外文案仍走 Message。
+func (e *UpstreamError) Unwrap() error { return e.Cause }
 
 func codeOf(env *Envelope) int {
 	if env == nil {

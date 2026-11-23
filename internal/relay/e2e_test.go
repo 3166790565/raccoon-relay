@@ -41,6 +41,10 @@ type chatResult struct {
 	errMsg  string
 	errBody string            // 原样写出的响应体（用于还原网关拦截页）
 	headers map[string]string // 额外的响应头
+
+	// hangAfterFrames 为 true 时，写完 frames 后不结束流，而是一直挂着直到
+	// 客户端断开。用来复现「客户端读到一半点了停止」这种中途取消。
+	hangAfterFrames bool
 }
 
 func (f *fakeUpstream) handler() http.Handler {
@@ -80,6 +84,15 @@ func (f *fakeUpstream) handler() http.Handler {
 			if fl != nil {
 				fl.Flush()
 			}
+		}
+		if res.hangAfterFrames {
+			// 客户端（被测的转发层）取消后 ctx 才会结束；最长挂 5 秒兜底，
+			// 避免测试自己漏了取消时把整个用例拖死。
+			select {
+			case <-r.Context().Done():
+			case <-time.After(5 * time.Second):
+			}
+			return
 		}
 		if res.usage != "" {
 			fmt.Fprintf(w, "data: %s\n\n", res.usage)

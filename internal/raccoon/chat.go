@@ -183,8 +183,10 @@ func (c *Client) OpenChat(ctx context.Context, req ChatRequest) (*ChatStream, er
 	resp, err := c.HTTP.Do(httpReq)
 	if err != nil {
 		cancel()
+		// 连响应头都没等到就失败时同样要保留 Cause：客户端在建连阶段取消
+		// （例如 App 关掉页面）与上游真的连不上，对调度层是两种完全不同的处置。
 		return nil, &UpstreamError{Status: 0, Message: "上游连接失败: " + err.Error(),
-			Endpoint: PathChat, TurnID: turnID}
+			Endpoint: PathChat, TurnID: turnID, Cause: err}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
@@ -318,12 +320,28 @@ func (s *ChatStream) Next() (*ChatEvent, error) {
 		}
 	}
 	if err := s.scanner.Err(); err != nil {
-		msg := "上游流读取中断: " + err.Error()
-		if s.idle > 0 && errors.Is(err, context.Canceled) && (s.parent == nil || s.parent.Err() == nil) {
-			// 取消只能来自我们自己的空闲计时器（客户端断开走的是父 ctx，读体会直接报错）
-			msg = fmt.Sprintf("上游超过 %d 秒无数据，已断开", int(s.idle.Seconds()))
+		// 读流失败有三种来源，必须分开：
+		//   - 请求方的 ctx 已取消：客户端断开 / 主动停止，与上游无关；
+		//   - 我们自己的空闲计时器取消了请求：上游太久没出数据；
+		//   - 其余：上游连接真的断了。
+		// 前两种的底层都是 context.Canceled，只看错误串分不出来，只能看父 ctx。
+		clientGone := s.parent != nil && s.parent.Err() != nil
+		switch {
+		case clientGone:
+			// Cause 直接用父 ctx 的 Err()，不要用 scanner 的原始错误：
+			// net/http 在取消了 ctx 之后读响应体，HTTP/1.1 报的是
+			// "net/http: request canceled"（普通字符串，不是 sentinel），
+			// HTTP/2 才报 context.Canceled。转发层靠 errors.Is(err, context.Canceled)
+			// 判「请求方已经走了」，只有父 ctx 的 Err() 两个协议下都稳定。
+			s.err = &UpstreamError{Status: 0, Message: "客户端已断开，上游请求已取消", Cause: s.parent.Err()}
+		case s.idle > 0 && errors.Is(err, context.Canceled):
+			// 取消只能来自我们自己的空闲计时器。这里不挂 Cause：
+			// 上游静默是上游侧的问题，不能让它被误判成客户端断开而跳过退避。
+			s.err = &UpstreamError{Status: 0,
+				Message: fmt.Sprintf("上游超过 %d 秒无数据，已断开", int(s.idle.Seconds()))}
+		default:
+			s.err = &UpstreamError{Status: 0, Message: "上游流读取中断: " + err.Error(), Cause: err}
 		}
-		s.err = &UpstreamError{Status: 0, Message: msg}
 		return nil, s.err
 	}
 	return nil, io.EOF

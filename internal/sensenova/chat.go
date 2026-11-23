@@ -37,8 +37,10 @@ func (c *Client) OpenChat(ctx context.Context, apiKey string, body map[string]an
 	resp, err := c.streamClient().Do(httpReq)
 	if err != nil {
 		cancel()
+		// Cause 必须带上：客户端在建连阶段断开时，底层是 context.Canceled，
+		// 转发层要靠它把「请求方走了」与「上游真的连不上」分开。
 		return nil, &raccoon.UpstreamError{Status: 0, Message: "日日新上游连接失败: " + err.Error(),
-			Endpoint: "/chat/completions"}
+			Endpoint: "/chat/completions", Cause: err}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))

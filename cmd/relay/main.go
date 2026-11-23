@@ -141,6 +141,13 @@ func main() {
 		} else if n > 0 {
 			log.Printf("[报表] 已从历史流水补算日聚合：%d 条", n)
 		}
+		// 旧版本把「客户端中途断开」误记成 502，归正成 499 并重算当天聚合。
+		// 必须排在补算之后：否则重算会以未归正的流水为底再算一遍。
+		if n, err := st.MigrateLegacyCanceled(ctx); err != nil {
+			log.Printf("[流水] 历史客户端取消流水归正失败: %v", err)
+		} else if n > 0 {
+			log.Printf("[流水] 已把 %d 条历史「客户端取消」从 502 归正为 499", n)
+		}
 	}()
 
 	client := raccoon.NewClient(cfg.UpstreamBase, time.Duration(cfg.UpstreamTimeoutSec)*time.Second)

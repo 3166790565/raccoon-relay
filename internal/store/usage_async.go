@@ -154,6 +154,12 @@ func (s *Store) foldDaily(ctx context.Context, batch []UsageLog) {
 	type akey struct{ day, api string }
 	apis := map[akey]*agg{}
 	for _, u := range batch {
+		// 客户端取消（499）不计入任何日聚合：请求方自己走了，既不是这个号
+		// 处理的请求，也不代表网关成功率。留在 requests 里会让报表的成功率
+		// 永久偏低，且与账号/协议明细（已排除 499）对不上。
+		if u.Status == UsageStatusCanceled {
+			continue
+		}
 		ts := u.TS
 		if ts == 0 {
 			ts = time.Now().UnixMilli()
