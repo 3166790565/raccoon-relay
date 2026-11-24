@@ -37,7 +37,12 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    mem_limit: 256m
+    # 不设内存上限：转发路径会把整条请求体读进内存，大上下文（实测单条最高 74 万
+    # token）叠加不限并发时，曾用 256m 的上限被反复打爆并触发 cgroup OOM（3 次），
+    # 每次都要重建容器。宿主机内存充裕（16G），由内核按需分配即可。
+    #
+    # 注意：不加 mem_limit 就等于不限制；而 docker update --memory 0 对运行中的
+    # 容器是空操作（Docker 把 0 当成「不改」），改配置后必须重建容器才生效。
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
       interval: 30s
