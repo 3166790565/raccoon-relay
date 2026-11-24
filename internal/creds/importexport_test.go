@@ -396,6 +396,42 @@ func TestImportAgent2APIFillsRefreshToken(t *testing.T) {
 	}
 }
 
+// 日日新导入与面板登录导入口径必须一致：面板添加时 uid 是 tenant_id，
+// 导入包缺 uid 时若只按「控制台账号当 uid」查，同一个号会被建两次。
+// 这里模拟「库里已有 tenant 号的记录」再导入一份只带控制台账号的条目。
+func TestImportSenseNovaDedupesByConsoleAccount(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	existing := &store.Account{
+		UID: "tenant-42", Name: "日日新号", Provider: store.ProviderSenseNova,
+		Token: "sk-old", RefreshToken: "sk-old", SNUsername: "u@example.com", SNPassword: "pw",
+		Status: store.StatusOnline, Enabled: true,
+	}
+	if err := st.CreateAccount(ctx, existing); err != nil {
+		t.Fatal(err)
+	}
+
+	// 导入包里没有 uid，只有控制台账号（大小写也不同）。
+	im := &Importer{ST: st}
+	res := im.Import(ctx, []Account{{
+		Channel: ChannelSenseNova, Username: "U@Example.com", Token: "sk-new",
+		Password: "pw2", Credits: 100,
+	}})
+	if !res[0].OK || !res[0].Updated {
+		t.Fatalf("应按控制台账号命中已有号并更新: %+v", res[0])
+	}
+	if res[0].ID != existing.ID {
+		t.Fatalf("应更新 %s，实际 %s", existing.ID, res[0].ID)
+	}
+	accounts, err := st.ListAccounts(ctx)
+	if err != nil || len(accounts) != 1 {
+		t.Fatalf("不应新建账号：库里 %d 条", len(accounts))
+	}
+	if accounts[0].Token != "sk-new" {
+		t.Fatalf("API Key 未更新: %q", accounts[0].Token)
+	}
+}
+
 // readAgent2APISample 读 agent2api 样例。该文件含真实 token，被 .gitignore 排除，
 // CI 上没有它，调用方要按「缺少样例则跳过」处理。
 func readAgent2APISample() ([]byte, error) {

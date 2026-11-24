@@ -504,50 +504,68 @@
       </section>
     </section>
 
-    <!-- 添加账号 -->
+    <!-- 添加账号：一级标签按「上游渠道」分，JSON 批量导入单独一栏（它可跨渠道） -->
     <section class="page" id="page-add">
       <section class="card">
-        <h2>添加账号</h2>
-        <div class="tabs" id="addTabs">
-          <button class="tab active" data-tab="paste">粘贴授权码</button>
-          <button class="tab" data-tab="manual">手填令牌</button>
-          <button class="tab" data-tab="sensenova">日日新账号</button>
-          <button class="tab" data-tab="import">导入 JSON</button>
+        <div class="cardhead add-head">
+          <h2>添加账号</h2>
+          <span class="hint add-head-hint">先选渠道，再选该渠道的添加方式。同一账号重复添加只会更新凭据，不会多出一条。</span>
         </div>
 
-        <div class="tabpane active" id="pane-paste">
-          <ol class="steps">
-            <li>点下面按钮打开官方登录页（新窗口）。</li>
-            <li>完成登录后浏览器会跳到 <code>office-raccoon://auth/callback?code=…</code>：
-              若提示"没有可用应用"，直接整段复制地址栏内容；若装了桌面客户端，请用无痕窗口操作。</li>
-            <li>把整段链接粘到下面，点「兑换并添加」。</li>
-          </ol>
-          <div class="row">
-            <button class="primary" id="openAuthBtn">打开小浣熊登录页</button>
-            <span class="hint" id="redirectHint"></span>
+        <div class="tabs add-tabs" id="addTabs" role="tablist">
+          <button class="tab active" data-tab="raccoon" role="tab">🦝 小浣熊</button>
+          <button class="tab" data-tab="sensenova" role="tab">🌊 日日新</button>
+          <span class="tabs-sep" aria-hidden="true"></span>
+          <button class="tab" data-tab="import" role="tab" title="一份文件里可以混装多个渠道的账号">📦 批量导入 JSON</button>
+        </div>
+
+        <!-- 小浣熊：两条添加路径共用同一栏，用二级切换区分 -->
+        <div class="tabpane active" id="pane-raccoon">
+          <div class="add-mode-row">
+            <div class="seg" id="addRaccoonMode" role="tablist">
+              <button class="on" data-v="paste">粘贴授权码</button>
+              <button data-v="manual">手填令牌</button>
+            </div>
+            <span class="hint add-mode-hint" id="addRaccoonHint">推荐：浏览器登录一次，把回调链接粘回来即可</span>
           </div>
-          <div class="row">
-            <input type="text" id="pasteInput" placeholder="office-raccoon://auth/callback?code=... 或直接粘贴授权码">
-            <button class="primary" id="exchangeBtn">兑换并添加</button>
+
+          <div class="subpane active" id="sub-paste">
+            <ol class="steps">
+              <li>点下面按钮打开官方登录页（新窗口）。</li>
+              <li>完成登录后浏览器会跳到 <code>office-raccoon://auth/callback?code=…</code>：
+                若提示"没有可用应用"，直接整段复制地址栏内容；若装了桌面客户端，请用无痕窗口操作。</li>
+              <li>把整段链接粘到下面，点「兑换并添加」。</li>
+            </ol>
+            <div class="row">
+              <button class="primary" id="openAuthBtn">打开小浣熊登录页</button>
+              <span class="hint" id="redirectHint"></span>
+            </div>
+            <div class="row">
+              <input type="text" id="pasteInput" placeholder="office-raccoon://auth/callback?code=... 或直接粘贴授权码"
+                autocomplete="off" spellcheck="false">
+              <button class="primary" id="exchangeBtn">兑换并添加</button>
+            </div>
+            <p class="msg" id="exchangeMsg"></p>
           </div>
-          <p class="msg" id="exchangeMsg"></p>
+
+          <div class="subpane" id="sub-manual">
+            <p class="hint">适用于从桌面客户端 <code>~/.box-agent/config/auth.json</code> 里拷贝凭据。
+              账号按 access_token 里的 uid 判定，重复提交同一枚 token 只会更新凭据。</p>
+            <div class="field"><label>access_token</label><textarea id="mToken" rows="3" placeholder="eyJhbGciOi..."></textarea></div>
+            <div class="field"><label>refresh_token</label><textarea id="mRefresh" rows="2" placeholder="可留空"></textarea></div>
+            <div class="field"><label>office_identity</label><input id="mOffice" placeholder="可留空；个人版为空"></div>
+            <div class="field"><label>备注名</label><input id="mName" placeholder="可留空"></div>
+            <button class="primary" id="manualBtn">添加账号</button>
+            <p class="msg" id="manualMsg"></p>
+          </div>
         </div>
 
-        <div class="tabpane" id="pane-manual">
-          <p class="hint">适用于从桌面客户端 <code>~/.box-agent/config/auth.json</code> 里拷贝凭据。</p>
-          <div class="field"><label>access_token</label><textarea id="mToken" rows="3" placeholder="eyJhbGciOi..."></textarea></div>
-          <div class="field"><label>refresh_token</label><textarea id="mRefresh" rows="2" placeholder="可留空"></textarea></div>
-          <div class="field"><label>office_identity</label><input id="mOffice" placeholder="可留空；个人版为空"></div>
-          <div class="field"><label>备注名</label><input id="mName" placeholder="可留空"></div>
-          <button class="primary" id="manualBtn">添加账号</button>
-          <p class="msg" id="manualMsg"></p>
-        </div>
-
-        <!-- 商汤日日新：账号密码导入。与上面两栏是并列的第三条添加路径。 -->
+        <!-- 商汤日日新：账号密码导入，登录换票 + 建 Key 全在服务端完成 -->
         <div class="tabpane" id="pane-sensenova">
           <p class="hint">填写商汤日日新（Token Plan，<code>platform.sensenova.cn</code>）身份。
             服务端会用账号密码登录控制台、自动创建一枚推理 API Key 并入库；
-            日常转发用这枚 Key，账号密码只用于换登录票、读积分额度。</p>
+            日常转发用这枚 Key，账号密码只用于换登录票、读积分额度。
+            同一控制台账号重复添加只会刷新凭据与登录票。</p>
           <div class="field"><label>控制台账号</label><input id="snUsername" placeholder="手机号 / 邮箱"></div>
           <div class="field"><label>控制台密码</label><input id="snPassword" type="password" placeholder="登录 platform.sensenova.cn 的密码"></div>
           <div class="field"><label>API Key（可选）</label><input id="snApiKey" placeholder="已从控制台「API-Key 管理」建好 Key 时可直接填，留空则自动创建"></div>
@@ -557,15 +575,27 @@
           <p class="msg" id="snMsg"></p>
         </div>
 
+        <!-- 批量导入：跨渠道，单独一栏 -->
         <div class="tabpane" id="pane-import">
-          <p class="hint">支持 agenthub-credentials 格式（桌面版导出的那份 JSON），也接受单个账号对象或数组。</p>
+          <p class="hint">这个入口不绑定渠道：一份文件里可以混装小浣熊与日日新的账号。
+            支持 agenthub-credentials 凭据包（桌面版导出的那份 JSON）、agent2api 多供应商导出，
+            以及单个账号对象或数组。</p>
+          <ul class="hint imp-notes">
+            <li>重复导入不会多出账号：已有账号（按 uid 判定）只会更新凭据与备注，结果显示为「更新」。</li>
+            <li>agent2api 导出里的其它供应商会被自动过滤，并在结果里单独列出。</li>
+          </ul>
           <textarea id="importText" rows="8" placeholder='支持桌面版凭据包（agenthub-credentials）与 agent2api 多供应商导出；agent2api 导出里的非小浣熊账号会自动过滤'></textarea>
           <div class="row">
             <input type="file" id="importFile" accept=".json,application/json">
             <button class="primary" id="importBtn">导入</button>
           </div>
           <p class="msg" id="importMsg"></p>
-          <pre class="out" id="importOut"></pre>
+          <div class="imp-report" id="importReport" hidden></div>
+          <!-- 原始结果表明细：默认折叠，排障时再看 -->
+          <details class="imp-raw" id="importRaw" hidden>
+            <summary>原始返回</summary>
+            <pre class="out" id="importOut"></pre>
+          </details>
         </div>
       </section>
     </section>

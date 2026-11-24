@@ -446,7 +446,10 @@ func (im *Importer) importOne(ctx context.Context, a Account) ImportResult {
 // importSenseNova 导入导出包里的日日新账号。
 //
 // 只写库、不联网：登录票过期由转发层用 refresh_token / 账号密码自动重登，
-// 导入时没必要再打一次上游。按「供应商 + uid」去重；缺 uid 时用控制台账号兜底。
+// 导入时没必要再打一次上游。去重口径与面板登录导入保持一致：先按控制台账号
+// 找，再按 uid（tenant_id）找。只按 uid 找会漏掉一类重复——面板添加时 uid
+// 记的是登录拿到的 tenant_id，而导入包缺 uid 时这里退回用控制台账号当 uid，
+// 同一个号就会以两个不同 uid 各建一行。
 func (im *Importer) importSenseNova(ctx context.Context, a Account) ImportResult {
 	username := strings.TrimSpace(a.Username)
 	uid := strings.TrimSpace(a.UID)
@@ -472,7 +475,7 @@ func (im *Importer) importSenseNova(ctx context.Context, a Account) ImportResult
 		name = a.Username
 	}
 
-	existing, err := im.ST.GetByProviderUID(ctx, store.ProviderSenseNova, uid)
+	existing, err := im.findSenseNova(ctx, uid, username)
 	if err != nil {
 		return ImportResult{UID: uid, Message: "查询失败: " + err.Error()}
 	}
@@ -528,6 +531,31 @@ func (im *Importer) importSenseNova(ctx context.Context, a Account) ImportResult
 		return ImportResult{UID: uid, Message: "入库失败: " + err.Error()}
 	}
 	return ImportResult{OK: true, UID: uid, ID: acc.ID}
+}
+
+// findSenseNova 按「控制台账号优先、uid 兜底」查重，与面板登录导入同口径。
+// 控制台账号大小写不敏感——同一邮箱换个大小写不该算两个号。
+func (im *Importer) findSenseNova(ctx context.Context, uid, username string) (*store.Account, error) {
+	if strings.TrimSpace(username) == "" {
+		return im.ST.GetByProviderUID(ctx, store.ProviderSenseNova, uid)
+	}
+	accounts, err := im.ST.ListAccounts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var byUID *store.Account
+	for _, a := range accounts {
+		if !a.IsSenseNova() {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(a.SNUsername), username) {
+			return a, nil
+		}
+		if byUID == nil && uid != "" && a.UID == uid {
+			byUID = a
+		}
+	}
+	return byUID, nil
 }
 
 // Export 读全池生成与桌面版同格式的 JSON。导出明文 token（与桌面版行为一致）。

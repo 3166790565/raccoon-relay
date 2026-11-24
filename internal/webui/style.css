@@ -681,6 +681,7 @@ button.tiny { padding: 4px 9px; font-size: 11.5px; border-radius: var(--r-sm); }
 /* ─── 内部 Tab（添加账号）──────────────────────────────────────── */
 .tabs {
   display: inline-flex;
+  flex-wrap: wrap;
   gap: 2px;
   padding: 3px;
   margin-bottom: 16px;
@@ -703,10 +704,95 @@ button.tiny { padding: 4px 9px; font-size: 11.5px; border-radius: var(--r-sm); }
   font-weight: 600;
   box-shadow: var(--shadow-1);
 }
+/* 「批量导入」跨渠道，和按渠道分的标签之间留一道竖线，避免被当成第三个渠道 */
+.tabs-sep {
+  width: 1px;
+  align-self: stretch;
+  margin: 3px 4px;
+  background: var(--line);
+}
 .tabpane { display: none; }
 .tabpane.active { display: block; }
 .steps { margin: 0 0 14px; padding-left: 20px; color: var(--dim); font-size: 12.5px; line-height: 1.8; }
 .steps li { margin: 3px 0; }
+
+/* 添加账号：渠道栏的标题与说明并排，窄屏自动换行 */
+.add-head { align-items: baseline; }
+.add-head .add-head-hint { margin: 0; }
+.add-mode-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--hairline);
+}
+.add-mode-hint { margin: 0; }
+/* 二级方式切换：只有一个可见，不与一级渠道标签抢视觉层级 */
+#pane-raccoon .subpane { display: none; }
+#pane-raccoon .subpane.active { display: block; }
+/* 批量导入的条目说明：单独的列表，比一段长 hint 好读 */
+.imp-notes { margin: 2px 0 12px; padding-left: 20px; }
+.imp-notes li { margin: 3px 0; }
+.imp-report {
+  margin-top: 10px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  max-height: 260px;
+  overflow: auto;
+}
+.imp-report:empty { display: none; }
+.imp-report-head {
+  position: sticky;
+  top: 0;
+  padding: 6px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--dim);
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--hairline);
+}
+.imp-row {
+  display: grid;
+  grid-template-columns: 44px 120px minmax(0, 1fr);
+  align-items: baseline;
+  gap: 10px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--hairline);
+  font-size: 11.5px;
+}
+.imp-row:last-child { border-bottom: none; }
+.imp-row .tag.ok { color: var(--ok); background: var(--ok-soft); border-color: var(--ok-bd); }
+.imp-row .tag.warn { color: var(--warn); background: var(--warn-soft); border-color: var(--warn-bd); }
+.imp-row .tag.bad { color: var(--bad); background: var(--bad-soft); border-color: var(--bad-bd); }
+.imp-uid { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.imp-msg { color: var(--dim); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 原始返回：与「逐条结果」同一套折叠样式，不再单独占一大块 */
+.imp-raw { margin-top: 10px; }
+.imp-raw > summary {
+  cursor: pointer;
+  font-size: 11.5px;
+  color: var(--dim);
+  user-select: none;
+  list-style: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.imp-raw > summary::-webkit-details-marker { display: none; }
+.imp-raw > summary::before { content: '›'; font-size: 14px; line-height: 1; transition: transform .15s; }
+.imp-raw[open] > summary::before { transform: rotate(90deg); }
+.imp-raw[open] > summary { color: var(--fg); margin-bottom: 6px; }
+.imp-raw .out { max-height: 220px; }
+@media (max-width: 640px) {
+  /* 窄屏：逐条结果改成两行，说明单独占一行，不再横向挤 */
+  .imp-row { grid-template-columns: 44px minmax(0, 1fr); }
+  .imp-msg { grid-column: 1 / -1; white-space: normal; }
+  /* 标签换行后换行本身已经隔开了，竖线只会像多出来的一根 */
+  .tabs-sep { display: none; }
+}
 
 /* ─── 表格 ──────────────────────────────────────────────────────── */
 .tablewrap { overflow-x: auto; }

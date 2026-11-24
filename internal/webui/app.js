@@ -75,13 +75,49 @@ $('logoutBtn').addEventListener('click', () => {
   location.reload();
 });
 
-// ---------- 添加账号内部 Tab 切换 ----------
-document.querySelectorAll('#addTabs .tab').forEach((btn) => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('#addTabs .tab').forEach((b) => b.classList.toggle('active', b === btn));
-    document.querySelectorAll('.tabpane').forEach((p) => p.classList.toggle('active', p.id === 'pane-' + btn.dataset.tab));
+// ---------- 添加账号：一级渠道 Tab + 小浣熊栏的二级方式切换 ----------
+// 记住上次停留的渠道，刷新页面回来仍在同一栏（localStorage，跟主题同一套约定）。
+const ADD_TABS = ['raccoon', 'sensenova', 'import'];
+const RACCOON_MODES = ['paste', 'manual'];
+
+function showAddTab(tab) {
+  if (!ADD_TABS.includes(tab)) tab = 'raccoon';
+  document.querySelectorAll('#addTabs .tab').forEach((b) => {
+    const on = b.dataset.tab === tab;
+    b.classList.toggle('active', on);
+    b.setAttribute('aria-selected', on ? 'true' : 'false');
   });
+  document.querySelectorAll('#page-add .tabpane').forEach((p) => {
+    p.classList.toggle('active', p.id === 'pane-' + tab);
+  });
+  localStorage.setItem('addTab', tab);
+}
+
+function showRaccoonMode(mode) {
+  if (!RACCOON_MODES.includes(mode)) mode = 'paste';
+  document.querySelectorAll('#addRaccoonMode button').forEach((b) => {
+    b.classList.toggle('on', b.dataset.v === mode);
+  });
+  document.querySelectorAll('#pane-raccoon .subpane').forEach((p) => {
+    p.classList.toggle('active', p.id === 'sub-' + mode);
+  });
+  const hint = $('addRaccoonHint');
+  if (hint) {
+    hint.textContent = mode === 'manual'
+      ? '当浏览器登录取不到回调时，直接从桌面客户端拷令牌'
+      : '推荐：浏览器登录一次，把回调链接粘回来即可';
+  }
+  localStorage.setItem('addRaccoonMode', mode);
+}
+
+document.querySelectorAll('#addTabs .tab').forEach((btn) => {
+  btn.addEventListener('click', () => showAddTab(btn.dataset.tab));
 });
+document.querySelectorAll('#addRaccoonMode button').forEach((btn) => {
+  btn.addEventListener('click', () => showRaccoonMode(btn.dataset.v));
+});
+showAddTab(localStorage.getItem('addTab') || 'raccoon');
+showRaccoonMode(localStorage.getItem('addRaccoonMode') || 'paste');
 
 // ---------- 顶层标签页切换 ----------
 // 每个标签首次进入时才拉取数据；哈希记录当前页，刷新后停在原页。
@@ -1221,24 +1257,69 @@ $('importFile').addEventListener('change', async (e) => {
   $('importText').value = await f.text();
 });
 
+// 导入结果分两层展示：上面一句话说「新增多少、更新多少、跳过多少」，
+// 下面是逐条明细。重复导入只更新凭据的条目要能一眼看出来，否则用户会以为
+// 号池里多了几个号。
+function renderImportReport(r) {
+  const results = Array.isArray(r && r.results) ? r.results : [];
+  const added = results.filter((x) => x.ok && !x.updated).length;
+  const updated = results.filter((x) => x.ok && x.updated).length;
+  const failed = results.filter((x) => !x.ok).length;
+
+  const parts = [];
+  if (added) parts.push(`新增 ${added}`);
+  if (updated) parts.push(`更新 ${updated}`);
+  if (failed) parts.push(`跳过 / 失败 ${failed}`);
+  if (r && r.total != null) parts.push(`共 ${r.total} 条`);
+  let line = parts.length ? `导入完成：${parts.join('，')}` : '没有可导入的账号';
+  if (r && r.skipped) {
+    const prov = Object.entries(r.skippedProviders || {}).map(([k, v]) => `${k} ${v}`);
+    line += `（已过滤 ${r.skipped} 个${prov.length ? '：' + prov.join('、') : '（凭据不全）'}）`;
+  }
+
+  const box = $('importReport');
+  if (!box) return line;
+  if (!results.length) { box.hidden = true; box.innerHTML = ''; return line; }
+  const rows = results.map((x) => {
+    const cls = !x.ok ? 'bad' : x.updated ? 'warn' : 'ok';
+    const action = !x.ok ? '跳过' : x.updated ? '更新' : '新增';
+    const who = x.uid ? shortUID(x.uid) : '-';
+    return `<div class="imp-row">
+      <span class="tag ${cls}">${action}</span>
+      <span class="imp-uid" title="${esc(x.uid || '')}">${esc(who)}</span>
+      <span class="imp-msg">${esc(x.message || '')}</span>
+    </div>`;
+  }).join('');
+  box.hidden = false;
+  box.innerHTML = `<div class="imp-report-head">逐条结果</div>${rows}`;
+  return line;
+}
+
+// 原始仅在有结果时折叠展示；空结果直接藏起来，不给一块空盒子。
+function setImportRaw(results) {
+  const wrap = $('importRaw');
+  const out = $('importOut');
+  if (!wrap || !out) return;
+  const text = Array.isArray(results) && results.length ? JSON.stringify(results, null, 2) : '';
+  out.textContent = text;
+  wrap.hidden = !text;
+  wrap.open = false;
+}
+
 $('importBtn').addEventListener('click', async () => {
   const raw = $('importText').value.trim();
   if (!raw) return;
   $('importMsg').textContent = '导入中…';
-  $('importOut').textContent = '';
+  setImportRaw([]);
+  $('importReport').hidden = true;
   try {
     const r = await api('/api/accounts/import', { method: 'POST', body: raw });
-    let msg = `导入完成：成功 ${r.imported || 0} / 共 ${r.total || 0}`;
-    if (r.skipped) {
-      const parts = Object.entries(r.skippedProviders || {}).map(([k, v]) => `${k} ${v}`);
-      msg += `（已过滤 ${r.skipped} 个${parts.length ? '：' + parts.join('、') : '（凭据不全）'}）`;
-    }
-    $('importMsg').textContent = msg;
-    $('importOut').textContent = JSON.stringify(r.results || [], null, 2);
+    $('importMsg').textContent = renderImportReport(r);
+    setImportRaw(r.results || []);
     await Promise.all([loadAccounts(), loadStatus()]);
   } catch (e) {
     $('importMsg').textContent = e.message;
-    if (e.data && e.data.results) $('importOut').textContent = JSON.stringify(e.data.results, null, 2);
+    if (e.data && e.data.results) setImportRaw(e.data.results);
   }
 });
 
