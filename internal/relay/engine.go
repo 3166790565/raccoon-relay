@@ -103,6 +103,10 @@ type Engine struct {
 	// affinity 是会话粘性开关与 TTL（同一段对话绑定同一个号）。
 	affinity       bool
 	affinityTTLVal time.Duration
+	// affinityFallback 决定「客户端没给会话键」时是否仍按首条用户消息
+	// 派生一个兜底键做粘性。默认开启：大多数 SDK 不发会话键，
+	// 不兜底的话每轮都会换号，上游前缀缓存永远命中不了。
+	affinityFallback bool
 }
 
 // nowMillis 单独抽出来，便于测试打桩。
@@ -125,6 +129,20 @@ func (e *Engine) SetAffinityPolicy(enabled bool, ttl time.Duration) {
 	}
 	e.mu.Lock()
 	e.affinity, e.affinityTTLVal = enabled, ttl
+	e.mu.Unlock()
+}
+
+// AffinityFallback 返回「无显式会话键时是否按首条用户消息兜底粘性」。
+func (e *Engine) AffinityFallback() bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.affinityFallback
+}
+
+// SetAffinityFallback 运行期更新兜底粘性开关。
+func (e *Engine) SetAffinityFallback(on bool) {
+	e.mu.Lock()
+	e.affinityFallback = on
 	e.mu.Unlock()
 }
 
@@ -225,15 +243,18 @@ func (e *Engine) RunOpenAI(ctx context.Context, req *ChatContext, sink OpenAISin
 	var lastAcc string
 
 	provider := providerForModel(req.Model)
-	// 会话粘性：先把绑定过的号设为优先。绑定失效（号下线/冷却）时
+	// 会话粘性：先把绑定过的号作为本次选号的优先提示。绑定失效（号下线/冷却）时
 	// 选号层自然跳过它，不会因为这个提示而卡住。
+	//
+	// 提示随每次选号调用传入，不能写进 Pool 的字段：那是全局单例，
+	// 并发请求会互相覆盖彼此的绑定号。
 	affinity := e.affinityEnabled()
+	hints := pool.PickHints{}
 	if affinity && req.SessionKey != "" {
 		if bound, ok := e.ST.BoundAccount(ctx, req.SessionKey, nowMillis()); ok {
-			e.Pool.SetPrefer(bound)
+			hints.PreferID = bound
 		}
 	}
-	defer e.Pool.SetPrefer("")
 
 	var probed bool
 	// drainedWait 是本轮已经为「等一个号空出来」等掉的时间，防止无限等。
@@ -255,7 +276,7 @@ func (e *Engine) RunOpenAI(ctx context.Context, req *ChatContext, sink OpenAISin
 				}
 			}
 		}
-		lease, err := e.Pool.PickProvider(ctx, req.Model, provider, excluded)
+		lease, err := e.Pool.PickProviderWithHints(ctx, req.Model, provider, excluded, hints)
 		if err != nil {
 			return Result{}, err
 		}
@@ -988,7 +1009,11 @@ func SessionKeyOf(r *http.Request, body map[string]any) string {
 			return truncateSessionKey(v)
 		}
 	}
-	for _, f := range []string{"session_key", "session_id", "conversation_id"} {
+	// prompt_cache_key 是 OpenAI SDK 官方的缓存路由字段：客户端用它表达
+	// 「这几轮属于同一段对话，请尽量落到同一个后端」。上游不认这个字段
+	// （发往上游前会被删掉），但拿它当会话键正是它的本意——否则客户端想
+	// 命中前缀缓存，我们却每轮换号，缓存必然全 miss。
+	for _, f := range []string{"session_key", "session_id", "conversation_id", "prompt_cache_key"} {
 		if v, ok := body[f].(string); ok && strings.TrimSpace(v) != "" {
 			return truncateSessionKey(strings.TrimSpace(v))
 		}
@@ -1003,6 +1028,28 @@ func truncateSessionKey(s string) string {
 		return s
 	}
 	return string([]rune(s)[:max])
+}
+
+// stickyKey 决定这次请求用什么键做会话粘性。
+//
+// 客户端给了键就用它；没给时（绝大多数 SDK 默认都不发）按首条用户消息
+// 派生一个兜底键——这正是上游前缀缓存的天然分界线：首条消息相同的多轮
+// 请求本来就该落在同一个号上。兜底关闭或连首条消息都没有时返回空串，
+// 粘性不生效（与改造前一致）。
+func (e *Engine) stickyKey(sessionKey string, messages []any) string {
+	if sessionKey != "" {
+		return sessionKey
+	}
+	if !e.AffinityFallback() {
+		return ""
+	}
+	first := raccoon.FirstUserMessageText(messages)
+	if first == "" {
+		return ""
+	}
+	// 加前缀避免与客户端显式给的键撞车：客户端完全可能把某段文本
+	// 当 session_id 传上来，语义上应各算各的。
+	return "first-user:" + truncateSessionKey(first)
 }
 
 func firstUserText(messages []any) string {

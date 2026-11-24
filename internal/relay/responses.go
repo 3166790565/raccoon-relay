@@ -303,10 +303,7 @@ func (r *responsesSSE) Complete() {
 				"id": r.itemID, "type": "message", "role": "assistant", "status": "completed",
 				"content": []any{map[string]any{"type": "output_text", "text": text, "annotations": []any{}}},
 			}},
-			"usage": map[string]any{
-				"input_tokens": r.usage.PromptTokens, "output_tokens": r.usage.CompletionTokens,
-				"total_tokens": r.usage.TotalTokens,
-			},
+			"usage": responsesUsage(r.usage),
 		},
 	})
 }
@@ -380,11 +377,24 @@ func (a *responsesAgg) Message() map[string]any {
 	return map[string]any{
 		"id": a.id, "object": "response", "created_at": time.Now().Unix(),
 		"status": "completed", "model": a.model, "output": output,
-		"usage": map[string]any{
-			"input_tokens": a.usage.PromptTokens, "output_tokens": a.usage.CompletionTokens,
-			"total_tokens": a.usage.TotalTokens,
-		},
+		"usage": responsesUsage(a.usage),
 	}
+}
+
+// responsesUsage 生成 Responses 形态的 usage。
+//
+// Responses 的 input_tokens 与 OpenAI 同口径（含缓存），命中量放在
+// input_tokens_details.cached_tokens。上游没回传缓存字段时不输出它，
+// 避免把「未知」写成「命中 0」。
+func responsesUsage(u raccoon.Usage) map[string]any {
+	out := map[string]any{
+		"input_tokens": u.PromptTokens, "output_tokens": u.CompletionTokens,
+		"total_tokens": u.TotalTokens,
+	}
+	if u.CacheReported {
+		out["input_tokens_details"] = map[string]any{"cached_tokens": u.CachedTokens}
+	}
+	return out
 }
 
 // HandleResponses 处理 /v1/responses。

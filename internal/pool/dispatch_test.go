@@ -214,8 +214,8 @@ func TestPreferAccountWins(t *testing.T) {
 	b := addAcc(t, st, "b", 1000) // 积分远多于 a，正常会优先被选
 
 	ctx := context.Background()
-	p.SetPrefer(b.ID)
-	lease, err := p.Pick(ctx, "", map[string]bool{})
+	hints := PickHints{PreferID: b.ID}
+	lease, err := p.PickProviderWithHints(ctx, "", "", map[string]bool{}, hints)
 	if err != nil || lease == nil {
 		t.Fatal(err)
 	}
@@ -225,8 +225,7 @@ func TestPreferAccountWins(t *testing.T) {
 	p.ReleaseLease(lease)
 
 	// 绑定被排除（比如刚失败）时应回落到正常策略，而不是卡住。
-	p.SetPrefer(b.ID)
-	lease, err = p.Pick(ctx, "", map[string]bool{b.ID: true})
+	lease, err = p.PickProviderWithHints(ctx, "", "", map[string]bool{b.ID: true}, hints)
 	if err != nil || lease == nil {
 		t.Fatal(err)
 	}
@@ -243,13 +242,46 @@ func TestPreferIgnoresUnavailableAccount(t *testing.T) {
 	off := addAcc(t, st, "off", 100, func(acc *store.Account) { acc.Status = store.StatusCooling })
 
 	ctx := context.Background()
-	p.SetPrefer(off.ID)
-	lease, err := p.Pick(ctx, "", map[string]bool{})
+	lease, err := p.PickProviderWithHints(ctx, "", "", map[string]bool{}, PickHints{PreferID: off.ID})
 	if err != nil || lease == nil {
 		t.Fatal(err)
 	}
 	if lease.Account.ID != a.ID {
 		t.Fatalf("冷却中的绑定号应被跳过，实际 %s", lease.Account.UID)
+	}
+}
+
+// 并发请求各自带自己的绑定号：提示必须互不覆盖。
+// 这正是不把它放进 Pool 字段的原因——池级字段下 A 会拿到 B 的号。
+func TestPickHintsArePerCallNotShared(t *testing.T) {
+	st := newStore(t)
+	p := New(st, StrategyLoadBalance, NewCooldownBook(st, true))
+	a := addAcc(t, st, "a", 1000)
+	b := addAcc(t, st, "b", 1000)
+
+	ctx := context.Background()
+	// 交错地各选一次，中间不留任何「清空优先号」的调用。
+	la, err := p.PickProviderWithHints(ctx, "", "", map[string]bool{}, PickHints{PreferID: a.ID})
+	if err != nil || la == nil {
+		t.Fatal(err)
+	}
+	if la.Account.ID != a.ID {
+		t.Fatalf("A 应拿到自己的绑定号 a，实际 %s", la.Account.UID)
+	}
+	lb, err := p.PickProviderWithHints(ctx, "", "", map[string]bool{}, PickHints{PreferID: b.ID})
+	if err != nil || lb == nil {
+		t.Fatal(err)
+	}
+	if lb.Account.ID != b.ID {
+		t.Fatalf("B 应拿到自己的绑定号 b，实际 %s", lb.Account.UID)
+	}
+	// 不带提示的请求按正常策略走，不受上一次提示影响。
+	ln, err := p.Pick(ctx, "", map[string]bool{})
+	if err != nil || ln == nil {
+		t.Fatal(err)
+	}
+	if ln.Account.ID != a.ID && ln.Account.ID != b.ID {
+		t.Fatalf("无提示时应在池内正常选号，实际 %s", ln.Account.UID)
 	}
 }
 

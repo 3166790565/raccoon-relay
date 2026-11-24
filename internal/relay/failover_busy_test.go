@@ -150,9 +150,8 @@ func TestFailoverIgnoresAffinityToExhaustedAccount(t *testing.T) {
 	if err := h.st.BindSession(context.Background(), "conv-x", poor.ID, "", time.Hour.Milliseconds(), time.Now().UnixMilli()); err != nil {
 		t.Fatal(err)
 	}
-	h.engine.Pool.SetPrefer(poor.ID)
-
-	second := h.do(t, "POST", "/v1/chat/completions", body)
+	// 绑定通过请求头的会话键生效；不再需要（也无法）在池上预先设置优先号。
+	second := h.doHeader(t, "X-Session-Id", "conv-x", body)
 	if second.Code != 200 || !strings.Contains(second.Body.String(), "换号成功") {
 		t.Fatalf("绑定到耗尽号时仍应换号成功，实际 %d：%s", second.Code, second.Body.String())
 	}

@@ -21,6 +21,7 @@ type DailyStat struct {
 	Tokens       int64  `json:"tokens"`
 	PromptTokens int64  `json:"promptTokens"`
 	Completion   int64  `json:"completionTokens"`
+	CachedTokens int64  `json:"cachedTokens"`
 }
 
 // DaySlice 是「某天 × 某个维度值」的用量，模型/协议/账号共用。
@@ -122,11 +123,15 @@ type ReportSummary struct {
 
 // ReportTotals 是区间总量。
 type ReportTotals struct {
-	Requests     int64   `json:"requests"`
-	Successful   int64   `json:"successful"`
-	Tokens       int64   `json:"tokens"`
-	PromptTokens int64   `json:"promptTokens"`
-	Completion   int64   `json:"completionTokens"`
+	Requests     int64 `json:"requests"`
+	Successful   int64 `json:"successful"`
+	Tokens       int64 `json:"tokens"`
+	PromptTokens int64 `json:"promptTokens"`
+	Completion   int64 `json:"completionTokens"`
+	// CachedTokens 是区间内命中的缓存输入量；CacheHitRate 是它占输入的比例。
+	// 上游不回传缓存字段时两者都是 0，面板据此显示「—」而不是伪造 0%。
+	CachedTokens int64   `json:"cachedTokens"`
+	CacheHitRate float64 `json:"cacheHitRate"`
 	ActiveDays   int     `json:"activeDays"`
 	Streak       int     `json:"streak"`
 	SuccessRate  float64 `json:"successRate"`
@@ -209,7 +214,7 @@ func (s *Store) BackfillDailyIfEmpty(ctx context.Context) (int64, error) {
 	for cur := minID; cur <= maxID; {
 		rows, err := s.query(ctx,
 			`SELECT id, ts, account_id, model, api, status, prompt_tokens, completion_tokens,
-				total_tokens, ms, error FROM usage_logs WHERE id >= ? AND id < ? ORDER BY id LIMIT ?`,
+				total_tokens, cached_tokens, ms, error FROM usage_logs WHERE id >= ? AND id < ? ORDER BY id LIMIT ?`,
 			cur, maxID+1, pageSize)
 		if err != nil {
 			return total, err
@@ -219,7 +224,7 @@ func (s *Store) BackfillDailyIfEmpty(ctx context.Context) (int64, error) {
 		for rows.Next() {
 			var u UsageLog
 			if err := rows.Scan(&last, &u.TS, &u.AccountID, &u.Model, &u.API, &u.Status,
-				&u.PromptTokens, &u.CompletionTokens, &u.TotalTokens, &u.MS, &u.Error); err != nil {
+				&u.PromptTokens, &u.CompletionTokens, &u.TotalTokens, &u.CachedTokens, &u.MS, &u.Error); err != nil {
 				rows.Close()
 				return total, err
 			}
@@ -250,8 +255,8 @@ func (s *Store) FirstDailyDay(ctx context.Context) string {
 // LoadDaily 读取区间内的日汇总，零碎缺失的日期不补齐（由调用方按需补零）。
 func (s *Store) LoadDaily(ctx context.Context, start, end string) ([]DailyStat, error) {
 	rows, err := s.query(ctx,
-		`SELECT day, requests, successful, tokens, prompt_tokens, completion_tokens FROM request_daily
-		 WHERE day >= ? AND day <= ? ORDER BY day ASC`, start, end)
+		`SELECT day, requests, successful, tokens, prompt_tokens, completion_tokens, cached_tokens
+		 FROM request_daily WHERE day >= ? AND day <= ? ORDER BY day ASC`, start, end)
 	if err != nil {
 		return nil, err
 	}
@@ -260,7 +265,7 @@ func (s *Store) LoadDaily(ctx context.Context, start, end string) ([]DailyStat, 
 	for rows.Next() {
 		var d DailyStat
 		if err := rows.Scan(&d.Day, &d.Requests, &d.Successful, &d.Tokens,
-			&d.PromptTokens, &d.Completion); err != nil {
+			&d.PromptTokens, &d.Completion, &d.CachedTokens); err != nil {
 			return nil, err
 		}
 		out = append(out, d)
@@ -301,8 +306,8 @@ func (s *Store) loadDaySlices(ctx context.Context, table, keyCol, start, end str
 // LoadHeatmap 读取最近一年的日汇总（热力图固定 365 格，不随区间变化）。
 func (s *Store) LoadHeatmap(ctx context.Context, since string) ([]DailyStat, error) {
 	rows, err := s.query(ctx,
-		`SELECT day, requests, successful, tokens, prompt_tokens, completion_tokens FROM request_daily
-		 WHERE day >= ? ORDER BY day ASC`, since)
+		`SELECT day, requests, successful, tokens, prompt_tokens, completion_tokens, cached_tokens
+		 FROM request_daily WHERE day >= ? ORDER BY day ASC`, since)
 	if err != nil {
 		return nil, err
 	}
@@ -311,7 +316,7 @@ func (s *Store) LoadHeatmap(ctx context.Context, since string) ([]DailyStat, err
 	for rows.Next() {
 		var d DailyStat
 		if err := rows.Scan(&d.Day, &d.Requests, &d.Successful, &d.Tokens,
-			&d.PromptTokens, &d.Completion); err != nil {
+			&d.PromptTokens, &d.Completion, &d.CachedTokens); err != nil {
 			return nil, err
 		}
 		out = append(out, d)

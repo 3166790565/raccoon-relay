@@ -116,7 +116,8 @@ func (s *Store) rebuildDailyForDays(ctx context.Context, days []string) error {
 			return err
 		}
 		rows, err := s.query(ctx,
-			`SELECT ts, account_id, model, api, status, prompt_tokens, completion_tokens, total_tokens
+			`SELECT ts, account_id, model, api, status, prompt_tokens, completion_tokens, total_tokens,
+				cached_tokens
 			 FROM usage_logs WHERE ts >= ? AND ts < ?`, start, end)
 		if err != nil {
 			return err
@@ -125,7 +126,7 @@ func (s *Store) rebuildDailyForDays(ctx context.Context, days []string) error {
 		for rows.Next() {
 			var u UsageLog
 			if err := rows.Scan(&u.TS, &u.AccountID, &u.Model, &u.API, &u.Status,
-				&u.PromptTokens, &u.CompletionTokens, &u.TotalTokens); err != nil {
+				&u.PromptTokens, &u.CompletionTokens, &u.TotalTokens, &u.CachedTokens); err != nil {
 				rows.Close()
 				return err
 			}

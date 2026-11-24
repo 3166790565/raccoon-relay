@@ -70,9 +70,6 @@ type Pool struct {
 	pickSeq  map[string]uint64
 	pickTick uint64
 
-	// preferID 是本轮请求「最好用这个号」的提示（会话粘性绑定 / 客户端指定）。
-	// 传入时它排到候选队首，失败换号时由引擎清空，避免一直撞同一个号。
-	preferID string
 	// lease 是单号在途租约配置；held 是本进程当前持有的租约槽位。
 	lease LeaseConfig
 	held  map[string]map[int]*leaseState
@@ -82,18 +79,14 @@ type Pool struct {
 	now func() time.Time
 }
 
-// SetPrefer 设置本次请求优先使用的账号 id。传空串清除。
-func (p *Pool) SetPrefer(accountID string) {
-	p.mu.Lock()
-	p.preferID = accountID
-	p.mu.Unlock()
-}
-
-// Prefer 返回当前优先账号。
-func (p *Pool) Prefer() string {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.preferID
+// PickHints 是调用方给这次选号的一次性提示。
+//
+// 必须随调用传入，不能存在 Pool 字段上：Pool 是全局单例，两个并发请求写同一个
+// 「本轮优先号」会互相覆盖，A 会拿到 B 的绑定号、A 结束时又会把 B 的清掉。
+// 这是请求级状态，只该活在请求自己的栈上。
+type PickHints struct {
+	// PreferID 是会话粘性绑定的账号：条件满足时排到候选队首。
+	PreferID string
 }
 
 // SetClock 供测试注入时钟。
@@ -193,17 +186,25 @@ func (p *Pool) inFlightOf(id string) int {
 // 积分阈值/模型级冷却/在途租约/退避窗口。
 // 排序时优先账号（会话绑定或客户端指定）排第一，其余按策略排。
 func (p *Pool) Pick(ctx context.Context, model string, excluded map[string]bool) (*Lease, error) {
-	return p.pick(ctx, model, "", excluded)
+	return p.pick(ctx, model, "", excluded, PickHints{})
 }
 
 // PickProvider 只在指定供应商的账号里选。provider 为空等价不限制。
 // 日日新与小浣熊的模型不通用，按模型名分流后必须用这个入口，否则会拿
 // deepseek-flash 去打小浣熊、或拿 raccoon-chat 去打日日新。
 func (p *Pool) PickProvider(ctx context.Context, model, provider string, excluded map[string]bool) (*Lease, error) {
-	return p.pick(ctx, model, provider, excluded)
+	return p.pick(ctx, model, provider, excluded, PickHints{})
 }
 
-func (p *Pool) pick(ctx context.Context, model, wantProvider string, excluded map[string]bool) (*Lease, error) {
+// PickProviderWithHints 与 PickProvider 相同，但带上本次请求的选号提示
+// （会话粘性绑定）。提示随调用传入，不落 Pool 字段，并发请求互不干扰。
+func (p *Pool) PickProviderWithHints(ctx context.Context, model, provider string,
+	excluded map[string]bool, hints PickHints) (*Lease, error) {
+	return p.pick(ctx, model, provider, excluded, hints)
+}
+
+func (p *Pool) pick(ctx context.Context, model, wantProvider string,
+	excluded map[string]bool, hints PickHints) (*Lease, error) {
 	accounts, err := p.st.ListAccounts(ctx)
 	if err != nil {
 		return nil, err
@@ -212,7 +213,7 @@ func (p *Pool) pick(ctx context.Context, model, wantProvider string, excluded ma
 	p.mu.Lock()
 	strategy := p.strategy
 	creditPol := p.credit
-	prefer := p.preferID
+	prefer := hints.PreferID
 	leases := p.lease
 	loads := make(map[string]int, len(accounts))
 	for id, n := range p.inFlight {

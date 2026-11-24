@@ -111,17 +111,17 @@ func (s *Store) usageLoop() {
 // insertUsageBatch 用一条 multi-row INSERT 写入一批流水，并同步累加日聚合。
 func (s *Store) insertUsageBatch(ctx context.Context, batch []UsageLog) error {
 	ph := make([]string, 0, len(batch))
-	args := make([]any, 0, len(batch)*10)
+	args := make([]any, 0, len(batch)*11)
 	for _, u := range batch {
 		if u.TS == 0 {
 			u.TS = time.Now().UnixMilli()
 		}
-		ph = append(ph, "(?,?,?,?,?,?,?,?,?,?)")
+		ph = append(ph, "(?,?,?,?,?,?,?,?,?,?,?)")
 		args = append(args, u.TS, u.AccountID, u.Model, u.API, u.Status,
-			u.PromptTokens, u.CompletionTokens, u.TotalTokens, u.MS, u.Error)
+			u.PromptTokens, u.CompletionTokens, u.TotalTokens, u.CachedTokens, u.MS, u.Error)
 	}
 	q := `INSERT INTO usage_logs (ts, account_id, model, api, status,
-		prompt_tokens, completion_tokens, total_tokens, ms, error) VALUES ` + joinStrings(ph, ",")
+		prompt_tokens, completion_tokens, total_tokens, cached_tokens, ms, error) VALUES ` + joinStrings(ph, ",")
 	if _, err := s.exec(ctx, q, args...); err != nil {
 		return fmt.Errorf("insert usage batch: %w", err)
 	}
@@ -138,7 +138,7 @@ func (s *Store) foldDaily(ctx context.Context, batch []UsageLog) {
 		return
 	}
 	loc := dailyLocation()
-	type agg struct{ req, ok, tok, prompt, completion int64 }
+	type agg struct{ req, ok, tok, prompt, completion, cached int64 }
 	add := func(a *agg, u UsageLog) {
 		a.req++
 		if u.Status >= 200 && u.Status < 400 {
@@ -147,6 +147,7 @@ func (s *Store) foldDaily(ctx context.Context, batch []UsageLog) {
 		a.tok += u.TotalTokens
 		a.prompt += u.PromptTokens
 		a.completion += u.CompletionTokens
+		a.cached += u.CachedTokens
 	}
 	days := map[string]*agg{}
 	type mkey struct{ day, model string }
@@ -187,29 +188,31 @@ func (s *Store) foldDaily(ctx context.Context, batch []UsageLog) {
 		add(a, u)
 	}
 	const dayQuery = `INSERT INTO request_daily
-			(day, requests, successful, tokens, prompt_tokens, completion_tokens) VALUES (?,?,?,?,?,?)
+			(day, requests, successful, tokens, prompt_tokens, completion_tokens, cached_tokens) VALUES (?,?,?,?,?,?,?)
 		ON CONFLICT(day) DO UPDATE SET
 			requests = request_daily.requests + excluded.requests,
 			successful = request_daily.successful + excluded.successful,
 			tokens = request_daily.tokens + excluded.tokens,
 			prompt_tokens = request_daily.prompt_tokens + excluded.prompt_tokens,
-			completion_tokens = request_daily.completion_tokens + excluded.completion_tokens`
+			completion_tokens = request_daily.completion_tokens + excluded.completion_tokens,
+			cached_tokens = request_daily.cached_tokens + excluded.cached_tokens`
 	for day, a := range days {
-		if _, err := s.exec(ctx, dayQuery, day, a.req, a.ok, a.tok, a.prompt, a.completion); err != nil {
+		if _, err := s.exec(ctx, dayQuery, day, a.req, a.ok, a.tok, a.prompt, a.completion, a.cached); err != nil {
 			log.Printf("[报表] 累加日统计失败（%s）: %v", day, err)
 			return
 		}
 	}
 	const modelQuery = `INSERT INTO request_daily_model
-			(day, model, requests, successful, tokens, prompt_tokens, completion_tokens) VALUES (?,?,?,?,?,?,?)
+			(day, model, requests, successful, tokens, prompt_tokens, completion_tokens, cached_tokens) VALUES (?,?,?,?,?,?,?,?)
 		ON CONFLICT(day, model) DO UPDATE SET
 			requests = request_daily_model.requests + excluded.requests,
 			successful = request_daily_model.successful + excluded.successful,
 			tokens = request_daily_model.tokens + excluded.tokens,
 			prompt_tokens = request_daily_model.prompt_tokens + excluded.prompt_tokens,
-			completion_tokens = request_daily_model.completion_tokens + excluded.completion_tokens`
+			completion_tokens = request_daily_model.completion_tokens + excluded.completion_tokens,
+			cached_tokens = request_daily_model.cached_tokens + excluded.cached_tokens`
 	for k, a := range models {
-		if _, err := s.exec(ctx, modelQuery, k.day, k.model, a.req, a.ok, a.tok, a.prompt, a.completion); err != nil {
+		if _, err := s.exec(ctx, modelQuery, k.day, k.model, a.req, a.ok, a.tok, a.prompt, a.completion, a.cached); err != nil {
 			log.Printf("[报表] 累加模型统计失败（%s/%s）: %v", k.day, k.model, err)
 			return
 		}

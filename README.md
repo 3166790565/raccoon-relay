@@ -293,8 +293,16 @@ DATA_DIR=./data SECRET_KEY=dev ADMIN_TOKEN=dev ./relay
 同步累加，老版本升级上来时会自动从历史流水补算一次（启动日志会打印补算条数）。
 对应接口：`GET /api/report?range=7|30|today|yesterday|month|all|custom&start=YYYY-MM-DD&end=YYYY-MM-DD`。
 
-> 协议统计按出站协议（openai / anthropic / responses）汇总，数值全部来自真实流水；
-> 报表目前不展示缓存命中率——上游尚未回传缓存字段，放一个恒为 0 的指标没有意义。
+> 协议统计按出站协议（openai / anthropic / responses）汇总，数值全部来自真实流水。
+>
+> **缓存命中率**：上游回传缓存字段时会展示（OpenAI 的 `prompt_tokens_details.cached_tokens`、
+> Anthropic 的 `cache_read_input_tokens`）。上游不传时不输出该字段、面板显示「—」，
+> 而不是伪造一个 0% ——「不知道」和「没命中」是两件事。
+>
+> 上游的前缀缓存**按账号隔离**，所以会话粘性直接决定命中率：同一段对话每轮换号，
+> 缓存必然全部未命中。粘性取 `X-Session-Id` / `X-Conversation-Id` / `session_id` /
+> `conversation_id` / `prompt_cache_key`；客户端一个都不发时，可开启「按首条消息兜底」
+> 用首条 user 消息派生绑定键（见设置页「调度」卡片）。
 
 ### 号池表格
 

@@ -41,6 +41,22 @@ func TestPutDispatchSettingsHotUpdates(t *testing.T) {
 	}
 }
 
+// 兜底粘性开关与其它调度项一样：热更新 + 持久化，且关闭是合法值。
+func TestPutDispatchSettingsAffinityFallback(t *testing.T) {
+	p, _ := newConcurrencyPanel(t)
+	_ = putSettings(t, p, `{"affinityFallback":false}`)
+	if p.engine.AffinityFallback() {
+		t.Fatal("兜底粘性未关闭")
+	}
+	if raw := p.st.GetSetting(t.Context(), "affinityFallback", "unset"); raw != "false" {
+		t.Fatalf("affinityFallback 未持久化，实际 %q", raw)
+	}
+	_ = putSettings(t, p, `{"affinityFallback":true}`)
+	if !p.engine.AffinityFallback() {
+		t.Fatal("兜底粘性未重新开启")
+	}
+}
+
 // 关闭开关是合法值，必须能保存成 false 而不是被当成「未提交」。
 func TestPutDispatchSettingsCanDisable(t *testing.T) {
 	p, _ := newConcurrencyPanel(t)
@@ -101,6 +117,7 @@ func TestApplyStoredDispatchSettings(t *testing.T) {
 	_ = p.st.SetSetting(ctx, "backoffBaseMS", "3000")
 	_ = p.st.SetSetting(ctx, "affinityEnabled", "false")
 	_ = p.st.SetSetting(ctx, "affinityTTLSec", "7200")
+	_ = p.st.SetSetting(ctx, "affinityFallback", "false")
 
 	p.applyStoredDispatchSettings(ctx)
 
@@ -115,6 +132,9 @@ func TestApplyStoredDispatchSettings(t *testing.T) {
 	}
 	if on, ttl := p.engine.AffinityPolicy(); on || ttl != 2*time.Hour {
 		t.Fatalf("会话粘性未恢复: on=%v ttl=%s", on, ttl)
+	}
+	if p.engine.AffinityFallback() {
+		t.Fatal("兜底粘性未恢复为关闭")
 	}
 }
 

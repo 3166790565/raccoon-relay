@@ -1628,6 +1628,7 @@ func (p *Panel) dispatchSettings() map[string]any {
 		"backoffMaxMS":     int(bo.Max.Milliseconds()),
 		"affinityEnabled":  affinity,
 		"affinityTTLSec":   int(ttl.Seconds()),
+		"affinityFallback": p.engine.AffinityFallback(),
 	}
 }
 
@@ -1684,6 +1685,9 @@ func (p *Panel) applyStoredDispatchSettings(ctx context.Context) {
 		ttl = time.Duration(n) * time.Second
 	}
 	p.engine.SetAffinityPolicy(affinity, ttl)
+	if b, ok := getBool("affinityFallback"); ok {
+		p.engine.SetAffinityFallback(b)
+	}
 }
 
 // applyDispatchSettings 校验并热更新调度参数，全部落地成功才写库。
@@ -1693,7 +1697,8 @@ func (p *Panel) applyStoredDispatchSettings(ctx context.Context) {
 func (p *Panel) applyDispatchSettings(ctx context.Context, body settingsBody) error {
 	if body.RetryDelayMS == nil && body.LeaseEnabled == nil && body.LeaseConcurrency == nil &&
 		body.LeaseTTLSec == nil && body.BackoffEnabled == nil && body.BackoffBaseMS == nil &&
-		body.BackoffMaxMS == nil && body.AffinityEnabled == nil && body.AffinityTTLSec == nil {
+		body.BackoffMaxMS == nil && body.AffinityEnabled == nil && body.AffinityTTLSec == nil &&
+		body.AffinityFallback == nil {
 		return nil
 	}
 
@@ -1760,11 +1765,16 @@ func (p *Panel) applyDispatchSettings(ctx context.Context, body settingsBody) er
 	if body.AffinityEnabled != nil {
 		affinity = *body.AffinityEnabled
 	}
+	affinityFallback := p.engine.AffinityFallback()
+	if body.AffinityFallback != nil {
+		affinityFallback = *body.AffinityFallback
+	}
 
 	p.engine.SetRetryDelay(time.Duration(retryDelay) * time.Millisecond)
 	p.po.SetLeaseConfig(lease)
 	p.po.SetBackoffPolicy(bo)
 	p.engine.SetAffinityPolicy(affinity, affinityTTL)
+	p.engine.SetAffinityFallback(affinityFallback)
 
 	_ = p.st.SetSetting(ctx, "retryDelayMS", strconv.Itoa(retryDelay))
 	_ = p.st.SetSetting(ctx, "leaseEnabled", strconv.FormatBool(lease.Enabled))
@@ -1775,6 +1785,7 @@ func (p *Panel) applyDispatchSettings(ctx context.Context, body settingsBody) er
 	_ = p.st.SetSetting(ctx, "backoffMaxMS", strconv.Itoa(int(bo.Max.Milliseconds())))
 	_ = p.st.SetSetting(ctx, "affinityEnabled", strconv.FormatBool(affinity))
 	_ = p.st.SetSetting(ctx, "affinityTTLSec", strconv.Itoa(int(affinityTTL.Seconds())))
+	_ = p.st.SetSetting(ctx, "affinityFallback", strconv.FormatBool(affinityFallback))
 	return nil
 }
 
@@ -1830,6 +1841,7 @@ type settingsBody struct {
 	BackoffMaxMS     *int  `json:"backoffMaxMS"`
 	AffinityEnabled  *bool `json:"affinityEnabled"`
 	AffinityTTLSec   *int  `json:"affinityTTLSec"`
+	AffinityFallback *bool `json:"affinityFallback"`
 
 	// 出站策略：指纹脱敏、开发者角色兼容、models.dev 元数据。
 	// sanitizeRules 三态：未给 = 不动；[] = 恢复内置词表；数组 = 自定义词表。

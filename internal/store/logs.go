@@ -61,8 +61,12 @@ type UsageLog struct {
 	PromptTokens     int64
 	CompletionTokens int64
 	TotalTokens      int64
-	MS               int64
-	Error            string
+	// CachedTokens 是输入中命中上游前缀缓存的 token 数。
+	// 0 与「上游没回传」在库里无法区分（没有额外的布尔列）：
+	// 报表只用「命中量 / 输入量」做展示，不据此断言缓存是否可用。
+	CachedTokens int64
+	MS           int64
+	Error        string
 }
 
 // UsageStatusCanceled 是「客户端在请求完成前断开」的流水状态码。
@@ -86,6 +90,7 @@ type UsageRow struct {
 	PromptTokens     int64  `json:"promptTokens"`
 	CompletionTokens int64  `json:"completionTokens"`
 	TotalTokens      int64  `json:"totalTokens"`
+	CachedTokens     int64  `json:"cachedTokens"`
 	MS               int64  `json:"ms"`
 	Error            string `json:"error"`
 }
@@ -191,7 +196,8 @@ func (s *Store) QueryUsage(ctx context.Context, f UsageFilter) ([]UsageRow, int6
 	}
 
 	sel := `SELECT u.id, u.ts, u.account_id, COALESCE(a.name, ''), COALESCE(a.uid, ''),
-		u.model, u.api, u.status, u.prompt_tokens, u.completion_tokens, u.total_tokens, u.ms, u.error` +
+		u.model, u.api, u.status, u.prompt_tokens, u.completion_tokens, u.total_tokens,
+		u.cached_tokens, u.ms, u.error` +
 		from + where + ` ORDER BY u.id DESC LIMIT ? OFFSET ?`
 	pageArgs := append(append([]any{}, args...), f.PageSize, int64(f.Page-1)*int64(f.PageSize))
 	rows, err := s.query(ctx, sel, pageArgs...)
@@ -205,7 +211,7 @@ func (s *Store) QueryUsage(ctx context.Context, f UsageFilter) ([]UsageRow, int6
 		var u UsageRow
 		if err := rows.Scan(&u.ID, &u.TS, &u.AccountID, &u.AccountName, &u.AccountUID,
 			&u.Model, &u.API, &u.Status, &u.PromptTokens, &u.CompletionTokens,
-			&u.TotalTokens, &u.MS, &u.Error); err != nil {
+			&u.TotalTokens, &u.CachedTokens, &u.MS, &u.Error); err != nil {
 			return nil, 0, 0, err
 		}
 		out = append(out, u)
@@ -269,15 +275,17 @@ func (s *Store) AddUsage(ctx context.Context, u UsageLog) error {
 		u.TS = time.Now().UnixMilli()
 	}
 	_, err := s.exec(ctx,
-		`INSERT INTO usage_logs (ts, account_id, model, api, status, prompt_tokens, completion_tokens, total_tokens, ms, error)
-		 VALUES (?,?,?,?,?,?,?,?,?,?)`,
-		u.TS, u.AccountID, u.Model, u.API, u.Status, u.PromptTokens, u.CompletionTokens, u.TotalTokens, u.MS, u.Error)
+		`INSERT INTO usage_logs (ts, account_id, model, api, status, prompt_tokens, completion_tokens, total_tokens, cached_tokens, ms, error)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+		u.TS, u.AccountID, u.Model, u.API, u.Status, u.PromptTokens, u.CompletionTokens, u.TotalTokens,
+		u.CachedTokens, u.MS, u.Error)
 	return err
 }
 
 func (s *Store) RecentUsage(ctx context.Context, limit int) ([]UsageLog, error) {
 	rows, err := s.query(ctx,
-		`SELECT ts, account_id, model, api, status, prompt_tokens, completion_tokens, total_tokens, ms, error
+		`SELECT ts, account_id, model, api, status, prompt_tokens, completion_tokens, total_tokens,
+			cached_tokens, ms, error
 		 FROM usage_logs ORDER BY id DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
@@ -287,7 +295,7 @@ func (s *Store) RecentUsage(ctx context.Context, limit int) ([]UsageLog, error) 
 	for rows.Next() {
 		var u UsageLog
 		if err := rows.Scan(&u.TS, &u.AccountID, &u.Model, &u.API, &u.Status,
-			&u.PromptTokens, &u.CompletionTokens, &u.TotalTokens, &u.MS, &u.Error); err != nil {
+			&u.PromptTokens, &u.CompletionTokens, &u.TotalTokens, &u.CachedTokens, &u.MS, &u.Error); err != nil {
 			return nil, err
 		}
 		out = append(out, u)

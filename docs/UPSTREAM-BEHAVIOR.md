@@ -95,6 +95,35 @@
   属于同一轮，不构成新 turn。
 - 目录里 `visible:false` 的模型保留在清单中（供显式映射），但不进 `/v1/models`。
 
+### 缓存命中与账号粘性
+
+上游的前缀缓存是**按账号隔离**的：同一段对话的每一轮如果换了号，缓存必然全 miss。
+所以命中率的第一决定因素不是请求体，而是「这几轮有没有落到同一个号上」。
+
+本地做两件事：
+
+1. **会话粘性**：显式会话键（`X-Session-Id` / `X-Conversation-Id` / `Session-Id` /
+   `session_key` / `session_id` / `conversation_id` / `prompt_cache_key`）→ 绑定账号，
+   TTL 内复用。`prompt_cache_key` 是 OpenAI SDK 的官方缓存路由字段，发往上游前会被删掉，
+   但本地拿它当会话键正是它的本意。
+2. **兜底粘性**（`SESSION_AFFINITY_FALLBACK`，默认开）：客户端一个键都不发时，
+   按**首条 user 消息**派生一个 `first-user:<文本>` 绑定键。大多数 SDK 默认不发会话键，
+   不兜底的话每次请求都按负载均衡换号，上游缓存永远命中不了。
+   代价是首条消息相同的不同对话会被当成同一段——这是刻意取舍，可在面板关掉。
+
+提示（`pool.PickHints`）随每次选号调用传入，**不放在 `Pool` 字段上**：池是全局单例，
+并发请求写同一个「本轮优先号」会互相覆盖。
+
+上游 usage 里的缓存字段两种方言都认，解析后统一到 `raccoon.Usage`：
+
+| 来源 | 字段 | 口径 |
+|---|---|---|
+| OpenAI | `prompt_tokens_details.cached_tokens` | `prompt_tokens` 已含缓存 |
+| Anthropic | `cache_read_input_tokens` / `cache_creation_input_tokens` | `input_tokens` **不含**缓存 |
+
+内部以 OpenAI 口径为准（输入含缓存），对外按各协议拆回去。上游没回传缓存字段时
+标记 `CacheReported=false`，三条协议都**不输出**缓存字段——「不知道」不能写成「命中 0」。
+
 ## 对外透出
 
 - 上游给了重置时刻时，错误响应带 `Retry-After: <秒>`。

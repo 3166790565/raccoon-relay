@@ -1449,6 +1449,7 @@ async function loadSettings() {
     $('setBackoffMaxMS').value = s.backoffMaxMS ?? 60000;
     $('setAffinityEnabled').value = String(s.affinityEnabled !== false);
     $('setAffinityTTLSec').value = s.affinityTTLSec ?? 86400;
+    $('setAffinityFallback').value = String(s.affinityFallback !== false);
     // 外部渠道基址：空 = 用内置默认。
     $('setAutoClawIntlBase').value = s.autoClawIntlBase || '';
     $('setAutoClawCNBase').value = s.autoClawCNBase || '';
@@ -1517,6 +1518,7 @@ $('saveDispatchBtn').addEventListener('click', async () => {
         backoffMaxMS: vals.setBackoffMaxMS,
         affinityEnabled: $('setAffinityEnabled').value === 'true',
         affinityTTLSec: vals.setAffinityTTLSec,
+        affinityFallback: $('setAffinityFallback').value === 'true',
       }),
     });
     $('dispatchMsg').textContent = '已保存，立即生效';
@@ -2408,6 +2410,14 @@ $('logColumnsBtn').addEventListener('click', (e) => {
   });
 });
 
+// cacheShare 把缓存命中量显示成「占输入的比例」。输入为 0 时退回绝对量，
+// 避免除零得出 NaN%。
+function cacheShare(cached, prompt) {
+  const p = Number(prompt) || 0;
+  if (p <= 0) return '—';
+  return `${((Number(cached) || 0) / p * 100).toFixed(1)}%`;
+}
+
 // 详情弹层：单条请求的完整信息，错误全文在这里展开（表格里只显示一行）。
 let LOG_ROWS = [];
 function openLogDetail(anchor) {
@@ -2427,6 +2437,7 @@ function openLogDetail(anchor) {
       ${kv('输入 token', String(l.promptTokens || 0))}
       ${kv('输出 token', String(l.completionTokens || 0))}
       ${kv('总 token', String(l.totalTokens || 0))}
+      ${l.cachedTokens ? kv('缓存命中', `${l.cachedTokens} token（输入占比 ${cacheShare(l.cachedTokens, l.promptTokens)}）`) : ''}
       ${l.error ? `<div class="ld-row col"><span class="ld-k">错误</span><pre class="ld-err">${esc(l.error)}</pre></div>` : ''}
     </div>
     <div class="pop-foot"><span class="hint">#${esc(l.id)}</span>
@@ -3522,6 +3533,13 @@ function renderReport() {
   // 8 个读数在 4 列网格里正好两行，第三行再放「延迟五连」。
   const successRate = o.requests ? rpPct(o.successRate) : '—';
   const top = s.models && s.models.length ? s.models[0] : null;
+  // 缓存命中率：只有上游确实回传了缓存字段（cachedTokens > 0）才展示比例。
+  // 上游不回传时这里是 0，但那代表「不知道」，显示 0% 会让用户误以为缓存失效，
+  // 所以显示破折号并在副标题说明。
+  const cachedTok = Number(o.cachedTokens) || 0;
+  const cacheCell = cachedTok > 0
+    ? [rpPct(o.cacheHitRate), `命中 ${rpFmtInt(cachedTok)} / 输入 ${rpFmtInt(o.promptTokens)}`, 'accent']
+    : ['—', '上游未回传缓存字段，或本区间未命中', ''];
   const kpis = [
     ['总 Token', rpFmtInt(o.tokens), `输入 ${rpFmtInt(o.promptTokens)} · 输出 ${rpFmtInt(o.completionTokens)}`, 'accent'],
     ['成功请求数', rpFmtInt(o.successful), `成功率 ${successRate}`, 'ok'],
@@ -3532,6 +3550,7 @@ function renderReport() {
     ['输出速度', (lat.tokenPerSec || 0) + ' tok/s', '峰值 ' + rpFmtMs(lat.maxMs), ''],
     ['活跃天数', String(o.activeDays || 0), `区间共 ${(s.trend || []).length} 天`, ''],
     ['当前连续天数', String(o.streak || 0), '含今天在内往前数', ''],
+    ['缓存命中率', cacheCell[0], cacheCell[1], cacheCell[2]],
   ];
   $('rpKpis').innerHTML = kpis.map(([k, v, sub, cls]) =>
     `<div class="rp-kpi ${cls}"><div class="k">${esc(k)}</div>` +
@@ -3549,6 +3568,7 @@ function renderReport() {
     `<div class="rp-kpi ${cls}"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></div>`).join('');
 
   // 报表页的 8 个 KPI 在 4 列网格里是两整行，容器类名跟着改一下。
+  // 9 个 KPI 现在占 3 行 × 4 列（末行 1 格），沿用 4 列网格即可。
   const kpiBox = $('rpKpis');
   if (kpiBox) kpiBox.classList.add('rp-kpis-8');
 

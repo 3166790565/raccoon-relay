@@ -224,6 +224,7 @@ func main() {
 	engine.Event = func(ev store.RuntimeEvent) { events.Emit(ev) }
 	engine.SetRetryDelay(time.Duration(cfg.RetryDelayMS) * time.Millisecond)
 	engine.SetAffinityPolicy(cfg.AffinityEnabled, time.Duration(cfg.AffinityTTLSec)*time.Second)
+	engine.SetAffinityFallback(cfg.AffinityFallback)
 	srv := relay.NewServer(cfg, st, engine, catalog)
 	// 并发闸门始终注入：面板里可能随时把上限从 0 改成非 0，
 	// 届时要能立刻生效，而不是等重启。上限为 0 时 acquireSlot 直接放行。

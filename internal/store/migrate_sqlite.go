@@ -95,6 +95,7 @@ type usageRow struct {
 	PromptTokens     int64
 	CompletionTokens int64
 	TotalTokens      int64
+	CachedTokens     int64
 	MS               int64
 	Error            string
 }
@@ -455,7 +456,16 @@ func columnExistsTx(ctx context.Context, tx *sql.Tx, table, column string) (bool
 }
 
 func readUsage(db *sql.DB) ([]usageRow, error) {
-	rows, err := db.Query(`SELECT id, ts, account_id, model, api, status, prompt_tokens, completion_tokens, total_tokens, ms, error FROM usage_logs ORDER BY id`)
+	// 逐列探测：老库可能停在 cached_tokens 之前。缺失列按 0 读，保证旧库仍能导出。
+	hasCached, err := columnExists(db, "usage_logs", "cached_tokens")
+	if err != nil {
+		return nil, err
+	}
+	cachedCol := "'0'"
+	if hasCached {
+		cachedCol = "cached_tokens"
+	}
+	rows, err := db.Query(`SELECT id, ts, account_id, model, api, status, prompt_tokens, completion_tokens, total_tokens, ` + cachedCol + `, ms, error FROM usage_logs ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -464,7 +474,7 @@ func readUsage(db *sql.DB) ([]usageRow, error) {
 	for rows.Next() {
 		var r usageRow
 		if err := rows.Scan(&r.ID, &r.TS, &r.AccountID, &r.Model, &r.API, &r.Status,
-			&r.PromptTokens, &r.CompletionTokens, &r.TotalTokens, &r.MS, &r.Error); err != nil {
+			&r.PromptTokens, &r.CompletionTokens, &r.TotalTokens, &r.CachedTokens, &r.MS, &r.Error); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -657,11 +667,11 @@ func (s *Store) insertDumpRows(ctx context.Context, tx *sql.Tx, d *sqliteDump) e
 			ph   []string
 		)
 		for _, r := range d.Usage[i:end] {
-			ph = append(ph, "(?,?,?,?,?,?,?,?,?,?,?)")
+			ph = append(ph, "(?,?,?,?,?,?,?,?,?,?,?,?)")
 			args = append(args, r.ID, r.TS, r.AccountID, r.Model, r.API, r.Status,
-				r.PromptTokens, r.CompletionTokens, r.TotalTokens, r.MS, r.Error)
+				r.PromptTokens, r.CompletionTokens, r.TotalTokens, r.CachedTokens, r.MS, r.Error)
 		}
-		q := `INSERT INTO usage_logs (id, ts, account_id, model, api, status, prompt_tokens, completion_tokens, total_tokens, ms, error) VALUES ` + joinStrings(ph, ",")
+		q := `INSERT INTO usage_logs (id, ts, account_id, model, api, status, prompt_tokens, completion_tokens, total_tokens, cached_tokens, ms, error) VALUES ` + joinStrings(ph, ",")
 		if _, err := s.execTx(ctx, tx, q, args...); err != nil {
 			return fmt.Errorf("导入 usage_logs: %w", err)
 		}

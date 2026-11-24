@@ -56,8 +56,10 @@ type Config struct {
 	BackoffBaseMS  int
 	BackoffMaxMS   int
 	// 会话粘性：同一段对话优先复用上次成功的账号。
-	AffinityEnabled  bool
-	AffinityTTLSec   int
+	AffinityEnabled bool
+	AffinityTTLSec  int
+	// 无显式会话键时按首条用户消息兜底粘性（见 relay.Engine.stickyKey）。
+	AffinityFallback bool
 	CheckinEnable    bool
 	CheckinHour      int
 	CheckinMinute    int
@@ -244,6 +246,7 @@ func Load() (*Config, error) {
 		BackoffMaxMS:     envInt("BACKOFF_MAX_MS", 60000),
 		AffinityEnabled:  envBool("SESSION_AFFINITY_ENABLE", true),
 		AffinityTTLSec:   envInt("SESSION_AFFINITY_TTL_SEC", 86400),
+		AffinityFallback: envBool("SESSION_AFFINITY_FALLBACK", true),
 		CheckinEnable:    envBool("CHECKIN_ENABLE", true),
 		CheckinHour:      envInt("CHECKIN_HOUR", 0),
 		CheckinMinute:    envInt("CHECKIN_MINUTE", 10),

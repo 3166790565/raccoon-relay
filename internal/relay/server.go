@@ -257,7 +257,15 @@ func (s *Server) buildChatContext(model string, body map[string]any, sessionKey 
 			return nil, &ModelDisabledError{Model: target}
 		}
 	}
-	return BuildChatContextWithRules(s.Rules, model, body, DefaultModel, sessionKey), nil
+	cc := BuildChatContextWithRules(s.Rules, model, body, DefaultModel, sessionKey)
+	// 客户端没给会话键时按首条用户消息兜底，让多轮请求仍落在同一个号上
+	// （上游前缀缓存按账号隔离，每轮换号等于把缓存全部作废）。
+	// 兜底键只用于粘性；SessionSeed 与发给上游的会话标识维持原样。
+	if s.engine != nil {
+		messages, _ := cc.Body["messages"].([]any)
+		cc.SessionKey = s.engine.stickyKey(cc.SessionKey, messages)
+	}
+	return cc, nil
 }
 
 // auth 从 Authorization 或 x-api-key 取 Key 并校验。
@@ -308,6 +316,7 @@ func (s *Server) logUsage(ctx context.Context, res Result, err error, start time
 	}
 	if usage != nil {
 		u.PromptTokens, u.CompletionTokens, u.TotalTokens = usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens
+		u.CachedTokens = usage.CachedTokens
 	}
 	// 异步写：每个请求同步 INSERT 在单连接 SQLite 上会排队等写锁。
 	s.st.AddUsageAsync(u)

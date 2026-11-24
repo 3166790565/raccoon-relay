@@ -99,7 +99,7 @@ func (p *Panel) handleReport(w http.ResponseWriter, r *http.Request) {
 
 	// 模型汇总：日×模型 → 区间总计。
 	modelTotals := map[string]*store.ModelUsage{}
-	var sumTokens, sumReq, sumOK, sumPrompt, sumCompletion int64
+	var sumTokens, sumReq, sumOK, sumPrompt, sumCompletion, sumCached int64
 	var modelTokens int64
 	for _, m := range models {
 		mu := modelTotals[m.Key]
@@ -118,6 +118,7 @@ func (p *Panel) handleReport(w http.ResponseWriter, r *http.Request) {
 		sumTokens += d.Tokens
 		sumPrompt += d.PromptTokens
 		sumCompletion += d.Completion
+		sumCached += d.CachedTokens
 	}
 	modelList := make([]store.ModelUsage, 0, len(modelTotals))
 	for _, mu := range modelTotals {
@@ -162,10 +163,14 @@ func (p *Panel) handleReport(w http.ResponseWriter, r *http.Request) {
 	overview := store.ReportTotals{
 		Requests: sumReq, Successful: sumOK, Tokens: sumTokens,
 		PromptTokens: sumPrompt, Completion: sumCompletion,
-		ActiveDays: store.ActiveDays(trend),
+		CachedTokens: sumCached,
+		ActiveDays:   store.ActiveDays(trend),
 	}
 	if sumReq > 0 {
 		overview.SuccessRate = float64(sumOK) / float64(sumReq) * 100
+	}
+	if sumPrompt > 0 {
+		overview.CacheHitRate = float64(sumCached) / float64(sumPrompt) * 100
 	}
 	if len(modelList) > 0 {
 		overview.TopModel = modelList[0].Model

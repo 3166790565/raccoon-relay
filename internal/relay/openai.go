@@ -154,10 +154,7 @@ func (s *sseWriter) Complete() {
 		_ = s.writeFrame(map[string]any{
 			"id": s.id, "object": "chat.completion.chunk", "created": s.created, "model": s.model,
 			"choices": []any{},
-			"usage": map[string]any{
-				"prompt_tokens": s.usage.PromptTokens, "completion_tokens": s.usage.CompletionTokens,
-				"total_tokens": s.usage.TotalTokens,
-			},
+			"usage":   openAIUsage(*s.usage),
 		})
 	}
 	_, _ = fmt.Fprint(s.w, "data: [DONE]\n\n")
@@ -261,11 +258,26 @@ func (a *aggWriter) Message() map[string]any {
 	}
 	usage := map[string]any{"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 	if a.usage != nil {
-		usage["prompt_tokens"] = a.usage.PromptTokens
-		usage["completion_tokens"] = a.usage.CompletionTokens
-		usage["total_tokens"] = a.usage.TotalTokens
+		usage = openAIUsage(*a.usage)
 	}
 	out["usage"] = usage
+	return out
+}
+
+// openAIUsage 生成 OpenAI 形态的 usage。
+//
+// 缓存字段只在**上游确实回传过**时才输出（CacheReported）：上游不说，
+// 我们不知道是命中 0 还是根本没缓存，伪造一个 0 会让客户端误判命中率为 0。
+// 输出的口径与 OpenAI 一致：prompt_tokens 含缓存部分，命中量单列在
+// prompt_tokens_details.cached_tokens。
+func openAIUsage(u raccoon.Usage) map[string]any {
+	out := map[string]any{
+		"prompt_tokens": u.PromptTokens, "completion_tokens": u.CompletionTokens,
+		"total_tokens": u.TotalTokens,
+	}
+	if u.CacheReported {
+		out["prompt_tokens_details"] = map[string]any{"cached_tokens": u.CachedTokens}
+	}
 	return out
 }
 

@@ -38,6 +38,18 @@ type Usage struct {
 	PromptTokens     int64
 	CompletionTokens int64
 	TotalTokens      int64
+	// CachedTokens 是本次输入中命中上游前缀缓存的 token 数。
+	// 不同上游的叫法不同：OpenAI 是 prompt_tokens_details.cached_tokens，
+	// Anthropic 是 cache_read_input_tokens，解析时统一到这里。
+	CachedTokens int64
+	// CacheCreationTokens 是本次写入缓存的 token 数（目前只有 Anthropic 口径有）。
+	CacheCreationTokens int64
+	// CacheReported 表示上游确实带回了缓存字段。
+	//
+	// 必须与 0 值分开：上游不回传缓存字段时，CachedTokens 也是 0，但那代表
+	// 「不知道」，不是「没命中」。伪造一个恒为 0 的命中率会误导下游，
+	// 所以对外只在 CacheReported 为真时才输出缓存字段。
+	CacheReported bool
 }
 
 // ChatEvent 是上游对话流的抽象：一个增量、或终帧的 usage / finish_reason。
@@ -313,11 +325,7 @@ func (s *ChatStream) Next() (*ChatEvent, error) {
 			}
 		}
 		if frame.Usage != nil {
-			ev.Usage = &Usage{
-				PromptTokens:     firstNonZero(frame.Usage.PromptTokens, frame.Usage.InputTokens),
-				CompletionTokens: firstNonZero(frame.Usage.CompletionTokens, frame.Usage.OutputTokens),
-				TotalTokens:      frame.Usage.TotalTokens,
-			}
+			ev.Usage = usageFromFrame(frame.Usage)
 			got = true
 		}
 		if got {
@@ -379,13 +387,24 @@ type streamFrame struct {
 		Message      map[string]any `json:"message"`
 		FinishReason *string        `json:"finish_reason"`
 	} `json:"choices"`
-	Usage *struct {
-		PromptTokens     int64 `json:"prompt_tokens"`
-		CompletionTokens int64 `json:"completion_tokens"`
-		TotalTokens      int64 `json:"total_tokens"`
-		InputTokens      int64 `json:"input_tokens"`
-		OutputTokens     int64 `json:"output_tokens"`
-	} `json:"usage"`
+	Usage *streamUsage `json:"usage"`
+}
+
+// streamUsage 是上游一帧里的 usage。两种方言的字段都收：
+// OpenAI 兼容上游给 prompt/completion/total，Anthropic 给 input/output。
+type streamUsage struct {
+	PromptTokens     int64 `json:"prompt_tokens"`
+	CompletionTokens int64 `json:"completion_tokens"`
+	TotalTokens      int64 `json:"total_tokens"`
+	InputTokens      int64 `json:"input_tokens"`
+	OutputTokens     int64 `json:"output_tokens"`
+	// OpenAI 形态的缓存明细。
+	PromptTokensDetails *struct {
+		CachedTokens int64 `json:"cached_tokens"`
+	} `json:"prompt_tokens_details"`
+	// Anthropic 形态直接挂在 usage 上。指针：区分「没有这个字段」与「为 0」。
+	CacheReadInputTokens     *int64 `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens *int64 `json:"cache_creation_input_tokens"`
 }
 
 // errorOf 把一帧判成上游错误，返回 nil 表示这是正常数据帧。
@@ -501,6 +520,55 @@ func firstNonZero(vals ...int64) int64 {
 		}
 	}
 	return 0
+}
+
+// usageFromFrame 把一帧 usage 归一成 relay 侧的结构体，含缓存明细。
+//
+// 缓存字段两种形态都认：OpenAI 塞在 prompt_tokens_details.cached_tokens，
+// Anthropic 直接给 cache_read_input_tokens / cache_creation_input_tokens。
+// 用指针区分「字段不存在」与「字段为 0」——前者是上游不回传（未知），
+// 后者才是真的没命中。
+func usageFromFrame(u *streamUsage) *Usage {
+	out := &Usage{
+		PromptTokens:     firstNonZero(u.PromptTokens, u.InputTokens),
+		CompletionTokens: firstNonZero(u.CompletionTokens, u.OutputTokens),
+		TotalTokens:      u.TotalTokens,
+	}
+	if u.PromptTokensDetails != nil {
+		out.CachedTokens = u.PromptTokensDetails.CachedTokens
+		out.CacheReported = true
+	}
+	// Anthropic 的 input_tokens **不含**缓存命中与写入的部分，二者单独列出。
+	// 归一到 OpenAI 口径（prompt_tokens 已含缓存）下游才好算命中率；
+	// 且 Anthropic 客户端看到的 input_tokens 才是「这次实际处理的全部输入」。
+	if u.CacheReadInputTokens != nil || u.CacheCreationInputTokens != nil {
+		var read, created int64
+		if u.CacheReadInputTokens != nil {
+			read = *u.CacheReadInputTokens
+			out.CachedTokens = read
+		}
+		if u.CacheCreationInputTokens != nil {
+			created = *u.CacheCreationInputTokens
+			out.CacheCreationTokens = created
+		}
+		if anthropicShape(u) {
+			out.PromptTokens += read + created
+			if out.TotalTokens > 0 {
+				out.TotalTokens += read + created
+			}
+		}
+		out.CacheReported = true
+	}
+	return out
+}
+
+// anthropicShape 判断这一帧是否是「Anthropic 口径」的 usage：
+// 带 input_tokens 而没有 OpenAI 的 prompt_tokens。
+//
+// 只有这个口径下 input_tokens 才不含缓存部分；OpenAI 兼容上游若同时下发
+// cache_read_input_tokens，prompt_tokens 里已经算过了，再加一遍会翻倍。
+func anthropicShape(u *streamUsage) bool {
+	return u.PromptTokens == 0 && u.InputTokens > 0
 }
 
 // codeFromBody 从错误体里取业务错误码。

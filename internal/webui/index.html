@@ -1125,6 +1125,12 @@
             </select>
           </div>
           <div class="field"><label>会话绑定时长（秒）</label><input type="number" id="setAffinityTTLSec" min="60" max="2592000"></div>
+          <div class="field"><label>无会话键时按首条消息兜底</label>
+            <select id="setAffinityFallback">
+              <option value="true">开启 · 客户端不发会话键也固定用同一个号</option>
+              <option value="false">关闭 · 没有会话键就每轮重新选号</option>
+            </select>
+          </div>
         </div>
         <p class="hint">这三项都在回答同一个问题：<strong>「一次请求在外部看起来是什么形态」</strong>。
           上游风控看的不是单个请求，而是同一账号一段时间内接了多少互不相干的请求。<br>
@@ -1137,8 +1143,12 @@
           时长从起点开始逐次翻倍、封顶上限。它<strong>不改变账号状态</strong>（面板上不会显示成停用），
           与「冷却」是两回事。调用成功即清空退避链。<br>
           <strong>会话粘性</strong>：从 <code>X-Session-Id</code> / <code>X-Conversation-Id</code> /
-          <code>session_id</code> / <code>conversation_id</code> 取会话标识，同一段对话优先复用上次成功的号；
-          该号失败时立即解绑，避免一直撞同一个号。取不到标识时粘性自动不生效。保存后立即生效。</p>
+          <code>session_id</code> / <code>conversation_id</code> / <code>prompt_cache_key</code> 取会话标识，
+          同一段对话优先复用上次成功的号；该号失败时立即解绑，避免一直撞同一个号。<br>
+          上游的前缀缓存<strong>按账号隔离</strong>：同一段对话每轮换号，缓存必然全部未命中。
+          所以客户端没给会话键时（大多数 SDK 默认都不发），开启「按首条消息兜底」会用
+          首条 user 消息派生一个绑定键，让多轮对话稳定落在同一个号上；关掉则退化为每轮重新选号。
+          首条消息相同的不同对话会被当成同一段，这是兜底机制的代价，介意就关闭它。保存后立即生效。</p>
         <button class="primary" id="saveDispatchBtn">保存调度设置</button>
         <p class="msg" id="dispatchMsg"></p>
       </section>

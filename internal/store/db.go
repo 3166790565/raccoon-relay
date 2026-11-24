@@ -370,11 +370,15 @@ func (s *Store) ensureAccountColumnsTx(ctx context.Context, tx *sql.Tx) error {
 type reportColumnPatch struct{ table, column, ddl string }
 
 var reportColumnPatches = []reportColumnPatch{
+	// usage_logs 的缓存命中列：老库的流水表没有这一列，补上后新流水才能写缓存。
+	{"usage_logs", "cached_tokens", `ALTER TABLE usage_logs ADD COLUMN cached_tokens BIGINT NOT NULL DEFAULT 0`},
 	{"request_daily", "prompt_tokens", `ALTER TABLE request_daily ADD COLUMN prompt_tokens BIGINT NOT NULL DEFAULT 0`},
 	{"request_daily", "completion_tokens", `ALTER TABLE request_daily ADD COLUMN completion_tokens BIGINT NOT NULL DEFAULT 0`},
+	{"request_daily", "cached_tokens", `ALTER TABLE request_daily ADD COLUMN cached_tokens BIGINT NOT NULL DEFAULT 0`},
 	{"request_daily_model", "successful", `ALTER TABLE request_daily_model ADD COLUMN successful BIGINT NOT NULL DEFAULT 0`},
 	{"request_daily_model", "prompt_tokens", `ALTER TABLE request_daily_model ADD COLUMN prompt_tokens BIGINT NOT NULL DEFAULT 0`},
 	{"request_daily_model", "completion_tokens", `ALTER TABLE request_daily_model ADD COLUMN completion_tokens BIGINT NOT NULL DEFAULT 0`},
+	{"request_daily_model", "cached_tokens", `ALTER TABLE request_daily_model ADD COLUMN cached_tokens BIGINT NOT NULL DEFAULT 0`},
 }
 
 func (s *Store) ensureReportColumns() error {

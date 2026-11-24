@@ -189,3 +189,56 @@ func TestSessionKeyOf(t *testing.T) {
 		t.Fatalf("取不到时应返回空串，实际 %q", got)
 	}
 }
+
+// prompt_cache_key 是 OpenAI SDK 的缓存路由字段：它必须能当会话键用，
+// 否则客户端想命中前缀缓存，我们却每轮换号。
+func TestSessionKeyOfPromptCacheKey(t *testing.T) {
+	req, _ := http.NewRequest("POST", "/", nil)
+	body := map[string]any{"prompt_cache_key": "tenant-abc"}
+	if got := SessionKeyOf(req, body); got != "tenant-abc" {
+		t.Fatalf("应把 prompt_cache_key 当会话键，实际 %q", got)
+	}
+	// 显式会话键优先于它。
+	if got := SessionKeyOf(req, map[string]any{"session_id": "s1", "prompt_cache_key": "p1"}); got != "s1" {
+		t.Fatalf("显式会话键应优先，实际 %q", got)
+	}
+}
+
+// 无会话键时的兜底粘性：按首条 user 消息派生，且开关关掉后不再兜底。
+func TestStickyKeyFallback(t *testing.T) {
+	e := &Engine{}
+	e.SetAffinityFallback(true)
+	msgs := []any{
+		map[string]any{"role": "system", "content": "sys"},
+		map[string]any{"role": "user", "content": "同一个问题"},
+		map[string]any{"role": "assistant", "content": "答"},
+		map[string]any{"role": "user", "content": "追问"},
+	}
+	k1 := e.stickyKey("", msgs)
+	k2 := e.stickyKey("", msgs)
+	if k1 == "" || k1 != k2 {
+		t.Fatalf("同样的首条消息应派生出稳定兜底键，k1=%q k2=%q", k1, k2)
+	}
+	if k1 == "同一个问题" {
+		t.Fatal("兜底键应带前缀，避免与客户端显式会话键撞车")
+	}
+	// 首条不同 → 不同键
+	k3 := e.stickyKey("", []any{map[string]any{"role": "user", "content": "另一个问题"}})
+	if k3 == k1 {
+		t.Fatal("不同首条消息不应共用同一个兜底键")
+	}
+	// 显式键优先
+	if got := e.stickyKey("explicit", msgs); got != "explicit" {
+		t.Fatalf("显式会话键应原样使用，实际 %q", got)
+	}
+	// 关掉兜底 → 无键时空
+	e.SetAffinityFallback(false)
+	if got := e.stickyKey("", msgs); got != "" {
+		t.Fatalf("兜底关闭时应返回空串，实际 %q", got)
+	}
+	// 完全没有 user 消息时也不兜底
+	e.SetAffinityFallback(true)
+	if got := e.stickyKey("", []any{map[string]any{"role": "system", "content": "s"}}); got != "" {
+		t.Fatalf("没有 user 消息时不应兜底，实际 %q", got)
+	}
+}

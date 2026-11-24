@@ -125,6 +125,7 @@ var sqliteSchema = []string{
 		prompt_tokens     INTEGER NOT NULL DEFAULT 0,
 		completion_tokens INTEGER NOT NULL DEFAULT 0,
 		total_tokens      INTEGER NOT NULL DEFAULT 0,
+		cached_tokens     INTEGER NOT NULL DEFAULT 0,
 		ms                INTEGER NOT NULL DEFAULT 0,
 		error             TEXT NOT NULL DEFAULT ''
 	)`,
@@ -140,7 +141,8 @@ var sqliteSchema = []string{
 		successful        INTEGER NOT NULL DEFAULT 0,
 		tokens            INTEGER NOT NULL DEFAULT 0,
 		prompt_tokens     INTEGER NOT NULL DEFAULT 0,
-		completion_tokens INTEGER NOT NULL DEFAULT 0
+		completion_tokens INTEGER NOT NULL DEFAULT 0,
+		cached_tokens     INTEGER NOT NULL DEFAULT 0
 	)`,
 	// 按「天 × 模型」的分解，报表的模型 Top N 与趋势图选维度都读它。
 	`CREATE TABLE IF NOT EXISTS request_daily_model (
@@ -151,6 +153,7 @@ var sqliteSchema = []string{
 		tokens            INTEGER NOT NULL DEFAULT 0,
 		prompt_tokens     INTEGER NOT NULL DEFAULT 0,
 		completion_tokens INTEGER NOT NULL DEFAULT 0,
+		cached_tokens     INTEGER NOT NULL DEFAULT 0,
 		PRIMARY KEY (day, model)
 	)`,
 	// 按「天 × 出站协议」的分解（openai / anthropic / responses），
@@ -340,6 +343,7 @@ var pgSchema = []string{
 		prompt_tokens     BIGINT NOT NULL DEFAULT 0,
 		completion_tokens BIGINT NOT NULL DEFAULT 0,
 		total_tokens      BIGINT NOT NULL DEFAULT 0,
+		cached_tokens     BIGINT NOT NULL DEFAULT 0,
 		ms                BIGINT NOT NULL DEFAULT 0,
 		error             TEXT NOT NULL DEFAULT ''
 	)`,
@@ -353,7 +357,8 @@ var pgSchema = []string{
 		successful        BIGINT NOT NULL DEFAULT 0,
 		tokens            BIGINT NOT NULL DEFAULT 0,
 		prompt_tokens     BIGINT NOT NULL DEFAULT 0,
-		completion_tokens BIGINT NOT NULL DEFAULT 0
+		completion_tokens BIGINT NOT NULL DEFAULT 0,
+		cached_tokens     BIGINT NOT NULL DEFAULT 0
 	)`,
 	`CREATE TABLE IF NOT EXISTS request_daily_model (
 		day               TEXT NOT NULL,
@@ -363,6 +368,7 @@ var pgSchema = []string{
 		tokens            BIGINT NOT NULL DEFAULT 0,
 		prompt_tokens     BIGINT NOT NULL DEFAULT 0,
 		completion_tokens BIGINT NOT NULL DEFAULT 0,
+		cached_tokens     BIGINT NOT NULL DEFAULT 0,
 		PRIMARY KEY (day, model)
 	)`,
 	`CREATE TABLE IF NOT EXISTS request_daily_api (

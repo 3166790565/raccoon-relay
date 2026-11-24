@@ -212,9 +212,28 @@ func (a *anthropicSSE) Complete() {
 	_ = a.emit("message_delta", map[string]any{
 		"type":  "message_delta",
 		"delta": map[string]any{"stop_reason": stop, "stop_sequence": nil},
-		"usage": map[string]any{"output_tokens": a.usage.CompletionTokens},
+		"usage": anthropicUsage(a.usage),
 	})
 	_ = a.emit("message_stop", map[string]any{"type": "message_stop"})
+}
+
+// anthropicUsage 生成 Anthropic 形态的 usage（message_delta 用）。
+//
+// Anthropic 客户端的缓存命中率读的就是 cache_read_input_tokens；
+// 不输出这个字段，客户端永远算不出命中。口径按 Anthropic 官方定义：
+// input_tokens **不含**缓存读写，命中与写入各自单列。我们内部的 Usage
+// 已归一到 OpenAI 口径（input 含缓存），这里再拆回去。
+func anthropicUsage(u raccoon.Usage) map[string]any {
+	input := u.PromptTokens - u.CachedTokens - u.CacheCreationTokens
+	if input < 0 {
+		input = 0
+	}
+	out := map[string]any{"input_tokens": input, "output_tokens": u.CompletionTokens}
+	if u.CacheReported {
+		out["cache_read_input_tokens"] = u.CachedTokens
+		out["cache_creation_input_tokens"] = u.CacheCreationTokens
+	}
+	return out
 }
 
 func mapAnthropicStop(reason string, hasTool bool) string {
@@ -313,8 +332,6 @@ func (a *anthropicAgg) Message() map[string]any {
 	return map[string]any{
 		"id": a.id, "type": "message", "role": "assistant", "model": a.model,
 		"content": content, "stop_reason": stop, "stop_sequence": nil,
-		"usage": map[string]any{
-			"input_tokens": a.usage.PromptTokens, "output_tokens": a.usage.CompletionTokens,
-		},
+		"usage": anthropicUsage(a.usage),
 	}
 }
