@@ -25,6 +25,11 @@ const (
 const (
 	ProviderRaccoon   = "raccoon"   // 商汤小浣熊（xiaohuanxiong.com）
 	ProviderSenseNova = "sensenova" // 商汤日日新 Token Plan（platform.sensenova.cn）
+
+	// 以下两个渠道已整体移除，常量只用于识别历史库里遗留的账号行，
+	// 让它们在面板上显示成「渠道已下线」而不是伪装成小浣熊。不要用于新建账号。
+	ProviderAutoClaw = "autoclaw" // 智谱 AutoClaw（已下线）
+	ProviderCodeArts = "codearts" // 华为云码道 CodeArts（已下线）
 )
 
 // Account 是对外的完整账号视图。Token 字段在 List/Get 时会解密好返回。
@@ -84,6 +89,12 @@ func (a *Account) ProviderName() string {
 	switch a.Provider {
 	case ProviderSenseNova:
 		return "日日新"
+	case ProviderAutoClaw:
+		// 渠道已下线，但历史库里的行仍要显示成它本来的样子，
+		// 不能让用户以为这是一台还能用的小浣熊号。
+		return "AutoClaw（已下线）"
+	case ProviderCodeArts:
+		return "码道 CodeArts（已下线）"
 	}
 	return "小浣熊"
 }
@@ -510,6 +521,9 @@ func (s *Store) deleteAccountRows(ctx context.Context, tx *sql.Tx, id string) er
 // 积分耗尽（exhausted）不算：它会在下一次签到补分时自动复活，删了就再也回不来。
 // 冷却（cooling）更不算，那只是临时限流。
 func (a *Account) DeadReason(nowMS int64) string {
+	if !a.Supported() {
+		return "渠道已下线"
+	}
 	if a.Status == StatusRelogin {
 		return "凭证失效"
 	}
@@ -517,6 +531,20 @@ func (a *Account) DeadReason(nowMS int64) string {
 		return "订阅已过期"
 	}
 	return ""
+}
+
+// Supported 判断该账号的供应商是否仍受支持。
+//
+// AutoClaw 与码道 CodeArts 两个渠道已整体移除，但升级前入库的账号行还在库里。
+// 它们不会参与选号（providerForModel 只会给出小浣熊或日日新），如果不在这里
+// 拦一道，面板会按「未知供应商回落成小浣熊」的旧逻辑把它们显示成正常的小浣熊
+// 账号——看着能用，实际永远不会被选中。所以统一当成已失效，交给清理流程处理。
+func (a *Account) Supported() bool {
+	switch a.Provider {
+	case "", ProviderRaccoon, ProviderSenseNova:
+		return true
+	}
+	return false
 }
 
 // DeadAccount 是待清理账号的最小视图，供面板预览与确认。

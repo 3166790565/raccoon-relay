@@ -248,6 +248,11 @@ func (p *Pool) pick(ctx context.Context, model, wantProvider string,
 		if !a.Enabled || excluded[a.ID] {
 			continue
 		}
+		// 已下线渠道的历史账号不参与选号。正常情况下 provider 过滤已经挡掉了，
+		// 这里再挡一次，不依赖「provider 路由恰好不会给出这个值」这一巧合。
+		if !a.Supported() {
+			continue
+		}
 		if wantProvider != "" && aProvider(a) != wantProvider {
 			continue
 		}
@@ -393,6 +398,11 @@ func (p *Pool) NextAvailableIn(ctx context.Context, model, wantProvider string, 
 		if !a.Enabled || excluded[a.ID] {
 			continue
 		}
+		// 已下线渠道的历史账号不参与选号。正常情况下 provider 过滤已经挡掉了，
+		// 这里再挡一次，不依赖「provider 路由恰好不会给出这个值」这一巧合。
+		if !a.Supported() {
+			continue
+		}
 		if wantProvider != "" && aProvider(a) != wantProvider {
 			continue
 		}
@@ -473,6 +483,11 @@ func (p *Pool) pickProbe(ctx context.Context, model, wantProvider string, exclud
 	bestUntil := int64(0)
 	for _, a := range accounts {
 		if !a.Enabled || excluded[a.ID] {
+			continue
+		}
+		// 已下线渠道的历史账号不参与选号。正常情况下 provider 过滤已经挡掉了，
+		// 这里再挡一次，不依赖「provider 路由恰好不会给出这个值」这一巧合。
+		if !a.Supported() {
 			continue
 		}
 		if wantProvider != "" && aProvider(a) != wantProvider {

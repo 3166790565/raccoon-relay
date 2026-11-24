@@ -407,6 +407,9 @@ function renderSNQuotaCell(a) {
 const PROVIDER_META = {
   raccoon: { label: '小浣熊', emoji: '🦝', sub: '商汤小浣熊 · xiaohuanxiong.com' },
   sensenova: { label: '日日新', emoji: '🌊', sub: '商汤日日新 Token Plan · platform.sensenova.cn' },
+  // 两个已下线的渠道：升级前入库的号还在库里，分组要能认出来并说清为什么不能用。
+  autoclaw: { label: 'AutoClaw', emoji: '🦾', sub: '渠道已下线 · 请用「清理失效」移除' },
+  codearts: { label: '码道 CodeArts', emoji: '☁️', sub: '渠道已下线 · 请用「清理失效」移除' },
 };
 
 function providerOf(a) { return a.provider || 'raccoon'; }
@@ -441,7 +444,7 @@ function renderAccounts() {
     const p = providerOf(a);
     (groups[p] = groups[p] || []).push(a);
   });
-  const order = ['raccoon', 'sensenova'].filter((p) => groups[p]);
+  const order = ['raccoon', 'sensenova', 'autoclaw', 'codearts'].filter((p) => groups[p]);
   // 其它未知供应商追加在后面，避免数据里的新值凭空消失。
   Object.keys(groups).forEach((p) => { if (!order.includes(p)) order.push(p); });
 

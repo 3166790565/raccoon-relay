@@ -56,6 +56,49 @@ func TestListDeadAccounts(t *testing.T) {
 	}
 }
 
+// 已下线渠道的历史账号要算失效：它们不参与选号，留在列表里只会让用户
+// 以为这是一台还能用的小浣熊号。清理入口应当能把它们一起收走。
+func TestDeadAccountsIncludeRemovedProviders(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	now := time.Now().UnixMilli()
+
+	seedAcc(t, s, "rac", nil)
+	seedAcc(t, s, "ext", func(a *Account) {
+		a.Provider = ProviderAutoClaw
+		a.Status = StatusOnline
+	})
+	seedAcc(t, s, "ca", func(a *Account) {
+		a.Provider = ProviderCodeArts
+		a.Status = StatusOnline
+	})
+
+	dead, err := s.ListDeadAccounts(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, d := range dead {
+		got[d.UID] = d.Reason
+	}
+	if len(got) != 2 || got["ext"] != "渠道已下线" || got["ca"] != "渠道已下线" {
+		t.Fatalf("已下线渠道应计入失效，实际 %v", got)
+	}
+	if _, ok := got["rac"]; ok {
+		t.Fatal("正常小浣熊号不该被列为失效")
+	}
+
+	// 面板上的名字不能回落成「小浣熊」，否则会被当成可用号。
+	for _, uid := range []string{"ext", "ca"} {
+		list, _ := s.ListAccounts(ctx)
+		for _, a := range list {
+			if a.UID == uid && a.ProviderName() == "小浣熊" {
+				t.Fatalf("%s 的显示名回落成了小浣熊", uid)
+			}
+		}
+	}
+}
+
 // 删除必须连带清掉冷却与签到记录，不能留下孤儿行。
 func TestPurgeDeadAccountsCleansDependents(t *testing.T) {
 	ctx := context.Background()
