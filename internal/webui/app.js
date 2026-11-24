@@ -368,39 +368,9 @@ function renderSNQuotaCell(a) {
   </div>`;
 }
 
-// 外部渠道额度列：AutoClaw 是纯余额，码道是「剩余/总量」的积分桶（外加免费日额度）。
-// 两家都从后端带回一个小的 extQuota 摘要，没同步过就显示「未同步」。
-function renderExtQuotaCell(a) {
-  const q = a.extQuota;
-  if (!q) {
-    return `<div class="quota sn-quota"><span class="q-val dim">未同步额度</span>
-      <span class="q-label">${a.snPoolAt ? '上次查询 ' + fmtTime(a.snPoolAt) : '点「查额度」拉取'}</span></div>`;
-  }
-  const codearts = a.provider === 'codearts';
-  const total = Number(q.total);
-  const remain = Number(codearts ? q.remain : q.total);
-  const known = Number.isFinite(total) && total >= 0;
-  const pct = known && total > 0 ? Math.max(2, Math.min(100, Math.round((remain / total) * 100))) : 100;
-  const low = pct <= 15;
-  const label = known
-    ? (codearts ? `${fmtCredits(Math.round(remain))} / ${fmtCredits(Math.round(total))}` : `${fmtCredits(Math.round(remain))} 积分`)
-    : '未知';
-  const daily = codearts && Number(q.dailyLimit) > 0
-    ? `<span class="q-label">免费 ${fmtCredits(Math.round(Number(q.dailyLimit) - Number(q.dailyUsed || 0)))} tokens</span>`
-    : '';
-  return `<div class="quota">
-    <div class="q-row"><span class="q-val ${low ? 'bad' : known ? 'ok' : 'dim'}">${label}</span></div>
-    <span class="mini-bar ${low ? 'low' : ''}"><i style="width:${pct}%"></i></span>
-    ${daily}
-    <span class="q-label">${a.snPoolAt ? '更新于 ' + fmtTime(a.snPoolAt) : ''}${q.plan ? ' · ' + esc(q.plan) : ''}</span>
-  </div>`;
-}
-
 const PROVIDER_META = {
   raccoon: { label: '小浣熊', emoji: '🦝', sub: '商汤小浣熊 · xiaohuanxiong.com' },
   sensenova: { label: '日日新', emoji: '🌊', sub: '商汤日日新 Token Plan · platform.sensenova.cn' },
-  autoclaw: { label: 'AutoClaw', emoji: '🦾', sub: '智谱 AutoClaw · autoglm-api.autoglm.ai / zhipuai.cn' },
-  codearts: { label: '码道 CodeArts', emoji: '☁️', sub: '华为云码道 · snap-access.myhuaweicloud.com' },
 };
 
 function providerOf(a) { return a.provider || 'raccoon'; }
@@ -435,7 +405,7 @@ function renderAccounts() {
     const p = providerOf(a);
     (groups[p] = groups[p] || []).push(a);
   });
-  const order = ['raccoon', 'sensenova', 'autoclaw', 'codearts'].filter((p) => groups[p]);
+  const order = ['raccoon', 'sensenova'].filter((p) => groups[p]);
   // 其它未知供应商追加在后面，避免数据里的新值凭空消失。
   Object.keys(groups).forEach((p) => { if (!order.includes(p)) order.push(p); });
 
@@ -509,20 +479,14 @@ function renderAccountRow(a, i) {
   }
 
   // 余额/额度列按供应商分派：日日新是池×窗口，小浣熊是单一积分。
-  const quotaCell = sn ? renderSNQuotaCell(a) : (a.provider === 'autoclaw' || a.provider === 'codearts')
-    ? renderExtQuotaCell(a) : renderQuotaCell(a);
+  const quotaCell = sn ? renderSNQuotaCell(a) : renderQuotaCell(a);
   const quotaTitle = sn
     ? (a.snPoolAt ? '额度更新于 ' + fmtTime(a.snPoolAt) : '尚未同步额度')
     : (a.creditsAt ? '余额更新于 ' + fmtTime(a.creditsAt) : '');
   // 日日新的「凭证」列显示控制台账号 + 登录票状态；小浣熊没有这个概念。
-  // 外部渠道显示站点与临时凭据到期时刻。
   let subExtra = '';
   if (sn) {
     subExtra = ` · ${a.snTokenValid ? '登录票有效' : '登录票失效'}${a.snUser ? ' · ' + esc(a.snUser) : ''}`;
-  } else if (a.provider === 'autoclaw' || a.provider === 'codearts') {
-    const site = a.extSite === 'cn' ? '国内站' : '国际站';
-    const exp = a.extTokenExp ? ` · 凭据至 ${fmtTime(a.extTokenExp)}` : '';
-    subExtra = ` · ${site}${exp}${a.hasExtRefresh ? '' : ' · 无续期材料'}`;
   }
 
   return `<tr data-id="${esc(a.id)}" data-provider="${esc(providerOf(a))}" class="${checked ? 'sel' : ''}">
@@ -616,8 +580,6 @@ function renderPoolStats() {
   const limited = STATE.accounts.filter(isLimited).length;
   const raccoonN = STATE.accounts.filter((a) => providerOf(a) === 'raccoon').length;
   const snN = STATE.accounts.filter((a) => providerOf(a) === 'sensenova').length;
-  const acN = STATE.accounts.filter((a) => providerOf(a) === 'autoclaw').length;
-  const caN = STATE.accounts.filter((a) => providerOf(a) === 'codearts').length;
   const setB = (sel, vals) => {
     const btns = document.querySelectorAll(sel + ' button');
     btns.forEach((b, i) => {
@@ -625,7 +587,7 @@ function renderPoolStats() {
       if (b2) b2.textContent = vals[i] ?? 0;
     });
   };
-  setB('#pfProvider', [total, raccoonN, snN, acN, caN]);
+  setB('#pfProvider', [total, raccoonN, snN]);
   setB('#pfStatus', [total, enabled, total - enabled]);
   setB('#pfCool', [total, total - limited, limited]);
 }
@@ -885,7 +847,6 @@ function openRowMenu(anchor, id) {
   const sn = providerOf(acc) === 'sensenova';
   // 日日新没有「签到」也没有小浣熊那套 refresh_token：「刷新凭据」对它
   // 的实际含义是重登控制台、补建 API Key——保留按钮但改名，避免误操作。
-  // 外部渠道有每日签到，「刷新凭据」是续期临时凭据。
   const el = openPop(anchor, `
     <div class="pop-menu">
       <button data-m="balance">${sn ? '查额度' : '查余额'}</button>
@@ -927,12 +888,7 @@ function openAccountSettings(id) {
           ? `控制台账号：${esc(acc.snUser || '未记录')}<br>
              登录票：${acc.snTokenValid ? '有效' : '已失效（转发或查额度时会自动重登）'}<br>
              额度：${acc.snPoolAt ? '更新于 ' + fmtTime(acc.snPoolAt) : '尚未同步'}<br>`
-          : (providerOf(acc) === 'autoclaw' || providerOf(acc) === 'codearts')
-            ? `站点：${acc.extSite === 'cn' ? '国内站' : '国际站'}<br>
-               临时凭据：${acc.extTokenExp ? '至 ' + fmtTime(acc.extTokenExp) : '未知'}${acc.hasExtRefresh ? '（可自动续期）' : '（无续期材料，到期需重新导入）'}<br>
-               额度：${acc.snPoolAt ? '更新于 ' + fmtTime(acc.snPoolAt) : '尚未同步'}<br>
-               今日签到：${STATE.today && acc.lastCheckinDay === STATE.today ? '已签到' : esc(acc.lastCheckinDay || '未签到')}<br>`
-            : `今日签到：${STATE.today && acc.lastCheckinDay === STATE.today ? '已签到' : esc(acc.lastCheckinDay || '未签到')}<br>`}
+          : `今日签到：${STATE.today && acc.lastCheckinDay === STATE.today ? '已签到' : esc(acc.lastCheckinDay || '未签到')}<br>`}
         并发上限：该号同时最多接几个请求，达到后新请求会落到别的号；0 表示不单独限制。<br>
         优先级：数值大的先被选中（两种选号策略都生效）。想让主力号先用光再切备用号，就给主力号设更高的值。</p>
     </div>
@@ -996,10 +952,8 @@ async function accountAction(act, id) {
       const r = await api(`/api/accounts/${encodeURIComponent(id)}/balance`, { method: 'POST' });
       const p = providerOf(acc);
       toast(p === 'sensenova' ? `额度已同步 · 主池剩余 ${fmtCredits(r.credits)}`
-        : p === 'autoclaw' ? `余额 ${fmtCredits(r.credits)} 积分`
-        : p === 'codearts' ? `剩余 ${fmtCredits(r.credits)} 积分`
         : `余额 ${fmtCredits(r.credits)} 积分`);
-    } else if (act === 'refresh' && (providerOf(acc) === 'sensenova' || providerOf(acc) === 'autoclaw' || providerOf(acc) === 'codearts')) {
+    } else if (act === 'refresh' && providerOf(acc) === 'sensenova') {
       const r = await api(`/api/accounts/${encodeURIComponent(id)}/refresh`, { method: 'POST' });
       toast(r.message || '已完成');
     } else {
@@ -1261,74 +1215,6 @@ $('snAddBtn').addEventListener('click', async () => {
   }
 });
 
-// AutoClaw：粘贴凭据导入（国际站/国内站均可）。
-$('acImportBtn').addEventListener('click', async () => {
-  const body = {
-    credential: $('acCred').value.trim(),
-    site: $('acSite').value,
-    name: $('acName').value.trim(),
-  };
-  if (!body.credential) { $('acMsg').textContent = '凭据不能为空'; return; }
-  $('acMsg').textContent = '导入中…';
-  try {
-    const r = await api('/api/auth/autoclaw', { method: 'POST', body: JSON.stringify(body) });
-    $('acMsg').textContent = r.message + (r.uid ? `（账号 ${shortUID(r.uid)}）` : '');
-    if (r.ok) {
-      $('acCred').value = ''; $('acName').value = '';
-      await Promise.all([loadAccounts(), loadStatus()]);
-    }
-  } catch (e) { $('acMsg').textContent = e.message; }
-});
-
-// AutoClaw 国内站：发验证码。
-$('acSendCodeBtn').addEventListener('click', async () => {
-  const phone = $('acPhone').value.trim();
-  if (!phone) { $('acLoginMsg').textContent = '请先填手机号'; return; }
-  $('acLoginMsg').textContent = '发送中…';
-  try {
-    const r = await api('/api/auth/autoclaw/send-code', { method: 'POST', body: JSON.stringify({ phone }) });
-    $('acLoginMsg').textContent = r.message || '验证码已发送';
-  } catch (e) { $('acLoginMsg').textContent = e.message; }
-});
-
-// AutoClaw 国内站：手机验证码登录。
-$('acLoginBtn').addEventListener('click', async () => {
-  const body = {
-    phone: $('acPhone').value.trim(),
-    code: $('acCode').value.trim(),
-    name: $('acName').value.trim(),
-  };
-  if (!body.phone || !body.code) { $('acLoginMsg').textContent = '手机号和验证码都要填'; return; }
-  $('acLoginMsg').textContent = '登录中…';
-  try {
-    const r = await api('/api/auth/autoclaw/login', { method: 'POST', body: JSON.stringify(body) });
-    $('acLoginMsg').textContent = r.message + (r.uid ? `（账号 ${shortUID(r.uid)}）` : '');
-    if (r.ok) {
-      ['acPhone', 'acCode', 'acName'].forEach((id) => { $(id).value = ''; });
-      await Promise.all([loadAccounts(), loadStatus()]);
-    }
-  } catch (e) { $('acLoginMsg').textContent = e.message; }
-});
-
-// 码道 CodeArts：粘贴凭据 JSON 导入。
-$('caImportBtn').addEventListener('click', async () => {
-  const body = {
-    credential: $('caCred').value.trim(),
-    site: $('caSite').value,
-    name: $('caName').value.trim(),
-  };
-  if (!body.credential) { $('caMsg').textContent = '凭据不能为空'; return; }
-  $('caMsg').textContent = '导入中…';
-  try {
-    const r = await api('/api/auth/codearts', { method: 'POST', body: JSON.stringify(body) });
-    $('caMsg').textContent = r.message + (r.uid ? `（账号 ${shortUID(r.uid)}）` : '');
-    if (r.ok) {
-      $('caCred').value = ''; $('caName').value = '';
-      await Promise.all([loadAccounts(), loadStatus()]);
-    }
-  } catch (e) { $('caMsg').textContent = e.message; }
-});
-
 $('importFile').addEventListener('change', async (e) => {
   const f = e.target.files && e.target.files[0];
   if (!f) return;
@@ -1450,37 +1336,12 @@ async function loadSettings() {
     $('setAffinityEnabled').value = String(s.affinityEnabled !== false);
     $('setAffinityTTLSec').value = s.affinityTTLSec ?? 86400;
     $('setAffinityFallback').value = String(s.affinityFallback !== false);
-    // 外部渠道基址：空 = 用内置默认。
-    $('setAutoClawIntlBase').value = s.autoClawIntlBase || '';
-    $('setAutoClawCNBase').value = s.autoClawCNBase || '';
-    $('setAutoClawCNManagedBase').value = s.autoClawCNManagedBase || '';
-    $('setCodeArtsMainlandBase').value = s.codeArtsMainlandBase || '';
-    $('setCodeArtsIntlBase').value = s.codeArtsIntlBase || '';
     // 网关出站改写与 models.dev（同一份 /api/settings 里的字段）
     if (typeof applyGatewayState === 'function') applyGatewayState(s);
   } catch (e) {
     $('settingsMsg').textContent = e.message;
   }
 }
-
-// 外部渠道设置单独保存：只提交本卡片字段。
-$('saveExternalBtn').addEventListener('click', async () => {
-  const body = {
-    autoClawIntlBase: $('setAutoClawIntlBase').value.trim(),
-    autoClawCNBase: $('setAutoClawCNBase').value.trim(),
-    autoClawCNManagedBase: $('setAutoClawCNManagedBase').value.trim(),
-    codeArtsMainlandBase: $('setCodeArtsMainlandBase').value.trim(),
-    codeArtsIntlBase: $('setCodeArtsIntlBase').value.trim(),
-  };
-  $('externalMsg').textContent = '保存中…';
-  try {
-    await api('/api/settings', { method: 'PUT', body: JSON.stringify(body) });
-    $('externalMsg').textContent = '已保存（留空的项使用内置默认地址）';
-    toast('外部渠道设置已保存');
-  } catch (e) {
-    $('externalMsg').textContent = e.message;
-  }
-});
 
 // 调度设置单独保存：只提交本卡片字段。
 $('saveDispatchBtn').addEventListener('click', async () => {

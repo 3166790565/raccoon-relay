@@ -305,13 +305,6 @@ var accountAddedColumns = []struct{ name, ddl string }{
 	{"sn_refresh_token", `ALTER TABLE accounts ADD COLUMN sn_refresh_token TEXT NOT NULL DEFAULT ''`},
 	{"sn_pool", `ALTER TABLE accounts ADD COLUMN sn_pool TEXT NOT NULL DEFAULT ''`},
 	{"sn_pool_at", `ALTER TABLE accounts ADD COLUMN sn_pool_at %INTEGER_OR_BIGINT% NOT NULL DEFAULT 0`},
-	{"ext_token", `ALTER TABLE accounts ADD COLUMN ext_token TEXT NOT NULL DEFAULT ''`},
-	{"ext_token_exp", `ALTER TABLE accounts ADD COLUMN ext_token_exp %INTEGER_OR_BIGINT% NOT NULL DEFAULT 0`},
-	{"ext_refresh_token", `ALTER TABLE accounts ADD COLUMN ext_refresh_token TEXT NOT NULL DEFAULT ''`},
-	{"ext_refresh_exp", `ALTER TABLE accounts ADD COLUMN ext_refresh_exp %INTEGER_OR_BIGINT% NOT NULL DEFAULT 0`},
-	{"ext_site", `ALTER TABLE accounts ADD COLUMN ext_site TEXT NOT NULL DEFAULT ''`},
-	{"ext_extra", `ALTER TABLE accounts ADD COLUMN ext_extra TEXT NOT NULL DEFAULT ''`},
-	{"ext_rev", `ALTER TABLE accounts ADD COLUMN ext_rev %INTEGER_OR_BIGINT% NOT NULL DEFAULT 0`},
 }
 
 // intType 按方言给时间戳类型：Postgres 必须 BIGINT，SQLite 用 INTEGER 即可。

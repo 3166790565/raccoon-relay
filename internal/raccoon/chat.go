@@ -257,7 +257,6 @@ type ChatStream struct {
 	err   error
 
 	// OnEvent 是可选的事件改写钩子：在事件返回给调用方之前调用。
-	// 目前只有 CodeArts 用它把截断过的工具名还原成原名。
 	// 必须在第一次调用 Next 之前设置。
 	OnEvent func(*ChatEvent)
 }

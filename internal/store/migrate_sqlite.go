@@ -54,9 +54,6 @@ type accountRow struct {
 	SNTokenExp, SNPoolAt                                              int64
 	// LeaseUntil 是 v1.4 新增列；旧库没有时按 0（无在途租约）处理。
 	LeaseUntil int64
-	// 外部渠道（AutoClaw / CodeArts）共用凭据槽；旧库没有时按空值处理。
-	ExtToken, ExtRefreshToken, ExtSite, ExtExtra string
-	ExtTokenExp, ExtRefreshExp, ExtRev           int64
 }
 
 type keyRow struct {
@@ -274,11 +271,6 @@ func readAccounts(db *sql.DB) ([]accountRow, error) {
 	if !hasSN {
 		cols = removeColumnBlock(cols, snBlock)
 	}
-	hasExt := has("ext_token")
-	const extBlock = "ext_token, ext_token_exp, ext_refresh_token, ext_refresh_exp, ext_site, ext_extra, ext_rev"
-	if !hasExt {
-		cols = removeColumnBlock(cols, extBlock)
-	}
 	if !hasLease {
 		cols = removeColumnBlock(cols, "lease_until")
 	}
@@ -314,10 +306,6 @@ func readAccounts(db *sql.DB) ([]accountRow, error) {
 		if hasSN {
 			dest = append(dest, &a.SNUsername, &a.SNPassword, &a.SNToken, &a.SNTokenExp,
 				&a.SNRefreshToken, &a.SNPool, &a.SNPoolAt)
-		}
-		if hasExt {
-			dest = append(dest, &a.ExtToken, &a.ExtTokenExp, &a.ExtRefreshToken,
-				&a.ExtRefreshExp, &a.ExtSite, &a.ExtExtra, &a.ExtRev)
 		}
 		if err := rows.Scan(dest...); err != nil {
 			return nil, err
@@ -574,7 +562,7 @@ func (s *Store) insertDumpRows(ctx context.Context, tx *sql.Tx, d *sqliteDump) e
 			ph   []string
 		)
 		for _, a := range d.Accounts[i:end] {
-			ph = append(ph, "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+			ph = append(ph, "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
 			provider := a.Provider
 			if provider == "" {
 				provider = ProviderRaccoon
@@ -585,9 +573,7 @@ func (s *Store) insertDumpRows(ctx context.Context, tx *sql.Tx, d *sqliteDump) e
 				a.ClientChannel, a.Language, a.Meta, a.Priority, a.Enabled,
 				a.LastCheckinDay, a.CreatedAt, a.UpdatedAt, a.LastUsed, a.MaxConcurrent, a.LeaseUntil,
 				provider, a.SNUsername, a.SNPassword, a.SNToken, a.SNTokenExp,
-				a.SNRefreshToken, a.SNPool, a.SNPoolAt,
-				a.ExtToken, a.ExtTokenExp, a.ExtRefreshToken, a.ExtRefreshExp,
-				a.ExtSite, a.ExtExtra, a.ExtRev)
+				a.SNRefreshToken, a.SNPool, a.SNPoolAt)
 		}
 		q := `INSERT INTO accounts (` + accountCols + `) VALUES ` + joinStrings(ph, ",")
 		if _, err := s.execTx(ctx, tx, q, args...); err != nil {

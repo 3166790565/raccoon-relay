@@ -14,7 +14,7 @@ func TestKeyOf(t *testing.T) {
 		"deepseek-v4.1-flash":  "deepseekv41flash",
 		"anthropic/claude-3.5": "claude35",
 		"":                     "",
-		"autoclaw/zai_auto":    "zaiauto",
+		"zeta/some-model":      "somemodel",
 	}
 	for in, want := range cases {
 		if got := KeyOf(in); got != want {

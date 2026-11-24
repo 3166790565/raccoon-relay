@@ -169,57 +169,6 @@ func (p *Panel) handleModelCapabilities(w http.ResponseWriter, r *http.Request) 
 	p.writeModelManage(w, r)
 }
 
-// testExternalModel 是外部渠道的连通性测试：用该渠道任一可用账号拉一次
-// 实时模型清单，再看请求的模型是否在清单里。
-//
-// 这样做的原因是外部渠道没有「无副作用的探针接口」：真正发一次对话会产生
-// 计费与流水，而拉清单同样能证明「凭据有效 + 网络通 + 模型存在」。
-func (p *Panel) testExternalModel(w http.ResponseWriter, r *http.Request, provider, modelID string) {
-	modelsUp := p.externalModelSource()
-	if modelsUp == nil {
-		writeJSON(w, 400, map[string]any{"ok": false, "message": extProviderLabel(provider) + " 模型清单不可用"})
-		return
-	}
-	accounts, err := p.st.ListAccounts(r.Context())
-	if err != nil {
-		writeJSON(w, 500, map[string]any{"ok": false, "message": err.Error()})
-		return
-	}
-	var picked *store.Account
-	for _, a := range accounts {
-		if a.Provider == provider && a.Enabled && (a.ExtToken != "" || a.ExtRefreshToken != "" || a.ExtExtra != "") {
-			picked = a
-			break
-		}
-	}
-	if picked == nil {
-		writeJSON(w, 400, map[string]any{"ok": false, "message": "没有可用的" + extProviderLabel(provider) + "账号"})
-		return
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
-	defer cancel()
-	start := time.Now()
-	live := modelsUp(ctx, picked)
-	if len(live) == 0 {
-		writeJSON(w, 200, map[string]any{
-			"ok": false, "message": "上游没有返回模型清单（凭据失效或额度耗尽）",
-			"elapsedMs": time.Since(start).Milliseconds(),
-		})
-		return
-	}
-	want := strings.TrimPrefix(modelID, provider+"/")
-	for _, m := range live {
-		if strings.HasSuffix(m.ID, "/"+want) || m.ID == modelID {
-			writeJSON(w, 200, map[string]any{"ok": true, "message": "模型可用", "elapsedMs": time.Since(start).Milliseconds()})
-			return
-		}
-	}
-	writeJSON(w, 200, map[string]any{
-		"ok": false, "message": "上游清单里没有这个模型",
-		"elapsedMs": time.Since(start).Milliseconds(),
-	})
-}
-
 // handleModelTest 用指定模型发一次最小请求，验证连通性。
 // 走的是真实转发链路之外的一次直连探针，不写流水、不动账号状态。
 func (p *Panel) handleModelTest(w http.ResponseWriter, r *http.Request) {
@@ -236,12 +185,7 @@ func (p *Panel) handleModelTest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if strings.EqualFold(body.Provider, "raccoon") {
-		writeJSON(w, 400, map[string]any{"ok": false, "message": "暂只支持日日新 / AutoClaw / 码道模型的连通性测试"})
-		return
-	}
-	// 外部渠道：等价于「用该账号拉一次模型清单」，能拉到就说明凭据与网络通。
-	if body.Provider == store.ProviderAutoClaw || body.Provider == store.ProviderCodeArts {
-		p.testExternalModel(w, r, body.Provider, body.ID)
+		writeJSON(w, 400, map[string]any{"ok": false, "message": "暂只支持日日新模型的连通性测试"})
 		return
 	}
 	accounts, err := p.st.ListAccounts(r.Context())
@@ -296,50 +240,14 @@ func (p *Panel) writeModelManage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"ok": true, "view": view})
 }
 
-// externalCatalogs 把外部渠道（AutoClaw / 码道）的内置模型清单包成模型页能认的形状。
-//
-// 用内置快照而不是实时清单：模型页是给人看的配置页，不应在每次打开时
-// 替所有账号打一轮上游。实时清单在第一次转发时就会拉起并缓存。
-func (p *Panel) externalCatalogs(r *http.Request) []modelrules.ProviderCatalog {
-	var out []modelrules.ProviderCatalog
-	for _, provider := range []string{store.ProviderAutoClaw, store.ProviderCodeArts} {
-		models := relay.ExternalCatalog(provider)
-		if len(models) == 0 {
-			continue
-		}
-		items := make([]modelrules.CatalogModel, 0, len(models))
-		for _, m := range models {
-			// 外部渠道的内置快照是「这条通道」自己的事实（例如码道一律不支持
-			// 图片，它对图片回 InferHub 错误），六项都已明确声明，不能让
-			// models.dev 用实验室 API 的能力把它推翻。
-			images, tools, reason := m.SupportsImages, m.SupportsTools, m.SupportsReason
-			items = append(items, modelrules.CatalogModel{
-				ID: m.ID, Name: m.Name,
-				ContextLength: m.ContextLength, MaxOutputTokens: m.MaxOutputTokens,
-				SupportsImages: images, SupportsTools: tools, SupportsReason: reason,
-				DeclaredContext:   int64(m.ContextLength),
-				DeclaredMaxOutput: int64(m.MaxOutputTokens),
-				DeclaredImages:    &images,
-				DeclaredTools:     &tools,
-				DeclaredReason:    &reason,
-			})
-		}
-		out = append(out, modelrules.ProviderCatalog{
-			Provider: provider, Label: extProviderLabel(provider), Models: items, Source: "builtin",
-		})
-	}
-	return out
-}
-
 // modelCatalogs 把上游实时清单包成模型页的中立形状，按供应商分组。
 //
 // 只读本地 Catalog 缓存，不触发上游请求（避免管理页每次刷新都打上游）。
 // 小浣熊、日日新与外部渠道都要列出来：各自有独立的模型阵容和订阅品类，
 // 少一家就会出现「号池里有号、模型页里看不到它家的模型」。
 func (p *Panel) modelCatalogs(r *http.Request) []modelrules.ProviderCatalog {
-	ext := p.externalCatalogs(r)
 	if p.modelCatalog == nil {
-		return ext
+		return nil
 	}
 	live := p.modelCatalog.List(r.Context())
 	var sn, rc []modelrules.CatalogModel
@@ -373,8 +281,7 @@ func (p *Panel) modelCatalogs(r *http.Request) []modelrules.ProviderCatalog {
 			Provider: store.ProviderSenseNova, Label: "日日新", Models: sn, Source: "remote",
 		})
 	}
-	// 外部渠道排在最后：它们的清单是内置快照，与小浣熊/日日新的实时清单分开。
-	return append(out, ext...)
+	return out
 }
 
 func writeModelRuleError(w http.ResponseWriter, err error) {

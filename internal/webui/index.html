@@ -266,8 +266,6 @@
               <button class="on" data-v="all">全部 <b>0</b></button>
               <button data-v="raccoon">🦝 小浣熊 <b>0</b></button>
               <button data-v="sensenova">🌊 日日新 <b>0</b></button>
-              <button data-v="autoclaw">🦾 AutoClaw <b>0</b></button>
-              <button data-v="codearts">☁️ 码道 <b>0</b></button>
             </div>
             <div class="seg" id="pfStatus" role="tablist">
               <button class="on" data-v="all">全部 <b>0</b></button>
@@ -285,7 +283,7 @@
             </div>
           </div>
           <div class="pool-actions">
-            <button class="ghost" id="exportBtn" title="有勾选时只导出勾选的号；未勾选导出全部（小浣熊 + 日日新 + AutoClaw + 码道）">导出 JSON</button>
+            <button class="ghost" id="exportBtn" title="有勾选时只导出勾选的号；未勾选导出全部（小浣熊 + 日日新）">导出 JSON</button>
             <button class="ghost" id="purgeDeadBtn" title="删除所有凭证失效或订阅已过期的账号">清理失效</button>
             <button class="ghost" id="foldFiltersBtn" title="收起/展开筛选项">折叠</button>
             <button class="ghost" id="refreshListBtn">刷新账号</button>
@@ -514,8 +512,6 @@
           <button class="tab active" data-tab="paste">粘贴授权码</button>
           <button class="tab" data-tab="manual">手填令牌</button>
           <button class="tab" data-tab="sensenova">日日新账号</button>
-          <button class="tab" data-tab="autoclaw">AutoClaw</button>
-          <button class="tab" data-tab="codearts">码道 CodeArts</button>
           <button class="tab" data-tab="import">导入 JSON</button>
         </div>
 
@@ -559,47 +555,6 @@
           <div class="field"><label>备注</label><input id="snNote" placeholder="可留空"></div>
           <button class="primary" id="snAddBtn">登录并添加</button>
           <p class="msg" id="snMsg"></p>
-        </div>
-
-        <!-- AutoClaw：粘贴凭据（国际站）或手机验证码（国内站）。 -->
-        <div class="tabpane" id="pane-autoclaw">
-          <p class="hint">粘贴 magpie / OpenCode 里的 AutoClaw 登录记录
-            （<code>{"access":"…","refresh":"…","expires":…}</code>，或直接粘 access token）。
-            国际站可先填网页 OAuth 拿到的凭据；国内站可直接用手机号登录。</p>
-          <div class="field"><label>凭据 JSON 或 access token</label><textarea id="acCred" rows="3" placeholder='{"access":"…","refresh":"…"}'></textarea></div>
-          <div class="field"><label>站点</label>
-            <select id="acSite"><option value="global">国际站</option><option value="cn">国内站</option></select>
-          </div>
-          <div class="field"><label>备注名</label><input id="acName" placeholder="可留空"></div>
-          <button class="primary" id="acImportBtn">粘贴并添加</button>
-          <p class="msg" id="acMsg"></p>
-
-          <hr class="sep-line">
-          <p class="hint">国内站手机验证码登录（不填上方凭据时使用）：</p>
-          <div class="row">
-            <input id="acPhone" placeholder="手机号（1 开头 11 位，不带 +86）">
-            <button class="ghost" id="acSendCodeBtn">发送验证码</button>
-          </div>
-          <div class="row">
-            <input id="acCode" placeholder="验证码">
-            <button class="primary" id="acLoginBtn">登录并添加</button>
-          </div>
-          <p class="msg" id="acLoginMsg"></p>
-        </div>
-
-        <!-- 码道 CodeArts：粘贴插件导出的凭据 JSON。 -->
-        <div class="tabpane" id="pane-codearts">
-          <p class="hint">粘贴码道插件导出的凭据 JSON（含
-            <code>access_key_id</code>、<code>secret_access_key</code>、<code>security_token</code>、
-            <code>refresh_token</code>、<code>code_verifier</code>、<code>dpop_private_key_jwk</code>）。
-            没有续期材料也能用，但临时凭据到期后需要重新导入。</p>
-          <div class="field"><label>凭据 JSON</label><textarea id="caCred" rows="5" placeholder='{"access_key_id":"…","secret_access_key":"…","security_token":"…"}'></textarea></div>
-          <div class="field"><label>站点</label>
-            <select id="caSite"><option value="global">国际站</option><option value="cn">国内站</option></select>
-          </div>
-          <div class="field"><label>备注名</label><input id="caName" placeholder="可留空"></div>
-          <button class="primary" id="caImportBtn">导入并添加</button>
-          <p class="msg" id="caMsg"></p>
         </div>
 
         <div class="tabpane" id="pane-import">
@@ -1190,7 +1145,7 @@
           推理内容与工具参数）。上游按「连续文本」逐字识别客户端指纹，这些规则只做<b>最小改写</b>，
           让指纹失配即可，不会改动你的项目规范与工具说明。<br>
           <strong>应用提供商</strong>：留空 = 全部提供商（含之后新增的）；勾选后只对勾选的生效。
-          小浣熊、日日新与外部渠道（AutoClaw / 码道）都在出站前经过这一层。</p>
+          小浣熊与日日新都在出站前经过这一层。</p>
         <div class="divider-row">
           <span class="hint" style="margin:0">应用提供商</span>
           <span id="sanitizeProviders" class="chip-row"></span>
@@ -1286,22 +1241,6 @@
           <button id="runRenewBtn">立即续期一次</button>
         </div>
         <p class="msg" id="renewSettingsMsg"></p>
-      </section>
-
-      <section class="card">
-        <h2>外部渠道（AutoClaw / 码道）上游地址</h2>
-        <div class="grid2">
-          <div class="field"><label>AutoClaw 国际站</label><input id="setAutoClawIntlBase" placeholder="留空 = https://autoglm-api.autoglm.ai"></div>
-          <div class="field"><label>AutoClaw 国内站</label><input id="setAutoClawCNBase" placeholder="留空 = https://autoglm-api.zhipuai.cn"></div>
-          <div class="field"><label>AutoClaw 国内对话网关</label><input id="setAutoClawCNManagedBase" placeholder="留空 = https://autoglm-acceleration-api.zhipuai.cn"></div>
-          <div class="field"><label>码道国内站</label><input id="setCodeArtsMainlandBase" placeholder="留空 = https://snap-access.cn-north-4.myhuaweicloud.com"></div>
-          <div class="field"><label>码道国际站</label><input id="setCodeArtsIntlBase" placeholder="留空 = https://snap-access.ap-southeast-1.myhuaweicloud.com"></div>
-        </div>
-        <p class="hint">只有在上游改域名或你需要自建代理时才改。留空表示使用内置默认地址。
-          地址必须以 <code>http://</code> 或 <code>https://</code> 开头，不能带用户名密码、查询串或片段；
-          任何一项非法都会整条拒绝保存。保存后立即生效，重启后仍然保留。</p>
-        <button class="primary" id="saveExternalBtn">保存外部渠道设置</button>
-        <p class="msg" id="externalMsg"></p>
       </section>
 
       <section class="card">

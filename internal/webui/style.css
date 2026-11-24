@@ -967,7 +967,7 @@ td.ops button { padding: 4px 9px; font-size: 11.5px; }
 .mini-bar { display: block; height: 5px; border-radius: var(--r-pill); background: var(--surface-3); overflow: hidden; }
 .mini-bar i { display: block; height: 100%; background: var(--accent); border-radius: var(--r-pill); }
 .mini-bar.low i { background: var(--bad); }
-/* 外部渠道（AutoClaw / 码道）的额度摘要行：单行数值，没有第二个标签 */
+/* 额度摘要行：单行数值，没有第二个标签 */
 .q-row { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
 
 /* 按供应商分组 */

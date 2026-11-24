@@ -256,8 +256,7 @@ func (p *Pool) pick(ctx context.Context, model, wantProvider string,
 		}
 		// 推理凭据：小浣熊是 access_token；日日新的 API Key 存在 Token 里，
 		// 只有控制台账号密码时可以在首次转发时现场补建，所以这里允许空 Token。
-		// 外部渠道（AutoClaw / CodeArts）的凭据在 Ext* 槽里，Token 列本就为空。
-		if strings.TrimSpace(a.Token) == "" && !hasSenseNovaCreds(a) && !hasExternalCreds(a) {
+		if strings.TrimSpace(a.Token) == "" && !hasSenseNovaCreds(a) {
 			continue
 		}
 		if a.Credits == 0 && a.CreditsAt > 0 {
@@ -400,7 +399,7 @@ func (p *Pool) NextAvailableIn(ctx context.Context, model, wantProvider string, 
 		if a.Status != store.StatusOnline {
 			continue
 		}
-		if strings.TrimSpace(a.Token) == "" && !hasSenseNovaCreds(a) && !hasExternalCreds(a) {
+		if strings.TrimSpace(a.Token) == "" && !hasSenseNovaCreds(a) {
 			continue
 		}
 		// 与 Pick 的过滤保持一致：余额为 0、订阅过期、积分低于阈值不是
@@ -479,7 +478,7 @@ func (p *Pool) pickProbe(ctx context.Context, model, wantProvider string, exclud
 		if wantProvider != "" && aProvider(a) != wantProvider {
 			continue
 		}
-		if strings.TrimSpace(a.Token) == "" && !hasSenseNovaCreds(a) && !hasExternalCreds(a) {
+		if strings.TrimSpace(a.Token) == "" && !hasSenseNovaCreds(a) {
 			continue
 		}
 		if a.ExpiresAt > 0 && a.ExpiresAt <= now {
@@ -574,16 +573,6 @@ func hasSenseNovaCreds(a *store.Account) bool {
 	}
 	return (strings.TrimSpace(a.SNUsername) != "" && a.SNPassword != "") ||
 		strings.TrimSpace(a.SNToken) != ""
-}
-
-// hasExternalCreds 判断外部渠道账号是否有可用凭据（主凭据或续期材料之一）。
-func hasExternalCreds(a *store.Account) bool {
-	if !a.IsExternal() {
-		return false
-	}
-	return strings.TrimSpace(a.ExtToken) != "" ||
-		strings.TrimSpace(a.ExtRefreshToken) != "" ||
-		strings.TrimSpace(a.ExtExtra) != ""
 }
 
 func creditRank(a *store.Account) int64 {

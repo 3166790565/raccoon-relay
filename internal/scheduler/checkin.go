@@ -33,23 +33,12 @@ const (
 	tickInterval      = 60 * time.Second
 )
 
-// ExtCheckin 是外部渠道（AutoClaw / CodeArts）的签到与额度能力。
-// 由装配层按供应商注入；nil 表示该渠道不参与签到。
-type ExtCheckin interface {
-	// Checkin 返回 (ok, already, reward, message)。
-	Checkin(ctx context.Context, acc *store.Account) (bool, bool, int64, string)
-	// RefreshQuota 刷新额度并写库，返回最新余额。
-	RefreshQuota(ctx context.Context, acc *store.Account) (int64, error)
-}
-
 type Scheduler struct {
 	cfg      *config.Config
 	st       *store.Store
 	client   *raccoon.Client
 	refresh  *relay.Refresher
 	balancer *creditsync.Balancer
-	// ext 按供应商提供外部渠道的签到与额度能力。
-	ext func(provider string) ExtCheckin
 
 	mu         sync.Mutex
 	lastTick   time.Time
@@ -183,67 +172,9 @@ func (s *Scheduler) Status() map[string]any {
 	}
 }
 
-// checkinExternal 是外部渠道的签到链：凭据续期、签到、刷新额度都在渠道包里完成。
-// 这里只负责落库、熔断与运行事件。
-func (s *Scheduler) checkinExternal(ctx context.Context, a *store.Account, today, source string) bool {
-	ext := s.externalOf(a.Provider)
-	if ext == nil {
-		s.fail(ctx, a, today, "该渠道未配置签到能力", source)
-		return false
-	}
-	ok, already, reward, msg := ext.Checkin(ctx, a)
-	if !ok {
-		s.fail(ctx, a, today, msg, source)
-		return false
-	}
-
-	day := today
-	online := store.StatusOnline
-	zero := int64(0)
-	empty := ""
-	_ = s.st.UpdateAccount(ctx, a.ID, store.AccountPatch{
-		LastCheckinDay: &day, Status: &online, CoolUntil: &zero, CoolReason: &empty,
-	})
-	_ = s.st.AddCheckin(ctx, store.CheckinRecord{
-		AccountID: a.ID, Day: today, Action: "checkin", Source: source,
-		OK: true, Already: already, Credit: reward, Message: msg,
-	})
-	// 签到后顺手刷额度：奖励到账与额度变化能立刻反映到面板。
-	if _, err := ext.RefreshQuota(ctx, a); err != nil {
-		// 失败静默：额度是辅助信息，不该让签到流程因此失败。
-		_ = err
-	}
-	s.emit(store.RuntimeEvent{Level: store.LevelInfo, Component: "checkin",
-		AccountID: a.ID, Message: a.ProviderName() + " 签到成功",
-		Detail: a.Name + "：" + msg})
-	return true
-}
-
-// hasCheckinCred 判断账号是否有可用于签到的凭据。
-// 外部渠道看 Ext* 槽；小浣熊看 Token 列。
-func hasCheckinCred(a *store.Account, external bool) bool {
-	if a.IsExternal() {
-		return external && (a.ExtToken != "" || a.ExtRefreshToken != "" || a.ExtExtra != "")
-	}
+// hasCheckinCred 判断账号是否有可用于签到的凭据（小浣熊看 Token 列）。
+func hasCheckinCred(a *store.Account) bool {
 	return a.Token != ""
-}
-
-// SetExternal 注入外部渠道的签到与额度能力。
-func (s *Scheduler) SetExternal(fn func(provider string) ExtCheckin) {
-	s.mu.Lock()
-	s.ext = fn
-	s.mu.Unlock()
-}
-
-// externalOf 取某供应商的外部渠道实现。
-func (s *Scheduler) externalOf(provider string) ExtCheckin {
-	s.mu.Lock()
-	fn := s.ext
-	s.mu.Unlock()
-	if fn == nil {
-		return nil
-	}
-	return fn(provider)
 }
 
 func (s *Scheduler) sweep(ctx context.Context) {
@@ -278,9 +209,7 @@ func (s *Scheduler) sweep(ctx context.Context) {
 		if a.IsSenseNova() {
 			continue
 		}
-		// 外部渠道（AutoClaw / CodeArts）也有每日签到，但它们存在 Ext* 凭据槽里，
-		// Token 列可能为空，所以「有凭据」的判断要按供应商分开。
-		if !a.Enabled || !hasCheckinCred(a, s.externalOf(a.Provider) != nil) {
+		if !a.Enabled || !hasCheckinCred(a) {
 			continue
 		}
 		if a.LastCheckinDay == today {
@@ -341,10 +270,6 @@ func (s *Scheduler) checkinOne(ctx context.Context, a *store.Account, today stri
 	// 连续失败太多则熔断
 	if n, err := s.st.CheckinFailCount(ctx, a.ID, today, "checkin"); err == nil && n >= autoFailThreshold {
 		return false
-	}
-
-	if a.IsExternal() {
-		return s.checkinExternal(ctx, a, today, source)
 	}
 
 	token, err := s.refresh.EnsureFresh(ctx, a)
@@ -522,20 +447,6 @@ func (s *Scheduler) Onboard(ctx context.Context, accountID string) (map[string]a
 	loc := s.cfg.Location()
 	today := time.Now().In(loc).Format("2006-01-02")
 
-	// 外部渠道：新号落地先刷额度（同时会触发凭据续期），再走一次签到。
-	if acc.IsExternal() {
-		if ext := s.externalOf(acc.Provider); ext != nil {
-			if c, err := ext.RefreshQuota(ctx, acc); err == nil {
-				acc.Credits = c
-			}
-			s.checkinOne(ctx, acc, today, loc, store.CheckinSourceOnboard)
-			if fresh, err := s.st.GetAccount(ctx, acc.ID); err == nil && fresh != nil {
-				acc.LastCheckinDay, acc.Credits = fresh.LastCheckinDay, fresh.Credits
-			}
-		}
-		return map[string]any{"checkinDay": acc.LastCheckinDay, "credits": acc.Credits}, nil
-	}
-
 	// 日日新没有签到：新号落地只同步额度；同时尽量补建一枚推理 Key，
 	// 这样第一次请求就不必在转发路径上等一次建 Key。
 	if acc.IsSenseNova() {
@@ -581,12 +492,6 @@ func (s *Scheduler) RunAll(ctx context.Context) map[string]any {
 				"id": a.ID, "name": a.Name, "ok": true, "message": "日日新账号：已同步额度（无签到）",
 			})
 			done++
-			continue
-		}
-		if a.IsExternal() && s.externalOf(a.Provider) == nil {
-			results = append(results, map[string]any{
-				"id": a.ID, "name": a.Name, "ok": false, "message": a.ProviderName() + " 渠道未配置签到",
-			})
 			continue
 		}
 		ok := s.checkinOne(ctx, a, today, loc, store.CheckinSourceManual)

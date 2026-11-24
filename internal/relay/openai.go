@@ -450,7 +450,7 @@ func (s *Server) modelEntry(m raccoon.Model, id string, now int64) map[string]an
 	}
 	var rec *MetaRecord
 	if s.CapMeta != nil {
-		rec = s.CapMeta(stripProviderPrefix(id))
+		rec = s.CapMeta(id)
 	}
 	for _, key := range []string{"maxInputTokens", "maxOutputTokens", "supportsToolCall", "supportsImages", "supportsReasoning"} {
 		if v, ok := declared[key]; ok {

@@ -373,8 +373,6 @@ func (p *Panel) sanitizeProviderOptions() []map[string]any {
 	out := []map[string]any{
 		{"id": store.ProviderRaccoon, "label": "小浣熊"},
 		{"id": store.ProviderSenseNova, "label": "日日新"},
-		{"id": store.ProviderAutoClaw, "label": "AutoClaw"},
-		{"id": store.ProviderCodeArts, "label": "码道 CodeArts"},
 	}
 	sort.SliceStable(out, func(i, j int) bool {
 		return out[i]["id"].(string) < out[j]["id"].(string)

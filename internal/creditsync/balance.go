@@ -27,20 +27,12 @@ type SNBalance interface {
 	FetchUsageFor(ctx context.Context, acc *store.Account) (remaining float64, stored string, err error)
 }
 
-// ExtBalance 是外部渠道的额度查询能力，由渠道包实现。
-type ExtBalance interface {
-	RefreshQuota(ctx context.Context, acc *store.Account) (int64, error)
-}
-
 type Balancer struct {
 	ST     *store.Store
 	Client *raccoon.Client
 	Auth   Refresher
 	// SN 是日日新余额来源，nil 表示不支持日日新。
 	SN SNBalance
-	// Ext 按供应商返回外部渠道（AutoClaw / CodeArts）的额度来源；
-	// nil 或返回 nil 表示该渠道不支持查额度。
-	Ext func(provider string) ExtBalance
 	// OnUpdated 在余额写库成功后调用，用来立刻按积分阈值重算账号状态。
 	// 可选：为空时只写余额。
 	OnUpdated func(ctx context.Context)
@@ -57,16 +49,6 @@ func (b *Balancer) Refresh(ctx context.Context, acc *store.Account) (int64, erro
 	}
 	if acc.IsSenseNova() {
 		return b.refreshSenseNova(ctx, acc)
-	}
-	if acc.IsExternal() {
-		if b.Ext == nil {
-			return 0, errors.New("该渠道的额度查询未配置")
-		}
-		ext := b.Ext(acc.Provider)
-		if ext == nil {
-			return 0, errors.New("该渠道的额度查询未配置")
-		}
-		return ext.RefreshQuota(ctx, acc)
 	}
 	token, err := b.Auth.EnsureFresh(ctx, acc)
 	if err != nil {

@@ -2,8 +2,6 @@ package creds
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -45,12 +43,6 @@ type Account struct {
 	ConsoleToken   string `json:"consoleToken,omitempty"`
 	ConsoleExp     int64  `json:"consoleExp,omitempty"`
 	ConsoleRefresh string `json:"consoleRefreshToken,omitempty"`
-
-	// 外部渠道（autoclaw / codearts）共用：channel 区分供应商，
-	// site 区分国内/国际站，refreshToken 存续期材料，extra 是渠道私有 JSON
-	// （AutoClaw 的 device_id、码道的 DPoP 私钥与 code_verifier 等）。
-	Site  string `json:"site,omitempty"`
-	Extra string `json:"extra,omitempty"`
 }
 
 const (
@@ -58,8 +50,6 @@ const (
 	FormatMetadata    = "agenthub-accounts"
 	ChannelRaccoon    = "raccoon"
 	ChannelSenseNova  = "sensenova"
-	ChannelAutoClaw   = "autoclaw"
-	ChannelCodeArts   = "codearts"
 )
 
 // ImportResult 逐条回传结果，失败不影响其它条。
@@ -331,9 +321,6 @@ func (im *Importer) importOne(ctx context.Context, a Account) ImportResult {
 	if a.Channel == ChannelSenseNova {
 		return im.importSenseNova(ctx, a)
 	}
-	if a.Channel == ChannelAutoClaw || a.Channel == ChannelCodeArts {
-		return im.importExternal(ctx, a)
-	}
 	if a.Channel != "" && a.Channel != ChannelRaccoon {
 		return ImportResult{Message: "渠道不是 raccoon，已跳过"}
 	}
@@ -543,119 +530,6 @@ func (im *Importer) importSenseNova(ctx context.Context, a Account) ImportResult
 	return ImportResult{OK: true, UID: uid, ID: acc.ID}
 }
 
-// importExternal 导入 AutoClaw / CodeArts 账号。
-//
-// 只写库、不联网：凭据续期由转发路径的 EnsureCredential 负责，导入时再打一次
-// 上游只会多一次失败机会。按「供应商 + uid」去重，重复导入只更新凭据。
-func (im *Importer) importExternal(ctx context.Context, a Account) ImportResult {
-	provider := a.Channel
-	if provider != ChannelAutoClaw && provider != ChannelCodeArts {
-		return ImportResult{Message: "未知的外部渠道，已跳过"}
-	}
-	uid := strings.TrimSpace(a.UID)
-	token := strings.TrimSpace(a.Token)
-	extra := strings.TrimSpace(a.Extra)
-	if extra == "" {
-		extra = token // 允许把整段凭据 JSON 直接粘进 token 字段
-	}
-	if token == "" && strings.TrimSpace(a.RefreshToken) == "" && extra == "" {
-		return ImportResult{Message: "外部渠道账号缺少凭据，已跳过"}
-	}
-	if uid == "" {
-		uid = uidFromExtra(extra)
-	}
-	if uid == "" {
-		uid = "ext-" + randomUIDSuffix()
-	}
-	site := strings.TrimSpace(a.Site)
-	if site == "" {
-		site = store.StationGlobal
-	}
-
-	existing, err := im.ST.GetByProviderUID(ctx, provider, uid)
-	if err != nil {
-		return ImportResult{UID: uid, Message: "查询失败: " + err.Error()}
-	}
-	name := strings.TrimSpace(a.Name)
-	if name == "" {
-		name = a.Channel + " 账号"
-	}
-	exp := a.TokenExp
-	if existing != nil {
-		patch := store.AccountPatch{
-			ExtToken:        &token,
-			ExtTokenExp:     &exp,
-			ExtRefreshToken: &a.RefreshToken,
-			ExtSite:         &site,
-			ExtExtra:        &extra,
-		}
-		if name != "" {
-			patch.Name = &name
-		}
-		if a.Note != "" {
-			patch.Note = &a.Note
-		}
-		if a.Credits >= 0 {
-			patch.Credits = &a.Credits
-		}
-		if err := im.ST.UpdateAccount(ctx, existing.ID, patch); err != nil {
-			return ImportResult{UID: uid, Message: "更新失败: " + err.Error()}
-		}
-		return ImportResult{OK: true, UID: uid, ID: existing.ID, Updated: true}
-	}
-
-	meta := a.Meta
-	if meta == nil {
-		meta = map[string]any{}
-	}
-	if _, ok := meta["source"]; !ok {
-		meta["source"] = "import"
-	}
-	acc := &store.Account{
-		UID:             uid,
-		Name:            name,
-		Note:            a.Note,
-		Provider:        provider,
-		ExtToken:        token,
-		ExtTokenExp:     exp,
-		ExtRefreshToken: a.RefreshToken,
-		ExtSite:         site,
-		ExtExtra:        extra,
-		Credits:         -1,
-		Status:          store.StatusOnline,
-		Language:        "zh",
-		Meta:            meta,
-		Enabled:         a.Enabled == nil || *a.Enabled,
-	}
-	if a.Credits >= 0 {
-		acc.Credits = a.Credits
-	}
-	if err := im.ST.CreateAccount(ctx, acc); err != nil {
-		return ImportResult{UID: uid, Message: "入库失败: " + err.Error()}
-	}
-	return ImportResult{OK: true, UID: uid, ID: acc.ID}
-}
-
-// uidFromExtra 从渠道私有 JSON 里取一个稳定的账号标识。
-func uidFromExtra(extra string) string {
-	var m map[string]any
-	if json.Unmarshal([]byte(extra), &m) != nil {
-		return ""
-	}
-	for _, key := range []string{"uid", "user_id", "domain_id", "account_id", "principal_urn"} {
-		if s, ok := m[key].(string); ok && strings.TrimSpace(s) != "" {
-			return strings.TrimSpace(s)
-		}
-	}
-	return ""
-}
-
-func randomUIDSuffix() string {
-	b := make([]byte, 6)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
-}
-
 // Export 读全池生成与桌面版同格式的 JSON。导出明文 token（与桌面版行为一致）。
 //
 // 两种供应商都导出：小浣熊行与桌面版逐字段对齐，日日新行额外带控制台账号密码
@@ -717,16 +591,6 @@ func exportOne(a *store.Account) Account {
 		out.ConsoleExp = a.SNTokenExp
 		out.ConsoleRefresh = a.SNRefreshToken
 		out.TokenExp = 0
-	}
-	if a.IsExternal() {
-		// 外部渠道的凭据全在 Ext* 槽里：Token 存主凭据，RefreshToken 存续期材料，
-		// Extra 是渠道私有 JSON。导出后原样导入即可继续自动续期。
-		out.Channel = a.Provider
-		out.Site = a.ExtSite
-		out.Token = a.ExtToken
-		out.TokenExp = a.ExtTokenExp
-		out.RefreshToken = a.ExtRefreshToken
-		out.Extra = a.ExtExtra
 	}
 	return out
 }
